@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.config import get_settings
+from app.db.session import get_engine
 from app.observability.logging import configure_logging
 
 logger = structlog.get_logger()
@@ -19,12 +20,14 @@ logger = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Validate settings (fail-fast) and configure structured logging on startup."""
+    """Validate settings (fail-fast), configure logging, dispose engine on shutdown."""
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info("app_starting", log_level=settings.log_level)
     yield
     logger.info("app_stopping")
+    # Close the connection pool. Cheap if the engine was never actually used.
+    await get_engine().dispose()
 
 
 app = FastAPI(title="DC Inventory Backend", version="0.1.0", lifespan=lifespan)

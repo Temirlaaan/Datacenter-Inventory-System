@@ -79,6 +79,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]

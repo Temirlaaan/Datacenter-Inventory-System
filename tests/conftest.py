@@ -16,10 +16,13 @@ _APP_ENV_KEYS = (
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Function-scoped: clear app env vars and the get_settings() cache before each test."""
+    """Function-scoped: clear app env vars and the cached factories before each test."""
     for key in _APP_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
     from app.config import get_settings
+    from app.db.session import get_engine, get_sessionmaker
 
     get_settings.cache_clear()
+    get_engine.cache_clear()
+    get_sessionmaker.cache_clear()

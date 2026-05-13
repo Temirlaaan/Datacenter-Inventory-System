@@ -11,6 +11,7 @@ def test_app_packages_import() -> None:
     import app.api.v1
     import app.auth
     import app.db
+    import app.db.models
     import app.domain
     import app.netbox
     import app.observability
@@ -22,6 +23,7 @@ def test_app_packages_import() -> None:
     assert app.api.v1 is not None
     assert app.auth is not None
     assert app.db is not None
+    assert app.db.models.Base is not None
     assert app.domain is not None
     assert app.netbox is not None
     assert app.observability is not None
