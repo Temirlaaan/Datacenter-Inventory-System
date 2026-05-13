@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, HttpUrl, PostgresDsn, SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_REALM_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")
 
 
 def _resolve_secrets_dir() -> str | None:
@@ -48,6 +51,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"DATABASE_URL must use postgresql+asyncpg:// driver "
                 f"(SQLAlchemy 2.0 async requires it); got scheme={v.scheme!r}"
+            )
+        return v
+
+    @field_validator("keycloak_realm")
+    @classmethod
+    def _validate_realm(cls, v: str) -> str:
+        # Realm name flows into keycloak_issuer / jwks_url. Reject anything that
+        # would produce a malformed URL — fail fast at startup, not at first JWKS fetch.
+        if not _REALM_NAME_RE.fullmatch(v):
+            raise ValueError(
+                f"KEYCLOAK_REALM must match [A-Za-z0-9_-]+ "
+                f"(Keycloak realm naming rules); got {v!r}"
             )
         return v
 

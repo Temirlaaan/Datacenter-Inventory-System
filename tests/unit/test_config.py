@@ -116,3 +116,35 @@ def test_settings_computed_keycloak_issuer_and_jwks_url(
     s = Settings()
     assert s.keycloak_issuer == "https://sso-ttc.t-cloud.kz/realms/prod-v1"
     assert s.jwks_url == "https://sso-ttc.t-cloud.kz/realms/prod-v1/protocol/openid-connect/certs"
+
+
+def test_settings_empty_realm_raises(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("KEYCLOAK_REALM", "")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "realm" in str(exc.value).lower()
+
+
+def test_settings_realm_with_slash_raises(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("KEYCLOAK_REALM", "prod/v1")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "realm" in str(exc.value).lower()
+
+
+def test_settings_realm_with_whitespace_raises(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("KEYCLOAK_REALM", "prod v1")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "realm" in str(exc.value).lower()

@@ -41,7 +41,17 @@ async def request_id_middleware(request: Request, call_next: RequestResponseEndp
         path=request.url.path,
     )
     start = time.monotonic()
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Log latency + exc_info for failures, then re-raise so FastAPI's exception
+        # handler returns the 500. Without this the request_completed line is missing
+        # for any failed request, breaking observability of error paths.
+        logger.exception(
+            "request_failed",
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
     response.headers["X-Request-ID"] = req_id
     logger.info(
         "request_completed",
