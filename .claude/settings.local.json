@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -p DC_Inventory_ToR_v3.docx word/document.xml)",
+      "Bash(ls -la /home/temir/.claude/projects/-home-temir-Desktop-Datacenter-inventory-system/memory/ 2>/dev/null; echo \"---\"; ls /home/temir/.claude/CLAUDE.md /home/temir/CLAUDE.md 2>/dev/null; echo \"---\"; ls \"/home/temir/Desktop/Datacenter inventory system/CLAUDE.md\" 2>/dev/null)",
+      "Read(//home/temir/.claude/**)",
+      "Bash(mkdir -p \"/home/temir/Desktop/Datacenter inventory system/backend/app/auth\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/netbox\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/api/v1\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/web\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/db\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/domain\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/services\" \"/home/temir/Desktop/Datacenter inventory system/backend/app/observability\" \"/home/temir/Desktop/Datacenter inventory system/backend/tests/unit\" \"/home/temir/Desktop/Datacenter inventory system/backend/tests/integration\" \"/home/temir/Desktop/Datacenter inventory system/backend/tests/contract\" && ls -la \"/home/temir/Desktop/Datacenter inventory system/backend/\")",
+      "Bash(uv --version)",
+      "Read(//home/temir/.local/bin/**)",
+      "Read(//home/temir/.cargo/bin/**)",
+      "Bash(/home/temir/.miniforge3/bin/python -m pip install --user uv)",
+      "Read(//home/temir/.miniforge3/bin/**)",
+      "Bash(/home/temir/.miniforge3/bin/uv --version)",
+      "Bash(/home/temir/.miniforge3/bin/python -m site --user-base)",
+      "Bash(/home/temir/.local/bin/uv --version)",
+      "Bash(/home/temir/.local/bin/uv sync *)",
+      "Bash(/home/temir/.local/bin/uv run *)",
+      "Bash(git config *)",
+      "Bash(mkdir -p /tmp/dcinv_task2_save)",
+      "Bash(cp app/config.py /tmp/dcinv_task2_save/config.py)",
+      "Bash(cp app/main.py /tmp/dcinv_task2_save/main.py)",
+      "Bash(cp pyproject.toml /tmp/dcinv_task2_save/pyproject.toml)",
+      "Read(//tmp/**)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(cp /tmp/dcinv_task2_save/config.py app/config.py)",
+      "Bash(cp /tmp/dcinv_task2_save/main.py app/main.py)",
+      "Bash(cp /tmp/dcinv_task2_save/pyproject.toml pyproject.toml)",
+      "Bash(export NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=demo KEYCLOAK_BASE_URL=https://sso.example.com DATABASE_URL='postgresql+asyncpg://u:p@localhost/db')",
+      "Bash(docker compose *)",
+      "Bash(export NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=demo KEYCLOAK_BASE_URL=https://sso.example.com DATABASE_URL='postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test')",
+      "Bash(docker exec *)",
+      "Bash(uv run *)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest tests/integration/ -q)",
+      "Bash(uv pip *)",
+      "Bash(uv tree *)",
+      "Bash(uv sync *)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest --cov=app --cov-report=term-missing)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest --cov=app --cov-report=term)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest tests/integration/test_health.py -v)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest tests/integration/test_health.py)",
+      "Bash(DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com uv run pytest)",
+      "Bash(chmod +x \"/home/temir/Desktop/Datacenter inventory system/backend/scripts/entrypoint.sh\")"
+    ],
+    "additionalDirectories": [
+      "/home/temir/Desktop/Datacenter inventory system/backend/app"
+    ]
+  }
+}
