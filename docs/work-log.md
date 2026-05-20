@@ -183,3 +183,125 @@ DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_tes
 - `backend/tests/integration/{test_migrations,test_repositories,test_idempotency,test_generation,test_lookup}.py`
 
 ---
+
+## Sprint 3 — Device Read & Update (closed 2026-05-20)
+
+**Status:** Closed. Tasks 1–7 complete.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 1 | NetBox write client: `patch`/`post`/`options` + 10s write timeout + 501 non-retry; `_send` generalized to carry JSON body + per-request timeout |
+| 2 | `NetBoxWriteService.patch_with_attribution`: re-read + compare + PATCH + journal POST + audit row, all sharing one `request_id`; `WriteConflictError` carrying current state |
+| 3 | `TTLCache` (generic in-process TTL, injectable clock); `MetaLookupService` + `GET /api/v1/meta/{sites,racks,statuses}` cached 5 min; statuses discovered via `OPTIONS /api/dcim/devices/` |
+| 4 | Server-driven form: `app/services/forms/device_edit.yaml` + `DeviceFormConfig` (skeleton-typed, `extra="allow"`); `GET /api/v1/meta/device-form` |
+| 5 | `DeviceService.get_device` + `GET /api/v1/devices/{id}` returning `DeviceResponse {data, version}`; global `NetBoxNotFound → 404` and `NetBoxClientError → 502` exception handlers in `main.py` |
+| 6 | `DeviceUpdateRequest` + `to_netbox_changes`; `PATCH /api/v1/devices/{id}` driven by Task 2's `NetBoxWriteService`; local `WriteConflictError → 409` with `current_state` as `DeviceData` |
+| 7 | Acceptance + close-out (this entry) |
+
+### Quality bar at close
+
+- **336 tests** (unit + integration), **100% line + branch coverage** across `app/` (1168 statements, 118 branches)
+- ruff + black + mypy clean
+- Stack runs unchanged via `docker compose up -d --build`; the migration chain from Sprint 2 is unchanged (Sprint 3 added no migrations — the device read/update use NetBox as the source of truth and only write to the existing `audit_log` table)
+
+### Pyproject deviations from baseline
+
+1. **New dependency `pyyaml` (`>=6.0,<7`)** — added in Task 4. Architecture §5
+   and Sprint 3 decision E specify the server-driven device-edit form as a YAML
+   file; the stack had no YAML parser. User approved adding `pyyaml` rather than
+   switching the format to stdlib TOML. No first-party type stubs, so a mypy
+   `module = "yaml.*"` override treats it as untyped — same call as `jose.*`
+   (Sprint 1 deviation 3).
+
+### Architectural decisions worth carrying forward
+
+- **Global NetBox exception handlers in `main.py`.** `@app.exception_handler(NetBoxNotFound) → 404` and `@app.exception_handler(NetBoxClientError) → 502`. FastAPI's MRO dispatch picks the right one. Retrofits every NetBox-calling endpoint (meta + devices) uniformly — handlers stay thin, no per-endpoint try/except.
+- **`endpoint-orchestrates-inline` for writes; thin service classes for reads.** `update_device` builds `NetBoxWriteService` per-request from the session (mirroring `batches.py::create_batch`); `read_device` delegates to a `DeviceService` built from the singleton client. Avoids inventing a `DeviceUpdateService` class.
+- **`to_device_data` + `to_netbox_changes` as paired public module-level transforms** in `app/services/device.py`. Used by the read endpoint (response shaping), the update endpoint (request → NetBox PATCH body), and the 409 handler (current state shaping).
+- **`extra="forbid"` on `DeviceUpdateRequest`** — typos like `serial_number` vs `serial` 422 instead of being silently dropped.
+- **`extra="allow"` on `FormField`** — server-driven form's field-specific keys (`choices_endpoint`, `confirmation`, `depends_on`, …) pass through to the mobile client untouched; the backend never hardcodes field-level structure (CLAUDE.md #5).
+- **Decisions A/B/C captured in `sprint-3.md` and applied uniformly.** A: re-read-and-compare for conflict detection (no `If-Unmodified-Since` to NetBox); B: NetBox-write-first, journal + audit best-effort with loud logs; C: `session_id` from the JWT `sid` claim. The Sprint 4 bind/retire/decommission writes inherit these.
+- **`NetBoxWriteService.patch_with_attribution` is generic over any NetBox object PATCH** — Sprint 4's bind/retire/decommission writes reuse it without modification.
+- **`_reset_netbox_client` in `tests/unit/api/v1/conftest.py`.** Closes the singleton-event-loop leak Sprint 1's work log warned about ("Watch for this in Sprint 2 when more singletons land"). The api/v1 `_truncate` now aclose+clears `get_netbox_client` (with `contextlib.suppress(Exception)` for robustness) at setup and teardown, so any future api/v1 test that touches NetBox stays clean.
+- **`clean_env` clears `get_meta_cache` too** — added in Task 3 when the meta cache singleton landed. Same pattern Sprint 1 used for the other lru-cached singletons.
+- **`OPTIONS /api/dcim/devices/`** for statuses discovery (per `parking-lot.md`'s "discovered dynamically from NetBox"). Required adding `client.options()` to the NetBox client (Task 3); reuses `_send`'s retry + 5s read timeout.
+
+### Sprint 3 retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all 7 tasks — every plan was presented, approved, executed, and reviewed without scope drift.
+- TDD with failure-mode counterparts caught real issues. The mid-sprint `/code-review` after Task 5 flagged M1 (a missing `last_updated` would have bypassed the FAILURE audit row, contradicting decision B's "every outcome produces an audit row" guarantee) and L1 (a leaked-from-dead-loop `aclose` could leave the conftest's cache populated). Both folded cleanly into Task 6 with a failure-mode test for M1.
+- The `endpoint-tests-by-direct-await` memory from Sprint 2 was applied immediately. Tasks 3, 5, 6 all needed direct-`await` handler tests for coverage — and Task 5 surfaced that `main.py`'s NetBox exception handlers themselves need direct-`await` tests (coverage.py doesn't trace handler bodies run through Starlette's exception middleware, exactly like the Sprint 2 finding for endpoint handlers driven through the ASGI stack).
+- The singleton-pollution failure (a `test_get_device_service_builds_a_device_service` leaking `get_netbox_client` → next test's `clean_env` doing `asyncio.run(aclose())` → pytest-asyncio's loop machinery breaking on "no current event loop") was diagnosed end-to-end and fixed in the right place — the api/v1 conftest, not the individual test — closing the latent issue Task 3's `test_meta.py` had quietly avoided through alphabetical test ordering.
+- 100% line + branch coverage held across all 6 work tasks (1–6). No `# pragma: no cover`.
+
+**What slowed us down:**
+- The test Postgres container kept stopping (tmpfs ephemeral on Docker daemon restarts) — had to recreate it multiple times during the sprint. Friction, not a blocker.
+- The command sandbox blocked TCP connections to localhost, so every DB-touching test run needed `dangerouslyDisableSandbox`. This also corrected a wrong assertion in the Task 1 close-out: 35 `tests/unit/api/v1/` "errors" I'd flagged as pre-existing were actually sandbox + a junk `DATABASE_URL` I'd passed; the full 336-test suite passes cleanly with the real DB.
+- The pytest-asyncio "no current event loop" trace took a few minutes to thread back through `clean_env`'s `asyncio.run`. Worth keeping in mind: `asyncio.run` in 3.12 sets the current event loop to `None` on exit, and any subsequent `asyncio.get_event_loop()` (including pytest-asyncio's internal `_get_event_loop_no_warn`) raises. The Sprint 1 work-log warning about lru-cached singleton event-loop binding was concretely correct.
+- The IDE wrong-interpreter-path issue from Sprints 1/2 continued — false "module not found" diagnostics on every edit. Harmless, ignored as before.
+
+**Discrepancies between ToR / Architecture and what we shipped:**
+- `Architecture_Overview.md` §5.1's example shows rack `depends_on: ["site", "location"]`, but decision F's MVP field set has no Location field. The shipped YAML uses `depends_on: [site]` only. The Architecture example is illustrative, not normative — flag for a docs sweep alongside any future ToR edit.
+- `asset_tag` mapping: the YAML and the read parser use `custom_fields.asset_tag` per Architecture §5.1's example. NetBox devices also have a *native* `asset_tag` field. **Operations must confirm which one is canonical against the deployed NetBox before Task 6's PATCH writes to the wrong field at runtime.** Flagged in the YAML comment.
+- `/meta/statuses` OPTIONS-based discovery (parsing `actions.POST.status.choices` with `value`/`display` keys) is unverified against the deployed NetBox version. Standard NetBox 3.x/4.x shape; respx tests confirm the parsing.
+- ToR §4.3.3's device-screen field set (Identity / Location / Operational / Custom Fields / QR ID) is richer than Task 5's `GET /api/v1/devices/{id}` returns. Sprint 3 scope-limited the response to the editable fields + version (which is what Task 6's update needs to pre-fill the form); the full device-screen set ships with Sprint 4's combined QR+device response, consistent with `sprint-3.md`'s scope boundary.
+
+**Deliberately deferred (carried into Sprint 4+):**
+- QR `bind` / `retire` (free→bound transition in the same transaction as the NetBox write; bound→retired on device decommission) — Sprint 4.
+- Device decommission (status → `Decommissioning`, retire bound QR) — Sprint 4; **also gated on a NetBox config dependency** (the additional device statuses) per `docs/parking-lot.md`.
+- Device creation (`POST /api/v1/devices/`) — Sprint 4.
+- Add-comment endpoint (`POST /api/v1/devices/{id}/comments` — a NetBox journal POST without a device PATCH) — Sprint 4.
+- Combined QR+device response — extending `GET /api/v1/qr/{id}` to fetch the bound device from NetBox and return the full ToR §4.3.3 device-screen field set in one call — Sprint 4.
+- `shift_sessions` table + `POST /api/v1/sessions/{start,end}` — later sprint.
+- NetBox circuit breaker (Architecture §3.3) — deferred (decision D).
+- PDF label generation + web admin — later sprints.
+- `GET /api/v1/admin/audit` query endpoint — Sprint 4+ when there's a use case.
+- Idempotency-key TTL cleanup job — pre-existing deferral from Sprint 2.
+- Architecture §5.1 example update (drop `location` from rack `depends_on`) — docs sweep.
+- Phase 2 alerting on three-record partial failures — already in `docs/parking-lot.md` (added in Task 2). Decision B accepts journal/audit failures as best-effort-logged; production must surface them.
+- **Manual smoke against real Keycloak / NetBox** — skipped (no reachable instances in this environment, same as Sprints 1/2). The respx-mocked unit tests + real-Postgres integration tests cover the device read + update round-trip including conflict detection and audit-row landing.
+
+### Files added in Sprint 3 (high-level)
+
+- `backend/app/services/{cache,meta,netbox_write,device_form,device}.py`
+- `backend/app/services/forms/device_edit.yaml`
+- `backend/app/api/v1/{meta,devices}.py`
+- `backend/tests/unit/services/{test_cache,test_meta,test_netbox_write,test_device_form,test_device}.py`
+- `backend/tests/unit/api/v1/{test_meta,test_devices}.py`
+- `backend/tests/integration/{test_netbox_write,test_devices}.py`
+
+### Files modified in Sprint 3
+
+- `backend/app/netbox/client.py` — added `patch`/`post`/`options`; generalized `_send` to carry JSON body + per-request timeout; 501 non-retry
+- `backend/app/main.py` — meta + devices router registrations; `NetBoxNotFound`/`NetBoxClientError` exception handlers
+- `backend/app/api/v1/meta.py` — `device-form` endpoint added in Task 4 (it was a Task 3 file extended in Task 4)
+- `backend/tests/conftest.py` — `clean_env` clears `get_meta_cache` too
+- `backend/tests/unit/api/v1/conftest.py` — `_reset_netbox_client` aclose+clear in `_truncate` (Task 5), `contextlib.suppress(Exception)` (Task 6 tidy)
+- `backend/tests/unit/netbox/test_client.py` — write-method tests + `options` tests
+- `backend/pyproject.toml` — `pyyaml` dep + mypy `yaml.*` override
+- `backend/uv.lock` — auto-updated by `uv add pyyaml`
+- `docs/sprint-3.md` — per-task plans filled in (was "TBD" at sprint start)
+- `docs/parking-lot.md` — Phase 2 alerting on three-record partial failures (added in Task 2 context)
+
+### How to run locally (close-of-sprint snapshot)
+
+Same as Sprint 1/2:
+
+```bash
+cd backend
+cp .env.example .env   # fill in real values
+docker compose up -d --build
+curl localhost:8000/health
+docker compose down -v
+```
+
+Tests:
+```bash
+docker compose -f docker-compose.test.yml up -d
+DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test \
+  NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com \
+  uv run pytest --cov=app --cov-branch
+```
