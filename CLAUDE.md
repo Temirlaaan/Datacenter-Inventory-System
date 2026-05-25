@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-Sprint 3 (Device Read & Update) closed 2026-05-20. The `backend/` directory contains a runnable FastAPI service with auth, async DB + Alembic, NetBox read+write client, `/health`, and a docker-compose stack. Business surface so far: Sprint 2's QR registry (`POST /api/v1/admin/batches/`, `GET /api/v1/admin/batches/{id}`, `GET /api/v1/qr/{id}`); Sprint 3's device read + update (`GET`/`PATCH /api/v1/devices/{id}`) on top of a three-record-write apparatus with optimistic concurrency, NetBox static lookups behind a 5-minute cache (`GET /api/v1/meta/{sites,racks,statuses}`), and the server-driven device-edit form config (`GET /api/v1/meta/device-form`). Still to come — QR `bind`/`retire`, device decommission/create, add-comment, the combined QR+device read, PDF labels, and the web admin all land in Sprint 4+.
+Sprint 4 (QR Lifecycle Completion) closed 2026-05-24. The `backend/` directory contains a runnable FastAPI service with auth, async DB + Alembic, NetBox read+write client, `/health`, and a docker-compose stack. Business surface so far: Sprint 2's QR registry (`POST /api/v1/admin/batches/`, `GET /api/v1/admin/batches/{id}`); Sprint 3's device read + update (`GET`/`PATCH /api/v1/devices/{id}`) on the three-record-write apparatus, plus NetBox static lookups behind a 5-minute cache (`GET /api/v1/meta/{sites,racks,statuses}`) and the server-driven device-edit form config (`GET /api/v1/meta/device-form`); Sprint 4's QR lifecycle — `POST /api/v1/qr/{id}/bind` (role `dcinv-mobile-user`) and `POST /api/v1/qr/{id}/retire` (role `dcinv-admin`) with atomic free→bound and bound→retired transitions plus explicit three-branch compensation (clear/restore conditional and idempotent), and the combined `GET /api/v1/qr/{id}` returning QR + bound-device in one call (response shape changed from Sprint 2's flat shape — see work-log). Still to come — device decommission/create, add-comment, PDF labels, and the web admin all land in Sprint 5+.
 
 - `Architecture_Overview.md` — the technical *how*...
 - `DC_Inventory_ToR_v3.docx` — the formal Terms of Reference...
 - `docs/sprint-1.md` — Sprint 1 plan (delivered)
 - `docs/sprint-2.md` — Sprint 2 plan (delivered)
 - `docs/sprint-3.md` — Sprint 3 plan (delivered)
+- `docs/sprint-4.md` — Sprint 4 plan (delivered)
 - `docs/work-log.md` — running log of what shipped, what was deferred, and per-sprint retrospectives. **Authoritative for sprint history.**
 
 The two design docs (Architecture + ToR) are deliberately split: any change to architecture should be checked against the ToR's acceptance criteria, and vice versa.

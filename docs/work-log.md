@@ -305,3 +305,127 @@ DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_tes
   NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com \
   uv run pytest --cov=app --cov-branch
 ```
+
+---
+
+## Sprint 4 — QR Lifecycle Completion (closed 2026-05-24)
+
+**Status:** Closed. Tasks 1–4 complete.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 1 | QR bind: `QRLifecycleService.bind` with **sequential** transactions (pre-check tx → `patch_with_attribution` (audit tx) → FOR UPDATE + qr_codes UPDATE tx) and explicit **three-branch compensation** (Branch 1 happy / Branch 2 rolled-back / Branch 3 inconsistency). Compensation is **conditional + idempotent** (GET the device first; only PATCH if it shows our token). Compensation events land in `audit_log` with `after_json.failure_stage ∈ {"db_commit","compensation"}` and `compensation_outcome ∈ {"cleared","noop_different_qr","failed"}` — no `AuditResult` enum expansion, no migration. `POST /api/v1/qr/{qr_id}/bind` (role `dcinv-mobile-user`), returns combined `QRLookupResponse`. New repo methods: `QRCodeRepository.get_by_id_for_update` + `update` (non-wrapped IntegrityError so the orchestration distinguishes `qr_one_per_device` races) |
+| 2 | QR retire: `QRLifecycleService.retire` with branched FREE / BOUND paths. FREE→RETIRED is pure DB (atomic SUCCESS audit row). BOUND→RETIRED clears `custom_fields.qr_id` via `patch_with_attribution` and reuses the same three-branch compensation in reverse (`_compensate_restore_qr`). `POST /api/v1/qr/{qr_id}/retire` (role `dcinv-admin` — decision I; destructive op, safer default than mobile-user). Compensation helpers (`_run_compensation`, `_best_effort_compensation_audit`, `_best_effort_inconsistency_journal`) parameterized to accept `operation` — one set serves both bind and retire (decision B uniform — "don't fragment the apparatus") |
+| 3 | Combined QR+device response: `DeviceData` extended additively (`device_type`, `manufacturer`, `device_role`, `u_height`, `primary_ip4`, `primary_ip6`, `last_updated`, `qr_id` from app DB per decision H, filtered `custom_fields`). `to_device_data(device, *, qr_id=None)` with defensive `.get()` extraction. New `DeviceService.get_device_raw` returns raw NetBox dict so the combined response can inject the app-DB `qr_id`. `QRLookupService.get_by_id` returns `QRLookupResponse` (was `QRLookupResult`); soft-fails NetBox device fetch (`device_error="device_unavailable"`) per decision D. `GET /api/v1/qr/{qr_id}` switched to `response_model=QRLookupResponse` via the new `get_lookup_service` FastAPI dependency. **Wire-format breaking change** — see "Discrepancies" below |
+| 4 | Acceptance + close-out (this entry) |
+
+### Quality bar at close
+
+- **460 tests** (Sprint 3 closed at 336; Sprint 4 added 124 net new), **100% line + branch coverage** across `app/` (1461 statements, 158 branches)
+- ruff + black + mypy clean
+- Migration chain unchanged (Sprint 4 added no migrations — every NetBox state transition rides on the existing `audit_log` table; the `failure_stage` discriminator lives in `after_json` JSONB)
+
+### Pyproject deviations from baseline
+
+**None.** No new dependencies, no version bumps.
+
+### Architectural decisions worth carrying forward
+
+- **Three-branch compensation pattern** (Architecture §4 + cross-cutting decision A): GET-then-conditionally-PATCH compensation, with three explicit outcomes (cleared/restored / no-op / failed). Captured in audit_log via `after_json.failure_stage`, avoiding enum expansion. Symmetric for bind (clear) and retire (restore); the same `_run_compensation` helper serves both via the `compensate_fn` + `operation` parameters.
+- **Sequential transactions, not nested.** `patch_with_attribution` already owns its audit-row `session.begin()` (Sprint 3 decision). SQLAlchemy 2.0 async sessions can't nest `session.begin()`, and the user's "don't fragment the apparatus" call rules out refactoring `patch_with_attribution`. Solution: `bind` and `retire` open a Step A pre-check tx (read-only), then call `patch_with_attribution` (which opens its own audit tx), then open a Step C tx for the FOR UPDATE + qr_codes UPDATE. Three sequential txs, no nesting, no apparatus fragmentation.
+- **`patch_with_attribution` gained an `entity_id: str | None = None` parameter.** Sprint 3 hardcoded `entity_id = str(netbox_object_id)`, which broke for `qr.bind` / `qr.retire` (where the audited entity is the QR token, not the device ID). Backward-compatible default preserves Sprint 3 behaviour.
+- **`patch_with_attribution`'s journal + audit row stay best-effort, uniformly.** Decision B applies across bind and retire — no per-call-site override. The QR row in `qr_codes` is the source of truth for the binding; the regular-flow audit row duplicates it; an audit-write failure must not break the primary op.
+- **Compensation never goes through `patch_with_attribution`.** The compensation PATCH is a direct `netbox_client.patch()` — routing it through the apparatus would write a misleading second journal entry attributing the compensation as a regular bind/retire. Branch 3 writes its own structured "INCONSISTENCY: ..." journal entry with `kind="danger"`.
+- **`RuntimeError` over `assert` for defensive guards** (Sprint 1 M3 pattern, extended to Sprint 4): `session.in_transaction()` check, BOUND-without-`bound_to_device_id` check. Asserts get stripped by `python -O`; runtime checks survive.
+- **`QRCodeRepository.update` does NOT wrap `IntegrityError`** (deliberate divergence from `bulk_insert`). The bind orchestration needs to catch the `qr_one_per_device` partial unique index violation specifically — wrapping in `RepositoryError` would erase the type information.
+- **`bound_to_device_id` is preserved on BOUND→RETIRED** (Sprint 2 domain design — "Historical bound_* fields are preserved on a BOUND -> RETIRED transition so audit/forensics can trace prior ownership"). The `qr_one_per_device` partial unique index only constrains `status='bound'` rows, so this is safe. Caught by an integration-test assertion that initially asserted the wrong thing.
+- **`get_lookup_service` FastAPI dependency** (Task 3, mirrors Sprint 3's `get_write_service` / Task 1's `get_lifecycle_service`). Endpoint tests stub the whole service via `app.dependency_overrides[get_lookup_service]` instead of seeding a real Postgres+respx scenario for every assertion.
+- **Defensive `.get()` chains in `to_device_data`** for the Task 3 additions, so Sprint 3 test fixtures (which carry only the editable-field subset) continue to work additively. NetBox shape assumptions flagged in `docs/parking-lot.md` for production verification.
+- **Compensation audit row uses `result=AuditResult.FAILURE`** with `after_json.failure_stage` as the discriminator. Avoids expanding the `AuditResult` Postgres enum (which would require a migration). Compensation event counts can be queried later via the JSONB column.
+- **Two real bugs caught by integration tests that unit-test fakes didn't model:**
+  - SQLAlchemy 2.0 **autobegin**: the pre-check `get_by_id` autobegins a transaction that conflicts with `patch_with_attribution`'s explicit `session.begin()`. Fix: wrap the pre-check in its own explicit `session.begin()` (closes the autobegun tx cleanly). Fake session updated to model the pre-check commit via `commits_to_succeed_first`.
+  - **Cross-test pollution** via cached `get_settings()` with a junk `DATABASE_URL` from `test_lifecycle.py`'s `netbox_env` fixture. Fix: add `get_settings.cache_clear()` to `tests/unit/api/v1/conftest.py:_truncate`. Same pattern Sprint 3's `tests/integration/test_devices.py` conftest already used — extended to the api/v1 conftest.
+
+### Sprint 4 retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all 3 work tasks. Each task got an upfront plan with explicit pseudocode for the highest-risk code (three-branch compensation) and corrections from the user before any code landed.
+- TDD with failure-mode counterparts caught the right things: the autobegin conflict (Task 1 integration), the `bound_to_device_id` preservation behaviour (Task 2 integration), the cross-test pollution (Task 1 endpoint test triage). All were caught at test time, not in production.
+- The compensation helpers parameterization (Task 2 step 2) was a clean refactor: lifted `operation` from hardcoded `"qr.bind"` to a parameter, derived structured-log event names from it (`qr_bind_*` → `qr_retire_*`), and Task 1's 27 tests passed without modification. Validation that the design generalises.
+- Conditional compensation (Correction 3 from Task 1) made retire's "restore" path trivial — same GET-then-PATCH-if-matching pattern, just inverted. The shared `_run_compensation` orchestrator absorbed the compensate function as a callable.
+- 100% line + branch coverage held across all tasks, including the unreachable defensive branches (RuntimeError for BOUND-without-device-id is provably dead under correct DB state — tested via `object.__setattr__` bypass of the frozen dataclass invariant).
+
+**What slowed us down:**
+- The autobegin discovery (Task 1 integration). The unit-test fake session was simpler than the real one; the integration test exposed the real session behaviour and forced a structural rethink of the bind flow (pre-check now wraps its own tx). Worth keeping in mind: SQLAlchemy 2.0 async session autobegins on first query, and `session.begin()` raises `InvalidRequestError` if a transaction is already pending (autobegun or explicit). Sprint 5+ orchestrations that mix DB reads and `patch_with_attribution` should follow the same explicit-pre-check-tx pattern.
+- The test DB container disappeared mid-sprint (tmpfs ephemeral) — needed `docker compose -f docker-compose.test.yml up -d` to bring back. Same friction Sprint 3 noted; permanent fix would be a non-tmpfs volume, but that's an ops question for production.
+- The `patch_with_attribution` `entity_id` discovery during Task 1 integration. Sprint 3's design hardcoded `entity_id = str(netbox_object_id)`, which is correct for `device.update` (the audited entity IS the device) but wrong for `qr.bind` (entity is the QR token, NetBox object is the device). Caught by an audit-row assertion; fixed by adding the optional `entity_id` kwarg. Backward compatible — Sprint 3 callers unchanged.
+- The QR token alphabet caveat from Sprint 2 (ToR §4.2.1 excludes I/O/0/1) is in DB tests not enforced — my initial test IDs were 14 chars (`DCQR-UPDATE001`) and tripped the `VARCHAR(13)` check. Renamed to 13 chars. The DB doesn't enforce the alphabet either; the ToR-compliant generator does.
+
+**Discrepancies between ToR / Architecture and what shipped (or breaking changes):**
+- **`GET /api/v1/qr/{qr_id}` response shape changed.** Sprint 2 shipped the flat `{id, status, batch, bound_to_device_id, ...}`. Sprint 4 Task 3 returns the nested `{qr: {id, status, batch, ...}, device: {...} | omitted, device_error: "..." | omitted}`. Mobile clients **must adapt**. Documented in the endpoint docstring; flagged here so the mobile team picks it up before release.
+- **Sprint 3's `GET /api/v1/devices/{id}` response shape expanded.** `DeviceData` now carries the Task 3 additions (`device_type`, `manufacturer`, `device_role`, `u_height`, `primary_ip4/6`, `last_updated`, `qr_id`, `custom_fields`). For the standalone read, `qr_id` is always `None` (no app-DB lookup in that path); the rest reflect NetBox data. Field additions are non-breaking for clients that ignore unknown fields, but a strict deserializer would reject. Mobile team take note.
+- **NetBox response shape assumptions** parked in `docs/parking-lot.md` ("NetBox response shape verification"): three defensive code paths in `to_device_data` assume specific shapes (role key, u_height location, primary_ip address field). Verify against the deployed NetBox.
+- The `_compensate_clear_qr` and `_compensate_restore_qr` no-op path is documented as MVP-acceptable (Sprint 4 Task 1 plan): if a concurrent winner overwrote our PATCH, we don't clobber their state. The "noop_different_qr" / "noop_already_restored" outcomes land in `audit_log.after_json.compensation_outcome` so we can quantify the rate later.
+- Retire endpoint role is `dcinv-admin` (decision I), not `dcinv-mobile-user`. Open to mobile-user later if the business asks — tightening a role after release is harder than loosening one.
+- `retired_reason` field on the retire endpoint payload: deferred (YAGNI). Domain `QR.retire(reason=...)` supports it; endpoint passes `reason=None`. Add when a UI consumer asks.
+
+**Deliberately deferred (carried into Sprint 5+):**
+- **Device decommission** (status → `Decommissioning`, reuses Task 2's `QRLifecycleService.retire` for the QR side) — Sprint 5; gated on NetBox status-config dependency (parking-lot).
+- **Device creation** (`POST /api/v1/devices/`) — Sprint 5.
+- **Add-comment endpoint** (`POST /api/v1/devices/{id}/comments` — journal POST without a device PATCH) — Sprint 5.
+- **Error-shape unification on GET `/qr/{qr_id}`** — Sprint 2's `HTTPException(detail=...)` stays. The bind/retire structured `{"error": {"code"}}` shape is for new endpoints; normalising the GET would compound the wire-format break Task 3 already introduces. Sprint 5 candidate if we want consistency.
+- **Standalone `/devices/{id}` populating `qr_id`** from the app DB (currently always `None` on that path). Sprint 5+ when a UI consumer needs it.
+- **`shift_sessions` table + `POST /api/v1/sessions/{start,end}`** — later sprint.
+- **NetBox circuit breaker** (Architecture §3.3) — deferred (Sprint 3 decision D).
+- **PDF label generation, web admin pages** — later sprints.
+- **`GET /api/v1/admin/audit` query endpoint** — Sprint 5+ when there's a use case.
+- **Idempotency-key TTL cleanup job** — pre-existing deferral.
+- **Manual smoke against real Keycloak / NetBox** — skipped (no reachable instances in this environment, same as Sprints 1-3). The respx-mocked unit + real-Postgres integration tests cover all branches incl. compensation.
+
+### Files added in Sprint 4 (high-level)
+
+- `backend/app/services/qr/lifecycle.py` — `QRLifecycleService` (bind + retire + shared compensation helpers + 5 new exception classes + private `_PostNetBoxStateRace` sentinel)
+- `backend/tests/unit/services/qr/test_lifecycle.py` (50 tests)
+- `backend/tests/unit/services/qr/test_lookup.py` (10 tests)
+- `backend/tests/unit/api/v1/test_qr_bind.py` (14 tests)
+- `backend/tests/unit/api/v1/test_qr_retire.py` (12 tests)
+- `backend/tests/integration/test_qr_bind.py` (4 tests)
+- `backend/tests/integration/test_qr_retire.py` (4 tests)
+
+### Files modified in Sprint 4
+
+- `backend/app/db/repositories/qr_code.py` — `+get_by_id_for_update`, `+update` (non-wrapping IntegrityError)
+- `backend/app/services/netbox_write.py` — `+entity_id: str | None = None` parameter on `patch_with_attribution` (backward compatible default)
+- `backend/app/services/device.py` — `DeviceData` extended (Task 3); `to_device_data` gains `qr_id` kwarg + defensive extraction; `+DeviceService.get_device_raw`
+- `backend/app/services/qr/lookup.py` — `QRLookupResult` removed; `+QRInfo`, `+QRLookupResponse`, `+to_qr_info`; `QRLookupService.get_by_id` returns `QRLookupResponse`, DeviceService injection
+- `backend/app/services/qr/__init__.py` — drop `QRLookupResult` export
+- `backend/app/api/v1/qr.py` — `+get_lifecycle_service`, `+get_lookup_service`, `+bind_qr`, `+retire_qr`, GET endpoint rewired to return `QRLookupResponse`
+- `backend/tests/unit/services/test_device.py` — +21 tests for Task 3 additions
+- `backend/tests/unit/api/v1/test_qr_lookup.py` — rewritten for new combined-response shape; +1 dependency-builder test
+- `backend/tests/unit/api/v1/conftest.py` — `+get_settings.cache_clear()` in `_truncate` (fix cross-test pollution caught during Task 1)
+- `backend/tests/integration/test_repositories.py` — +6 tests for new repo methods
+- `backend/tests/integration/test_lookup.py` — rewritten for new service signature
+- `docs/sprint-4.md` — per-task detail filled in (was "TBD" at sprint start); all three tasks documented with Goal/Steps/Acceptance/Anti-criteria/Suggested prompt
+- `docs/parking-lot.md` — NetBox response shape verification entry (Sprint 4 Task 3)
+
+### How to run locally (close-of-sprint snapshot)
+
+Same as Sprint 3:
+
+```bash
+cd backend
+cp .env.example .env   # fill in real values
+docker compose up -d --build
+curl localhost:8000/health
+docker compose down -v
+```
+
+Tests:
+```bash
+docker compose -f docker-compose.test.yml up -d
+DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test \
+  NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com \
+  uv run pytest --cov=app --cov-branch
+```
