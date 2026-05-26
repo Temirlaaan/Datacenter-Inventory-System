@@ -76,6 +76,24 @@ def _format_journal_comment(
     )
 
 
+def _format_create_journal_comment(
+    *,
+    user: AuthUser,
+    request_id: UUID,
+    created: dict[str, Any],
+) -> str:
+    """Attribution comment for create operations (Sprint 5 Task 1 — parallel to
+    ``_format_journal_comment`` for PATCH). No diff: a create has no
+    before-state — the Object ID is the meaningful trace.
+    """
+    return (
+        f"Created by {user.email or 'unknown'} via mobile app.\n"
+        f"Request ID: {request_id}\n"
+        f"Session: {user.session_id or 'unknown'}\n"
+        f"Object ID: {created.get('id', 'unknown')}"
+    )
+
+
 class NetBoxWriteService:
     """Performs a NetBox object PATCH with optimistic concurrency + three-record write."""
 
@@ -119,38 +137,6 @@ class NetBoxWriteService:
         if entity_id is None:
             entity_id = str(netbox_object_id)
 
-        async def record_audit(
-            before_json: dict[str, Any],
-            after_json: dict[str, Any],
-            result: AuditResult,
-        ) -> None:
-            """Best-effort audit-row insert (decision B): log on failure, never raise."""
-            try:
-                entry = AuditLogEntry(
-                    request_id=request_id,
-                    timestamp=timestamp,
-                    user_email=user.email or "",
-                    user_keycloak_id=UUID(user.sub),
-                    session_id=UUID(user.session_id) if user.session_id else None,
-                    operation=operation,
-                    entity_type=entity_type,
-                    entity_id=entity_id,
-                    before_json=before_json,
-                    after_json=after_json,
-                    result=result,
-                )
-                async with self._session.begin():
-                    await self._audit_log_repo.insert(entry)
-            except Exception as exc:
-                logger.error(
-                    "audit_log_write_failed",
-                    request_id=str(request_id),
-                    operation=operation,
-                    entity_id=entity_id,
-                    result=result.value,
-                    error=repr(exc),
-                )
-
         # Re-read. A failure here — including a NetBox response that omits
         # `last_updated` — still gets a FAILURE audit row (decision B).
         try:
@@ -160,14 +146,30 @@ class NetBoxWriteService:
             # through the same FAILURE record.
             observed_version = original["last_updated"]
         except Exception:
-            await record_audit({"expected_version": expected_version}, {}, AuditResult.FAILURE)
+            await self._record_audit(
+                request_id=request_id,
+                timestamp=timestamp,
+                user=user,
+                operation=operation,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                before_json={"expected_version": expected_version},
+                after_json={},
+                result=AuditResult.FAILURE,
+            )
             raise
 
         if observed_version != expected_version:
-            await record_audit(
-                {"expected_version": expected_version},
-                {"object": original, "observed_version": observed_version},
-                AuditResult.CONFLICT,
+            await self._record_audit(
+                request_id=request_id,
+                timestamp=timestamp,
+                user=user,
+                operation=operation,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                before_json={"expected_version": expected_version},
+                after_json={"object": original, "observed_version": observed_version},
+                result=AuditResult.CONFLICT,
             )
             raise WriteConflictError(current_object=original, current_version=observed_version)
 
@@ -175,10 +177,16 @@ class NetBoxWriteService:
         try:
             updated: dict[str, Any] = (await self._netbox.patch(netbox_path, json=changes)).json()
         except Exception:
-            await record_audit(
-                {"object": original, "expected_version": expected_version},
-                {},
-                AuditResult.FAILURE,
+            await self._record_audit(
+                request_id=request_id,
+                timestamp=timestamp,
+                user=user,
+                operation=operation,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                before_json={"object": original, "expected_version": expected_version},
+                after_json={},
+                result=AuditResult.FAILURE,
             )
             raise
 
@@ -191,12 +199,65 @@ class NetBoxWriteService:
             original=original,
             changes=changes,
         )
-        await record_audit(
-            {"object": original, "expected_version": expected_version},
-            {"object": updated, "observed_version": observed_version},
-            AuditResult.SUCCESS,
+        await self._record_audit(
+            request_id=request_id,
+            timestamp=timestamp,
+            user=user,
+            operation=operation,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            before_json={"object": original, "expected_version": expected_version},
+            after_json={"object": updated, "observed_version": observed_version},
+            result=AuditResult.SUCCESS,
         )
         return updated
+
+    async def _record_audit(
+        self,
+        *,
+        request_id: UUID,
+        timestamp: datetime,
+        user: AuthUser,
+        operation: str,
+        entity_type: str,
+        entity_id: str,
+        before_json: dict[str, Any],
+        after_json: dict[str, Any],
+        result: AuditResult,
+    ) -> None:
+        """Best-effort audit-row insert (decision B): log on failure, never raise.
+
+        Extracted from ``patch_with_attribution``'s inline closure so
+        ``post_with_attribution`` (Sprint 5 Task 1) can reuse the same logic
+        without duplication. Behavior-preserving refactor — same try/except
+        wrapping, same ``async with session.begin():``, same
+        ``audit_log_write_failed`` log key on failure.
+        """
+        try:
+            entry = AuditLogEntry(
+                request_id=request_id,
+                timestamp=timestamp,
+                user_email=user.email or "",
+                user_keycloak_id=UUID(user.sub),
+                session_id=UUID(user.session_id) if user.session_id else None,
+                operation=operation,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                before_json=before_json,
+                after_json=after_json,
+                result=result,
+            )
+            async with self._session.begin():
+                await self._audit_log_repo.insert(entry)
+        except Exception as exc:
+            logger.error(
+                "audit_log_write_failed",
+                request_id=str(request_id),
+                operation=operation,
+                entity_id=entity_id,
+                result=result.value,
+                error=repr(exc),
+            )
 
     async def _post_journal_entry(
         self,
@@ -215,6 +276,126 @@ class NetBoxWriteService:
             "kind": "info",
             "comments": _format_journal_comment(
                 user=user, request_id=request_id, original=original, changes=changes
+            ),
+        }
+        try:
+            await self._netbox.post(_JOURNAL_PATH, json=payload)
+        except Exception as exc:
+            logger.error(
+                "netbox_journal_write_failed",
+                request_id=str(request_id),
+                netbox_object_type=netbox_object_type,
+                netbox_object_id=netbox_object_id,
+                error=repr(exc),
+            )
+
+    async def post_with_attribution(
+        self,
+        *,
+        netbox_path: str,
+        netbox_object_type: str,
+        netbox_object_id: int | None,
+        entity_type: str,
+        entity_id: str | None,
+        operation: str,
+        payload: dict[str, Any],
+        user: AuthUser,
+        attach_journal: bool = True,
+    ) -> dict[str, Any]:
+        """NetBox POST + optional journal entry + audit row. Sprint 5 Task 1.
+
+        Parallel to ``patch_with_attribution`` for create-style operations. No
+        optimistic concurrency (POST creates, doesn't mutate). Decision B
+        applies uniformly: the POST is the source-of-truth change and is
+        durable once it returns; the journal + audit are best-effort.
+
+        - ``netbox_object_id``: the existing NetBox object to attach the
+          journal entry to (e.g. ``device_id`` for add-comment), or ``None``
+          when the POST itself creates the object the journal should attach to
+          (device create — the journal target is ``created["id"]``).
+        - ``entity_id``: the audit row's ``entity_id``; ``None`` → falls back
+          to ``str(created["id"])`` (device create case). For add-comment-style
+          calls where the entity is a pre-existing object, callers pass
+          ``str(device_id)``.
+        - ``attach_journal``: ``False`` for add-comment, where the POST IS the
+          journal entry — writing a second one would be redundant noise.
+
+        Returns the created NetBox object dict. Re-raises any NetBox client
+        error from the POST (after recording a ``failure`` audit row).
+        """
+        request_id = UUID(current_request_id())
+        timestamp = datetime.now(UTC)
+
+        # === Step 1: POST. Any failure → FAILURE audit + re-raise. ===
+        try:
+            response = await self._netbox.post(netbox_path, json=payload)
+            created: dict[str, Any] = response.json()
+        except Exception:
+            # entity_id is unknown for failed creates; use the placeholder
+            # "unknown" when caller didn't provide one (device-create case),
+            # or the provided value (add-comment-style — known entity).
+            failure_entity_id = entity_id if entity_id is not None else "unknown"
+            await self._record_audit(
+                request_id=request_id,
+                timestamp=timestamp,
+                user=user,
+                operation=operation,
+                entity_type=entity_type,
+                entity_id=failure_entity_id,
+                before_json={},
+                after_json={"payload": payload},
+                result=AuditResult.FAILURE,
+            )
+            raise
+
+        # === Step 2: resolve entity_id from response when caller passed None ===
+        resolved_entity_id = entity_id if entity_id is not None else str(created["id"])
+
+        # === Step 3: optional journal POST (best-effort, decision B) ===
+        if attach_journal:
+            # Journal target: caller-provided netbox_object_id wins; else the
+            # just-created object's id (e.g. device create).
+            journal_target_id = netbox_object_id if netbox_object_id is not None else created["id"]
+            await self._post_create_journal_entry(
+                netbox_object_type=netbox_object_type,
+                netbox_object_id=journal_target_id,
+                request_id=request_id,
+                user=user,
+                created=created,
+            )
+
+        # === Step 4: SUCCESS audit row (best-effort, decision B) ===
+        await self._record_audit(
+            request_id=request_id,
+            timestamp=timestamp,
+            user=user,
+            operation=operation,
+            entity_type=entity_type,
+            entity_id=resolved_entity_id,
+            before_json={},
+            after_json={"object": created},
+            result=AuditResult.SUCCESS,
+        )
+        return created
+
+    async def _post_create_journal_entry(
+        self,
+        *,
+        netbox_object_type: str,
+        netbox_object_id: int,
+        request_id: UUID,
+        user: AuthUser,
+        created: dict[str, Any],
+    ) -> None:
+        """Best-effort create-journal POST (Sprint 5 Task 1, decision B):
+        log on failure, never raise. Parallel to ``_post_journal_entry`` for
+        creates — different comment format (Object ID, no diff)."""
+        payload = {
+            "assigned_object_type": netbox_object_type,
+            "assigned_object_id": netbox_object_id,
+            "kind": "info",
+            "comments": _format_create_journal_comment(
+                user=user, request_id=request_id, created=created
             ),
         }
         try:

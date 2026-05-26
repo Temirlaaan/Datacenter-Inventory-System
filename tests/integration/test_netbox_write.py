@@ -219,3 +219,67 @@ async def test_patch_with_attribution_audit_request_id_matches_contextvar() -> N
     async with get_sessionmaker()() as session:
         rid = (await session.execute(text("SELECT request_id::text FROM audit_log"))).scalar_one()
     assert rid == bound_id
+
+
+# ============================================================================
+# post_with_attribution (Sprint 5 Task 1)
+# ============================================================================
+
+_CREATE_PATH = "/api/dcim/devices/"
+
+
+async def test_post_with_attribution_writes_success_audit_row() -> None:
+    """Real Postgres + respx happy path: the create lands a SUCCESS audit row
+    with entity_id derived from the response, before_json={}, after_json
+    carrying the created device."""
+    base = _netbox_base()
+    created = {
+        "id": 99,
+        "name": "sw-99",
+        "status": {"value": "active"},
+        "last_updated": _NEW_VERSION,
+    }
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{base}{_CREATE_PATH}").respond(status_code=201, json=created)
+            router.post(f"{base}{_JOURNAL_PATH}").respond(status_code=201, json={"id": 1})
+            async with get_sessionmaker()() as session:
+                service = NetBoxWriteService(client, session, AuditLogRepository(session))
+                result = await service.post_with_attribution(
+                    netbox_path=_CREATE_PATH,
+                    netbox_object_type="dcim.device",
+                    netbox_object_id=None,  # device-create case: derive from response
+                    entity_type="device",
+                    entity_id=None,  # → resolved to "99" from created["id"]
+                    operation="device.create",
+                    payload={
+                        "name": "sw-99",
+                        "device_type": 11,
+                        "role": 31,
+                        "site": 1,
+                        "status": "active",
+                    },
+                    user=_user(session_id=_SESSION_ID),
+                    attach_journal=True,
+                )
+
+    assert result == created
+
+    # Verify the audit row landed with all columns populated correctly.
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT result::text, operation, entity_type, entity_id,"
+                    " before_json, after_json, session_id::text"
+                    " FROM audit_log"
+                )
+            )
+        ).one()
+    assert row.result == "success"
+    assert row.operation == "device.create"
+    assert row.entity_type == "device"
+    assert row.entity_id == "99"  # derived from created["id"]
+    assert row.before_json == {}
+    assert row.after_json == {"object": created}
+    assert row.session_id == _SESSION_ID
