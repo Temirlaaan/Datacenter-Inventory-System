@@ -1,0 +1,28 @@
+# Don't ship the dev venv, caches, or test artifacts into the image.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests aren't needed at runtime — keeps the image smaller and the attack surface tighter.
+tests/
+
+# Local dev files
+.env
+*.env.local
+docker-compose.test.yml
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# VCS
+.git/
+.gitignore

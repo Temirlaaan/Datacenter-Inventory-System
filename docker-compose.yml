@@ -1,0 +1,57 @@
+# Production stack for the DC Inventory backend.
+#
+# Local dev: copy .env.example to .env, fill in values, then `docker compose up -d`.
+# `docker compose down` keeps the DB volume; `docker compose down -v` wipes it.
+#
+# Note: the test DB stack lives in docker-compose.test.yml (port 5433, tmpfs storage).
+
+services:
+  dcinv-db:
+    image: postgres:15
+    container_name: dcinv-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dcinv}
+      POSTGRES_USER: ${POSTGRES_USER:-dcinv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "5432:5432"
+    volumes:
+      - dcinv-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dcinv} -d ${POSTGRES_DB:-dcinv}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  dcinv-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dcinv-backend
+    restart: unless-stopped
+    depends_on:
+      dcinv-db:
+        condition: service_healthy
+    environment:
+      # All required Settings fields come from .env (see .env.example for the list).
+      NETBOX_URL: ${NETBOX_URL:?NETBOX_URL is required}
+      NETBOX_SERVICE_TOKEN: ${NETBOX_SERVICE_TOKEN:?NETBOX_SERVICE_TOKEN is required}
+      KEYCLOAK_BASE_URL: ${KEYCLOAK_BASE_URL:?KEYCLOAK_BASE_URL is required}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-prod-v1}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dcinv}:${POSTGRES_PASSWORD}@dcinv-db:5432/${POSTGRES_DB:-dcinv}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWKS_CACHE_TTL_SECONDS: ${JWKS_CACHE_TTL_SECONDS:-3600}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # /health returns 503 if any downstream is unreachable. NetBox/Keycloak must be
+      # reachable from inside this container for the stack to settle into "healthy".
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  dcinv-db-data:

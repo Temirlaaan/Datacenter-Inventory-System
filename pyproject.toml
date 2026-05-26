@@ -13,6 +13,7 @@ dependencies = [
     "python-jose[cryptography]>=3.3,<3.4",
     "structlog>=24.4,<25",
     "pydantic-settings>=2.6,<3",
+    "pyyaml>=6.0,<7",
 ]
 
 [dependency-groups]
@@ -20,7 +21,7 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<0.25",
     "pytest-cov>=6.0,<7",
-    "respx>=0.21,<0.22",
+    "respx>=0.22,<0.24",
     "ruff>=0.8,<0.9",
     "black>=24.10,<25",
     "mypy>=1.13,<2",
@@ -74,6 +75,8 @@ select = [
 ]
 ignore = [
     "E501",
+    # B008: function call in default arg. FastAPI's `Depends(...)` pattern requires it.
+    "B008",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -100,6 +103,18 @@ files = ["app", "tests"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# python-jose ships no type stubs; the third-party `types-python-jose` is incomplete.
+# Treat the module as untyped rather than adding a brittle stub dep.
+module = "jose.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyYAML ships no type stubs; treat as untyped rather than adding `types-PyYAML`
+# as a second dependency (same call as `jose.*` above).
+module = "yaml.*"
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

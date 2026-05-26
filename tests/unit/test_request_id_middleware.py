@@ -26,12 +26,20 @@ def app_with_logs(
 
     get_settings.cache_clear()
 
+    import structlog
+
     from app.main import app as fastapi_app
     from app.observability.logging import configure_logging
 
-    # Register a test-only route that raises, used by the request_failed test.
-    # Idempotent — check first since the FastAPI app instance is module-cached.
-    if not any(getattr(r, "path", None) == "/_test_error" for r in fastapi_app.routes):
+    middleware_logger = structlog.get_logger("middleware_test")
+
+    # Register test-only routes. Idempotent — the FastAPI app instance is module-cached.
+    if not any(getattr(r, "path", None) == "/_test" for r in fastapi_app.routes):
+
+        @fastapi_app.get("/_test")
+        async def _test_route() -> dict[str, bool]:
+            middleware_logger.info("test_route_hit")
+            return {"ok": True}
 
         @fastapi_app.get("/_test_error")
         async def _test_error_route() -> dict[str, bool]:
