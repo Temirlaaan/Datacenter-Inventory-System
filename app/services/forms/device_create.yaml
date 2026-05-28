@@ -1,0 +1,95 @@
+# Device-create form configuration — server-driven (Architecture §5, CLAUDE.md #5).
+#
+# Separate from `device_edit.yaml` (Sprint 5 decision D) because creation has
+# fields edit doesn't: `device_type_id` and `role_id` are required at creation
+# but immutable post-creation in our mobile surface (ToR §4.3.4 — "Device Type,
+# Manufacturer, Role — changes are significant and should be done in NetBox web").
+#
+# Field set sourced from:
+#   - ToR §4.3.4 editable fields (Status, Site, Rack, Position, Name, Serial,
+#     Asset Tag, Comments) — also settable on create
+#   - NetBox semantic requirements (device_type, role) — needed at POST,
+#     flagged in Task 2 plan as "added from general reasoning, not enumerated
+#     in ToR §4.3.2"
+#
+# Bump `version` on every change so the mobile client refetches.
+version: "2026-05-28.1"
+fields:
+  - key: device_type_id
+    label: Device Type
+    type: reference
+    required: true
+    search_endpoint: /api/v1/meta/device-types
+    netbox_field: device_type
+
+  - key: role_id
+    label: Role
+    type: reference
+    required: true
+    search_endpoint: /api/v1/meta/roles
+    netbox_field: role
+
+  - key: site_id
+    label: Site
+    type: reference
+    required: true
+    search_endpoint: /api/v1/meta/sites
+    netbox_field: site
+    # No confirmation dialog on CREATE (the §4.3.4 confirmation rule is for
+    # site *changes* on existing devices). Creation is always a new placement.
+
+  - key: status
+    label: Status
+    type: choice
+    required: true
+    choices_endpoint: /api/v1/meta/statuses
+    # No default — engineer picks. Per Sprint 5 Task 2 plan + ToR §4.3.7,
+    # the available choices depend on which statuses the NetBox admin has
+    # enabled; the backend doesn't pre-pick.
+
+  - key: name
+    label: Name
+    type: text
+    required: true
+    max_length: 64
+
+  - key: rack_id
+    label: Rack
+    type: reference
+    required: false
+    search_endpoint: /api/v1/meta/racks
+    netbox_field: rack
+    depends_on:
+      - site_id
+
+  - key: position
+    label: Position (U)
+    type: integer
+    required: false
+    min: 1
+    max_from: selected_rack.u_height
+    depends_on:
+      - rack_id
+    # Backend does NOT pre-check collision (1..u_height + no-overlap) — relies
+    # on NetBox to enforce and on Sprint 5 Correction 2's NETBOX_VALIDATION_ERROR
+    # translation to surface NetBox's 422 cleanly to the mobile client.
+
+  - key: serial
+    label: Serial Number
+    type: text
+    required: false
+    max_length: 50
+
+  - key: asset_tag
+    label: Asset Tag
+    type: text
+    required: false
+    max_length: 50
+    netbox_field: custom_fields.asset_tag
+    # Same Sprint 3 parking-lot mapping (custom_fields vs native asset_tag).
+
+  - key: comments
+    label: Comments
+    type: multiline_text
+    required: false
+    max_length: 1000

@@ -4,8 +4,12 @@
   optimistic-concurrency ``version``.
 - ``PATCH /api/v1/devices/{device_id}`` — update editable fields, gated by the
   client's ``If-Unmodified-Since`` header. 409 on a stale version.
+- ``POST /api/v1/devices/`` (Sprint 5 Task 2) — create a new device.
+  Mobile entry point is ToR §4.3.2's "Create New Device" button on the
+  Free QR screen. Translates NetBox 4xx validation errors to structured
+  422 responses (Sprint 5 Correction 2).
 
-Both require the ``dcinv-mobile-user`` role.
+All require the ``dcinv-mobile-user`` role.
 """
 
 from __future__ import annotations
@@ -18,12 +22,15 @@ from app.auth.dependencies import AuthUser, require_role
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.session import get_session
 from app.netbox.client import get_netbox_client
+from app.netbox.errors import NetBoxValidationError
 from app.services.device import (
+    DeviceCreateRequest,
     DeviceResponse,
     DeviceService,
     DeviceUpdateRequest,
     to_device_data,
     to_netbox_changes,
+    to_netbox_create_payload,
 )
 from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 
@@ -38,6 +45,53 @@ def get_device_service() -> DeviceService:
 def get_write_service(session: AsyncSession = Depends(get_session)) -> NetBoxWriteService:
     """Build the three-record-write service from the per-request session."""
     return NetBoxWriteService(get_netbox_client(), session, AuditLogRepository(session))
+
+
+@router.post("/", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)
+async def create_device(
+    request: DeviceCreateRequest,
+    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    write_service: NetBoxWriteService = Depends(get_write_service),
+) -> DeviceResponse | JSONResponse:
+    """Create a new NetBox device. ToR §4.3.2 (Create New Device flow).
+
+    On NetBox validation failure (4xx — duplicate name, position collision,
+    invalid status, etc.) translates to a structured 422 with
+    ``error.code="NETBOX_VALIDATION_ERROR"`` carrying NetBox's actual message
+    so the mobile client can surface it (Sprint 5 Correction 2). Other
+    NetBox errors (404 on a referenced FK, 5xx) flow through ``main.py``'s
+    global handlers (404 / 502).
+    """
+    payload = to_netbox_create_payload(request)
+    try:
+        created = await write_service.post_with_attribution(
+            netbox_path="/api/dcim/devices/",
+            netbox_object_type="dcim.device",
+            netbox_object_id=None,  # journal target derived from response
+            entity_type="device",
+            entity_id=None,  # audit entity_id derived from str(created["id"])
+            operation="device.create",
+            payload=payload,
+            user=user,
+            attach_journal=True,
+        )
+    except NetBoxValidationError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "error": {
+                    "code": "NETBOX_VALIDATION_ERROR",
+                    "message": (
+                        exc.detail
+                        if isinstance(exc.detail, str)
+                        else "NetBox rejected the create request"
+                    ),
+                    "netbox_status": exc.status_code,
+                    "netbox_detail": exc.detail,
+                }
+            },
+        )
+    return DeviceResponse(data=to_device_data(created), version=created["last_updated"])
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)

@@ -11,8 +11,10 @@ from app.netbox.client import NetBoxClient
 from app.netbox.errors import NetBoxServerError
 from app.services.cache import TTLCache
 from app.services.meta import (
+    MetaDeviceType,
     MetaLookupService,
     MetaRack,
+    MetaRole,
     MetaSite,
     MetaStatus,
     get_meta_cache,
@@ -171,3 +173,93 @@ async def test_get_statuses_returns_empty_list_when_no_choices(
 
 def test_get_meta_cache_returns_singleton(clean_env: None) -> None:
     assert get_meta_cache() is get_meta_cache()
+
+
+# ---------- device-types (Sprint 5 Task 2) ----------
+
+
+async def test_get_device_types_fetches_and_transforms(clean_env: None, netbox_env: None) -> None:
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/device-types/").respond(
+                json=_page(
+                    [
+                        {
+                            "id": 11,
+                            "model": "C9300-48U",
+                            "manufacturer": {"id": 21, "name": "Cisco"},
+                            "u_height": 1,
+                        }
+                    ]
+                )
+            )
+            device_types = await MetaLookupService(client, cache).get_device_types()
+
+    assert device_types == [
+        MetaDeviceType(id=11, model="C9300-48U", manufacturer_name="Cisco", u_height=1),
+    ]
+
+
+async def test_get_device_types_returns_empty_list_when_netbox_has_no_types(
+    clean_env: None, netbox_env: None
+) -> None:
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/device-types/").respond(json=_page([]))
+            device_types = await MetaLookupService(client, cache).get_device_types()
+
+    assert device_types == []
+
+
+async def test_get_device_types_served_from_cache_on_second_call(
+    clean_env: None, netbox_env: None
+) -> None:
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/dcim/device-types/").respond(
+                json=_page(
+                    [
+                        {
+                            "id": 11,
+                            "model": "C9300-48U",
+                            "manufacturer": {"id": 21, "name": "Cisco"},
+                            "u_height": 1,
+                        }
+                    ]
+                )
+            )
+            service = MetaLookupService(client, cache)
+            await service.get_device_types()
+            await service.get_device_types()
+
+    assert route.call_count == 1  # cache hit on second call
+
+
+# ---------- roles (Sprint 5 Task 2) ----------
+
+
+async def test_get_roles_fetches_and_transforms(clean_env: None, netbox_env: None) -> None:
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/device-roles/").respond(
+                json=_page([{"id": 31, "name": "Access Switch"}])
+            )
+            roles = await MetaLookupService(client, cache).get_roles()
+
+    assert roles == [MetaRole(id=31, name="Access Switch")]
+
+
+async def test_get_roles_returns_empty_list_when_netbox_has_no_roles(
+    clean_env: None, netbox_env: None
+) -> None:
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/device-roles/").respond(json=_page([]))
+            roles = await MetaLookupService(client, cache).get_roles()
+
+    assert roles == []

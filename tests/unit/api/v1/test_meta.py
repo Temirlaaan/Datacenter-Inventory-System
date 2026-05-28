@@ -13,16 +13,26 @@ from typing import cast
 import httpx
 
 from app.api.v1.meta import (
+    get_device_create_form,
     get_device_form,
     get_meta_service,
+    list_device_types,
     list_racks,
+    list_roles,
     list_sites,
     list_statuses,
 )
 from app.auth.dependencies import AuthUser
 from app.main import app
 from app.services.device_form import DeviceFormConfig
-from app.services.meta import MetaLookupService, MetaRack, MetaSite, MetaStatus
+from app.services.meta import (
+    MetaDeviceType,
+    MetaLookupService,
+    MetaRack,
+    MetaRole,
+    MetaSite,
+    MetaStatus,
+)
 
 
 def _user(*roles: str) -> AuthUser:
@@ -43,10 +53,14 @@ class _StubMetaService:
         sites: list[MetaSite] | None = None,
         racks: list[MetaRack] | None = None,
         statuses: list[MetaStatus] | None = None,
+        device_types: list[MetaDeviceType] | None = None,
+        roles: list[MetaRole] | None = None,
     ) -> None:
         self._sites = sites or []
         self._racks = racks or []
         self._statuses = statuses or []
+        self._device_types = device_types or []
+        self._roles = roles or []
 
     async def get_sites(self) -> list[MetaSite]:
         return self._sites
@@ -56,6 +70,12 @@ class _StubMetaService:
 
     async def get_statuses(self) -> list[MetaStatus]:
         return self._statuses
+
+    async def get_device_types(self) -> list[MetaDeviceType]:
+        return self._device_types
+
+    async def get_roles(self) -> list[MetaRole]:
+        return self._roles
 
 
 # ---------- handler logic (direct await) ----------
@@ -175,4 +195,115 @@ async def test_get_device_form_endpoint_403_without_mobile_role(
 ) -> None:
     as_user()  # authenticated, but no roles
     resp = await client.get("/api/v1/meta/device-form")
+    assert resp.status_code == 403
+
+
+# ---------- device-types + roles + device-create-form (Sprint 5 Task 2) ----------
+
+
+async def test_list_device_types_handler_returns_service_result() -> None:
+    stub = _StubMetaService(
+        device_types=[
+            MetaDeviceType(id=11, model="C9300-48U", manufacturer_name="Cisco", u_height=1),
+        ]
+    )
+    result = await list_device_types(
+        service=cast(MetaLookupService, stub),
+        _user=_user("dcinv-mobile-user"),
+    )
+    assert result == [
+        MetaDeviceType(id=11, model="C9300-48U", manufacturer_name="Cisco", u_height=1)
+    ]
+
+
+async def test_list_roles_handler_returns_service_result() -> None:
+    stub = _StubMetaService(roles=[MetaRole(id=31, name="Access Switch")])
+    result = await list_roles(
+        service=cast(MetaLookupService, stub),
+        _user=_user("dcinv-mobile-user"),
+    )
+    assert result == [MetaRole(id=31, name="Access Switch")]
+
+
+async def test_get_device_types_endpoint_returns_200_and_shape(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_meta_service] = lambda: _StubMetaService(
+        device_types=[
+            MetaDeviceType(id=11, model="C9300-48U", manufacturer_name="Cisco", u_height=1),
+        ]
+    )
+    resp = await client.get("/api/v1/meta/device-types")
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {"id": 11, "model": "C9300-48U", "manufacturer_name": "Cisco", "u_height": 1},
+    ]
+
+
+async def test_get_roles_endpoint_returns_200_and_shape(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_meta_service] = lambda: _StubMetaService(
+        roles=[MetaRole(id=31, name="Access Switch")]
+    )
+    resp = await client.get("/api/v1/meta/roles")
+    assert resp.status_code == 200
+    assert resp.json() == [{"id": 31, "name": "Access Switch"}]
+
+
+async def test_get_device_types_endpoint_403_without_mobile_role(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user()
+    app.dependency_overrides[get_meta_service] = lambda: _StubMetaService()
+    resp = await client.get("/api/v1/meta/device-types")
+    assert resp.status_code == 403
+
+
+async def test_get_roles_endpoint_403_without_mobile_role(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user()
+    app.dependency_overrides[get_meta_service] = lambda: _StubMetaService()
+    resp = await client.get("/api/v1/meta/roles")
+    assert resp.status_code == 403
+
+
+async def test_get_device_create_form_handler_returns_create_yaml_config() -> None:
+    result = await get_device_create_form(_user=_user("dcinv-mobile-user"))
+    assert isinstance(result, DeviceFormConfig)
+    assert result.version
+    # device_create.yaml has 10 fields incl. device_type_id and role_id
+    keys = {field.key for field in result.fields}
+    assert "device_type_id" in keys
+    assert "role_id" in keys
+    assert "site_id" in keys
+
+
+async def test_get_device_create_form_endpoint_returns_200_independent_of_edit_form(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """Both endpoints work, return distinct configs."""
+    as_user("dcinv-mobile-user")
+    resp_edit = await client.get("/api/v1/meta/device-form")
+    resp_create = await client.get("/api/v1/meta/device-create-form")
+
+    assert resp_edit.status_code == 200
+    assert resp_create.status_code == 200
+    edit_keys = {f["key"] for f in resp_edit.json()["fields"]}
+    create_keys = {f["key"] for f in resp_create.json()["fields"]}
+    # Create form has device_type_id + role_id; edit form doesn't.
+    assert "device_type_id" in create_keys
+    assert "device_type_id" not in edit_keys
+    assert len(create_keys) == 10
+    assert len(edit_keys) == 8
+
+
+async def test_get_device_create_form_endpoint_403_without_mobile_role(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user()
+    resp = await client.get("/api/v1/meta/device-create-form")
     assert resp.status_code == 403

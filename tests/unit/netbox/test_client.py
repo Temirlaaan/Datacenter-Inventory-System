@@ -504,3 +504,109 @@ def test_get_netbox_client_returns_singleton(clean_env: None, netbox_env: None) 
     c1 = get_netbox_client()
     c2 = get_netbox_client()
     assert c1 is c2
+
+
+# ---------- NetBoxValidationError (Sprint 5 Task 2) ----------
+
+
+async def test_send_raises_netbox_validation_error_on_400_with_json_body(
+    clean_env: None, netbox_env: None
+) -> None:
+    """400 with a JSON body — detail must be the parsed dict so callers can
+    surface NetBox's actual error message (Sprint 5 Task 2)."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxValidationError
+
+    netbox_body = {"name": ["device with this name already exists."]}
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                status_code=400, json=netbox_body
+            )
+            with pytest.raises(NetBoxValidationError) as exc_info:
+                await client.post("/api/dcim/devices/", json={"name": "sw-01"})
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == netbox_body
+
+
+async def test_send_raises_netbox_validation_error_on_422_with_dict_body(
+    clean_env: None, netbox_env: None
+) -> None:
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxValidationError
+
+    netbox_body = {"position": ["U position 42 is already occupied."]}
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                status_code=422, json=netbox_body
+            )
+            with pytest.raises(NetBoxValidationError) as exc_info:
+                await client.post("/api/dcim/devices/", json={"position": 42})
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == netbox_body
+
+
+async def test_send_falls_back_to_text_when_4xx_body_is_not_json(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Some NetBox proxies return non-JSON 4xx bodies (e.g. HTML 403 from nginx).
+    The detail falls back to the raw text rather than crashing on json parse."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxValidationError
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                status_code=403,
+                content=b"<html><body>Forbidden</body></html>",
+                headers={"content-type": "text/html"},
+            )
+            with pytest.raises(NetBoxValidationError) as exc_info:
+                await client.post("/api/dcim/devices/", json={})
+
+    assert exc_info.value.status_code == 403
+    assert isinstance(exc_info.value.detail, str)
+    assert "Forbidden" in exc_info.value.detail
+
+
+async def test_send_404_still_raises_netbox_not_found(clean_env: None, netbox_env: None) -> None:
+    """Regression: 404 is special-cased BEFORE the new 4xx branch — must
+    still raise NetBoxNotFound (not NetBoxValidationError)."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxNotFound
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/999/").respond(status_code=404)
+            with pytest.raises(NetBoxNotFound):
+                await client.get("/api/dcim/devices/999/")
+
+
+async def test_send_5xx_still_raises_netbox_server_error(
+    clean_env: None, netbox_env: None, fast_backoff: None
+) -> None:
+    """Regression: 5xx flows through the retry loop and raises NetBoxServerError
+    (not NetBoxValidationError) after exhausting retries."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxServerError
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(status_code=503)
+            with pytest.raises(NetBoxServerError):
+                await client.get("/api/dcim/devices/")
+
+
+def test_netbox_validation_error_carries_status_and_detail() -> None:
+    """Smoke: the exception class exposes both attributes the endpoint reads."""
+    from app.netbox.errors import NetBoxClientError, NetBoxValidationError
+
+    detail = {"name": ["already exists"]}
+    err = NetBoxValidationError(status_code=400, detail=detail)
+    assert err.status_code == 400
+    assert err.detail == detail
+    # Subclass relationship — Sprint 5 plan invariant
+    assert isinstance(err, NetBoxClientError)

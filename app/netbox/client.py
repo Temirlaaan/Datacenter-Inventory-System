@@ -23,10 +23,10 @@ import structlog
 
 from app.config import get_settings
 from app.netbox.errors import (
-    NetBoxClientError,
     NetBoxNotFound,
     NetBoxServerError,
     NetBoxTimeout,
+    NetBoxValidationError,
 )
 from app.observability.request_id import current_request_id
 
@@ -135,8 +135,17 @@ class NetBoxClient:
                 if resp.status_code == 404:
                     raise NetBoxNotFound(f"{method} {path} → 404")
                 if resp.status_code < 500:
-                    raise NetBoxClientError(
-                        f"{method} {path} → {resp.status_code}: {resp.text[:200]}"
+                    # Sprint 5 Task 2: parse the 4xx body so callers (e.g.
+                    # device create) can surface NetBox's actual error message
+                    # as a structured 422. NetBoxValidationError IS-A
+                    # NetBoxClientError so existing 502 fallbacks still catch it.
+                    try:
+                        detail: dict[str, Any] | str = resp.json()
+                    except Exception:
+                        detail = resp.text or f"HTTP {resp.status_code}"
+                    raise NetBoxValidationError(
+                        status_code=resp.status_code,
+                        detail=detail,
                     )
                 if resp.status_code == 501:
                     # 501 Not Implemented is permanent — NetBox will never support

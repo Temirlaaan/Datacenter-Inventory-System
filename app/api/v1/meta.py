@@ -15,8 +15,10 @@ from app.auth.dependencies import AuthUser, require_role
 from app.netbox.client import get_netbox_client
 from app.services.device_form import DeviceFormConfig, get_device_form_config
 from app.services.meta import (
+    MetaDeviceType,
     MetaLookupService,
     MetaRack,
+    MetaRole,
     MetaSite,
     MetaStatus,
     get_meta_cache,
@@ -57,9 +59,40 @@ async def list_statuses(
     return await service.get_statuses()
 
 
+@router.get("/device-types", response_model=list[MetaDeviceType])
+async def list_device_types(
+    service: MetaLookupService = Depends(get_meta_service),
+    _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+) -> list[MetaDeviceType]:
+    """All NetBox device types — Sprint 5 Task 2 device-create form's `device_type_id` field."""
+    return await service.get_device_types()
+
+
+@router.get("/roles", response_model=list[MetaRole])
+async def list_roles(
+    service: MetaLookupService = Depends(get_meta_service),
+    _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+) -> list[MetaRole]:
+    """All NetBox device roles — Sprint 5 Task 2 device-create form's `role_id` field."""
+    return await service.get_roles()
+
+
 @router.get("/device-form", response_model=DeviceFormConfig)
 async def get_device_form(
     _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
 ) -> DeviceFormConfig:
     """The server-driven device-edit form config (Architecture §5)."""
     return get_device_form_config()
+
+
+@router.get("/device-create-form", response_model=DeviceFormConfig)
+async def get_device_create_form(
+    _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+) -> DeviceFormConfig:
+    """The server-driven device-create form config (Sprint 5 Task 2, decision D).
+
+    Separate from `/device-form` because creation has fields edit doesn't
+    (`device_type_id`, `role_id` — required at CREATE, immutable on UPDATE
+    per ToR §4.3.4).
+    """
+    return get_device_form_config("device_create.yaml")

@@ -21,7 +21,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-_FORM_CONFIG_PATH = Path(__file__).resolve().parent / "forms" / "device_edit.yaml"
+_FORMS_DIR = Path(__file__).resolve().parent / "forms"
+_DEFAULT_FORM_FILENAME = "device_edit.yaml"
 
 
 class FieldType(StrEnum):
@@ -70,6 +71,13 @@ def load_device_form_config(path: Path) -> DeviceFormConfig:
 
 
 @lru_cache
-def get_device_form_config() -> DeviceFormConfig:
-    """The packaged device-edit form config, parsed once and cached for the process."""
-    return load_device_form_config(_FORM_CONFIG_PATH)
+def get_device_form_config(filename: str = _DEFAULT_FORM_FILENAME) -> DeviceFormConfig:
+    """A packaged form config, parsed once per filename and cached.
+
+    Sprint 3 shipped one form (``device_edit.yaml``). Sprint 5 Task 2 added
+    ``device_create.yaml`` (decision D — separate from edit because creation
+    has fields edit doesn't, e.g. ``device_type_id``, ``role_id``). The
+    ``filename`` parameter selects which packaged YAML to load; default
+    preserves Sprint 3 callers.
+    """
+    return load_device_form_config(_FORMS_DIR / filename)

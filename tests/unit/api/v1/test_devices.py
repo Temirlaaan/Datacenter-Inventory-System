@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.devices import (
+    create_device,
     get_device_service,
     get_write_service,
     read_device,
@@ -24,8 +25,9 @@ from app.api.v1.devices import (
 )
 from app.auth.dependencies import AuthUser
 from app.main import app, handle_netbox_error, handle_netbox_not_found
-from app.netbox.errors import NetBoxNotFound, NetBoxServerError
+from app.netbox.errors import NetBoxNotFound, NetBoxServerError, NetBoxValidationError
 from app.services.device import (
+    DeviceCreateRequest,
     DeviceData,
     DeviceResponse,
     DeviceService,
@@ -203,22 +205,34 @@ def _device_dict(version: str = _VERSION, **overrides: Any) -> dict[str, Any]:
 
 
 class _StubWriteService:
-    """Stands in for NetBoxWriteService — returns a canned updated device or raises."""
+    """Stands in for NetBoxWriteService — returns canned PATCH/POST results or raises."""
 
     def __init__(
         self,
         *,
         updated: dict[str, Any] | None = None,
+        created: dict[str, Any] | None = None,
         error: Exception | None = None,
+        post_error: Exception | None = None,
     ) -> None:
         self._updated = updated
+        self._created = created
         self._error = error
+        self._post_error = post_error
+        self.last_post_kwargs: dict[str, Any] | None = None
 
     async def patch_with_attribution(self, **_kwargs: Any) -> dict[str, Any]:
         if self._error is not None:
             raise self._error
         assert self._updated is not None
         return self._updated
+
+    async def post_with_attribution(self, **kwargs: Any) -> dict[str, Any]:
+        self.last_post_kwargs = kwargs
+        if self._post_error is not None:
+            raise self._post_error
+        assert self._created is not None
+        return self._created
 
 
 # ---------- update handler (direct await) ----------
@@ -369,3 +383,210 @@ async def test_patch_device_endpoint_returns_404_for_unknown_device(
     )
 
     assert resp.status_code == 404
+
+
+# ---------- create device (Sprint 5 Task 2) ----------
+
+
+def _create_body() -> dict[str, Any]:
+    """The smallest valid create body — required fields only."""
+    return {
+        "device_type_id": 11,
+        "role_id": 31,
+        "site_id": 1,
+        "status": "active",
+        "name": "sw-99",
+    }
+
+
+def _created_dict(device_id: int = 99) -> dict[str, Any]:
+    """A raw NetBox create response — all keys to_device_data reads."""
+    return {
+        "id": device_id,
+        "name": "sw-99",
+        "status": {"value": "active", "label": "Active"},
+        "site": {"id": 1, "name": "DC-1"},
+        "rack": None,
+        "position": None,
+        "serial": "",
+        "comments": "",
+        "custom_fields": {"asset_tag": None},
+        "last_updated": _NEW_VERSION,
+    }
+
+
+# --- handler logic (direct await) ---
+
+
+async def test_create_device_handler_returns_device_response_on_success() -> None:
+    stub = _StubWriteService(created=_created_dict())
+    result = await create_device(
+        request=DeviceCreateRequest(**_create_body()),
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, stub),
+    )
+    assert isinstance(result, DeviceResponse)
+    assert result.data.id == 99
+    assert result.data.name == "sw-99"
+    assert result.version == _NEW_VERSION
+
+
+async def test_create_device_handler_passes_payload_through_post_with_attribution() -> None:
+    stub = _StubWriteService(created=_created_dict())
+    await create_device(
+        request=DeviceCreateRequest(**_create_body(), serial="ABC", asset_tag="A-9"),
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, stub),
+    )
+    assert stub.last_post_kwargs is not None
+    kwargs = stub.last_post_kwargs
+    assert kwargs["netbox_path"] == "/api/dcim/devices/"
+    assert kwargs["netbox_object_type"] == "dcim.device"
+    assert kwargs["netbox_object_id"] is None
+    assert kwargs["entity_type"] == "device"
+    assert kwargs["entity_id"] is None  # derived from response by post_with_attribution
+    assert kwargs["operation"] == "device.create"
+    assert kwargs["attach_journal"] is True
+    # Payload is `to_netbox_create_payload`'s output (renames applied)
+    assert kwargs["payload"]["device_type"] == 11
+    assert kwargs["payload"]["role"] == 31
+    assert kwargs["payload"]["site"] == 1
+    assert kwargs["payload"]["serial"] == "ABC"
+    assert kwargs["payload"]["custom_fields"] == {"asset_tag": "A-9"}
+
+
+async def test_create_device_handler_returns_422_on_netbox_validation_error() -> None:
+    """Correction 2: NetBox 4xx surfaces as a structured 422 with NetBox's
+    actual message (not a 502 'bad gateway')."""
+    netbox_body = {"name": ["device with this name already exists."]}
+    stub = _StubWriteService(
+        post_error=NetBoxValidationError(status_code=400, detail=netbox_body),
+    )
+    result = await create_device(
+        request=DeviceCreateRequest(**_create_body()),
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, stub),
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 422
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+
+
+async def test_create_device_handler_422_message_uses_str_detail_when_text_body() -> None:
+    """When NetBox returned a non-JSON body (e.g. HTML 403), the str detail
+    is surfaced as the message verbatim."""
+    stub = _StubWriteService(
+        post_error=NetBoxValidationError(status_code=403, detail="Forbidden"),
+    )
+    result = await create_device(
+        request=DeviceCreateRequest(**_create_body()),
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, stub),
+    )
+    body = json.loads(bytes(cast(JSONResponse, result).body))
+    assert body["error"]["message"] == "Forbidden"
+    assert body["error"]["netbox_status"] == 403
+
+
+# --- routing / role / validation (AsyncClient) ---
+
+
+async def test_post_create_device_endpoint_returns_201(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(created=_created_dict())
+
+    resp = await client.post("/api/v1/devices/", json=_create_body())
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["data"]["id"] == 99
+    assert body["version"] == _NEW_VERSION
+
+
+async def test_post_create_device_endpoint_returns_422_for_missing_required_field(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(created=_created_dict())
+
+    body = _create_body()
+    del body["device_type_id"]
+    resp = await client.post("/api/v1/devices/", json=body)
+
+    assert resp.status_code == 422
+
+
+async def test_post_create_device_endpoint_returns_422_for_extra_body_field(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """extra='forbid' on DeviceCreateRequest catches typos."""
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(created=_created_dict())
+
+    body = {**_create_body(), "device_type": "not-the-right-field-name"}
+    resp = await client.post("/api/v1/devices/", json=body)
+
+    assert resp.status_code == 422
+
+
+async def test_post_create_device_endpoint_returns_422_for_over_length_name(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(created=_created_dict())
+
+    body = {**_create_body(), "name": "x" * 65}
+    resp = await client.post("/api/v1/devices/", json=body)
+
+    assert resp.status_code == 422
+
+
+async def test_post_create_device_endpoint_returns_422_with_netbox_validation_body(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """End-to-end: NetBox 4xx → structured 422 with netbox_detail in the body."""
+    as_user("dcinv-mobile-user")
+    netbox_body = {"name": ["device with this name already exists."]}
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(
+        post_error=NetBoxValidationError(status_code=400, detail=netbox_body),
+    )
+
+    resp = await client.post("/api/v1/devices/", json=_create_body())
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+
+
+async def test_post_create_device_endpoint_returns_403_without_mobile_role(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-admin")  # admin only, no mobile
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(created=_created_dict())
+
+    resp = await client.post("/api/v1/devices/", json=_create_body())
+
+    assert resp.status_code == 403
+
+
+async def test_post_create_device_endpoint_returns_502_on_netbox_5xx(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """NetBoxServerError flows through main.py's global handler → 502
+    (not 422 — that's only for VALIDATION errors)."""
+    as_user("dcinv-mobile-user")
+    app.dependency_overrides[get_write_service] = lambda: _StubWriteService(
+        post_error=NetBoxServerError("POST /api/dcim/devices/ → 503"),
+    )
+
+    resp = await client.post("/api/v1/devices/", json=_create_body())
+
+    assert resp.status_code == 502

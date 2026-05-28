@@ -104,3 +104,83 @@ def test_device_edit_yaml_loads_with_the_eight_mvp_fields() -> None:
 
 def test_get_device_form_config_is_cached() -> None:
     assert get_device_form_config() is get_device_form_config()
+
+
+# ---------- Sprint 5 Task 2: device_create.yaml + filename parameter ----------
+
+
+_CREATE_FIELD_KEYS = {
+    "device_type_id",
+    "role_id",
+    "site_id",
+    "status",
+    "name",
+    "rack_id",
+    "position",
+    "serial",
+    "asset_tag",
+    "comments",
+}
+
+
+def test_get_device_form_config_default_filename_loads_device_edit_yaml() -> None:
+    """Regression: Sprint 3 callers pass no argument and expect the edit form."""
+    config = get_device_form_config()
+    # Edit form has the eight Sprint 3 keys, not the create form's keys.
+    assert "device_type_id" not in {f.key for f in config.fields}
+    assert "status" in {f.key for f in config.fields}
+
+
+def test_get_device_form_config_loads_device_create_yaml_by_filename() -> None:
+    """Sprint 5: the new filename parameter selects device_create.yaml."""
+    config = get_device_form_config("device_create.yaml")
+
+    assert config.version
+    assert {field.key for field in config.fields} == _CREATE_FIELD_KEYS
+
+
+def test_device_create_yaml_has_all_ten_required_and_optional_fields() -> None:
+    config = get_device_form_config("device_create.yaml")
+    by_key = {field.key: field for field in config.fields}
+
+    # Required fields (Sprint 5 Task 2 plan + NetBox semantics)
+    assert by_key["device_type_id"].required is True
+    assert by_key["role_id"].required is True
+    assert by_key["site_id"].required is True
+    assert by_key["status"].required is True
+    assert by_key["name"].required is True
+
+    # Optional fields (ToR §4.3.4 — 0..N chars)
+    assert by_key["rack_id"].required is False
+    assert by_key["position"].required is False
+    assert by_key["serial"].required is False
+    assert by_key["asset_tag"].required is False
+    assert by_key["comments"].required is False
+
+
+def test_device_create_yaml_field_specific_keys_pass_through() -> None:
+    """The mobile client receives netbox_field / search_endpoint / depends_on
+    untouched via extra='allow' (same as edit form)."""
+    config = get_device_form_config("device_create.yaml")
+    by_key = {field.key: field.model_dump() for field in config.fields}
+
+    assert by_key["device_type_id"]["netbox_field"] == "device_type"
+    assert by_key["role_id"]["netbox_field"] == "role"
+    assert by_key["site_id"]["netbox_field"] == "site"
+    assert by_key["rack_id"]["depends_on"] == ["site_id"]
+    assert by_key["position"]["depends_on"] == ["rack_id"]
+    assert by_key["asset_tag"]["netbox_field"] == "custom_fields.asset_tag"
+    assert by_key["status"]["choices_endpoint"] == "/api/v1/meta/statuses"
+
+
+def test_get_device_form_config_caches_per_filename() -> None:
+    """Sprint 5: lru_cache keys on the filename — same filename returns the
+    same instance; different filenames return different instances."""
+    edit_a = get_device_form_config("device_edit.yaml")
+    edit_b = get_device_form_config("device_edit.yaml")
+    create_a = get_device_form_config("device_create.yaml")
+    create_b = get_device_form_config("device_create.yaml")
+
+    assert edit_a is edit_b
+    assert create_a is create_b
+    assert edit_a is not create_a

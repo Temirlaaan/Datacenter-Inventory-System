@@ -25,6 +25,8 @@ _META_TTL_SECONDS = 300.0
 _SITES_KEY = "meta:sites"
 _RACKS_KEY = "meta:racks"
 _STATUSES_KEY = "meta:statuses"
+_DEVICE_TYPES_KEY = "meta:device-types"
+_ROLES_KEY = "meta:roles"
 
 
 class MetaSite(BaseModel):
@@ -51,6 +53,28 @@ class MetaStatus(BaseModel):
     label: str
 
 
+class MetaDeviceType(BaseModel):
+    """A NetBox device type — Sprint 5 Task 2 device-create form `reference` field.
+
+    `manufacturer_name` is the human-readable manufacturer label (e.g. "Cisco"),
+    derived from the nested `device_type.manufacturer.name`. NetBox 4.x always
+    populates this for a device-type. `u_height` lets the mobile client know
+    how many U the device will occupy when selecting a rack position.
+    """
+
+    id: int
+    model: str
+    manufacturer_name: str
+    u_height: int
+
+
+class MetaRole(BaseModel):
+    """A NetBox device role — Sprint 5 Task 2 device-create form `reference` field."""
+
+    id: int
+    name: str
+
+
 class MetaLookupService:
     """Fetches NetBox static lookups, caching each for 5 minutes."""
 
@@ -66,6 +90,19 @@ class MetaLookupService:
 
     async def get_statuses(self) -> list[MetaStatus]:
         return await self._cache.get_or_fetch(_STATUSES_KEY, self._fetch_statuses)
+
+    async def get_device_types(self) -> list[MetaDeviceType]:
+        """Sprint 5 Task 2: device-create form's `device_type_id` reference field."""
+        return await self._cache.get_or_fetch(_DEVICE_TYPES_KEY, self._fetch_device_types)
+
+    async def get_roles(self) -> list[MetaRole]:
+        """Sprint 5 Task 2: device-create form's `role_id` reference field.
+
+        NetBox 4.x exposes this at `/api/dcim/device-roles/` (3.x also). The
+        write payload uses key `"role"` per NetBox 4.x convention (see
+        `to_netbox_create_payload`); only the WRITE side is version-dependent.
+        """
+        return await self._cache.get_or_fetch(_ROLES_KEY, self._fetch_roles)
 
     async def _fetch_sites(self) -> list[MetaSite]:
         response = await self._netbox.get("/api/dcim/sites/", params={"limit": 0})
@@ -89,6 +126,25 @@ class MetaLookupService:
         response = await self._netbox.options("/api/dcim/devices/")
         choices: list[dict[str, Any]] = response.json()["actions"]["POST"]["status"]["choices"]
         return [MetaStatus(value=choice["value"], label=choice["display"]) for choice in choices]
+
+    async def _fetch_device_types(self) -> list[MetaDeviceType]:
+        response = await self._netbox.get("/api/dcim/device-types/", params={"limit": 0})
+        results: list[dict[str, Any]] = response.json()["results"]
+        return [
+            MetaDeviceType(
+                id=dt["id"],
+                model=dt["model"],
+                manufacturer_name=dt["manufacturer"]["name"],
+                u_height=dt["u_height"],
+            )
+            for dt in results
+        ]
+
+    async def _fetch_roles(self) -> list[MetaRole]:
+        # NetBox 3.x and 4.x both expose device roles at /api/dcim/device-roles/.
+        response = await self._netbox.get("/api/dcim/device-roles/", params={"limit": 0})
+        results: list[dict[str, Any]] = response.json()["results"]
+        return [MetaRole(id=role["id"], name=role["name"]) for role in results]
 
 
 @lru_cache

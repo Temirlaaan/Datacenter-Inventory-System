@@ -11,10 +11,12 @@ from pydantic import ValidationError
 from app.netbox.client import NetBoxClient
 from app.netbox.errors import NetBoxNotFound, NetBoxServerError
 from app.services.device import (
+    DeviceCreateRequest,
     DeviceService,
     DeviceUpdateRequest,
     to_device_data,
     to_netbox_changes,
+    to_netbox_create_payload,
 )
 
 NETBOX_URL = "https://netbox.example.com"
@@ -414,3 +416,178 @@ async def test_get_device_raw_propagates_server_error(
             router.get(f"{NETBOX_URL}/api/dcim/devices/5/").respond(status_code=500)
             with pytest.raises(NetBoxServerError):
                 await DeviceService(client).get_device_raw(5)
+
+
+# ---------- DeviceCreateRequest validation (Sprint 5 Task 2) ----------
+
+
+def _minimal_create() -> dict[str, Any]:
+    """The smallest valid DeviceCreateRequest body — all required fields only."""
+    return {
+        "device_type_id": 11,
+        "role_id": 31,
+        "site_id": 1,
+        "status": "active",
+        "name": "sw-99",
+    }
+
+
+def test_device_create_request_accepts_required_fields_only() -> None:
+    req = DeviceCreateRequest(**_minimal_create())
+    assert req.device_type_id == 11
+    assert req.role_id == 31
+    assert req.site_id == 1
+    assert req.status == "active"
+    assert req.name == "sw-99"
+    # All optional fields default to None
+    assert req.rack_id is None
+    assert req.position is None
+    assert req.serial is None
+    assert req.asset_tag is None
+    assert req.comments is None
+
+
+def test_device_create_request_accepts_all_fields() -> None:
+    req = DeviceCreateRequest(
+        **_minimal_create(),
+        rack_id=7,
+        position=42,
+        serial="ABC123",
+        asset_tag="A-9",
+        comments="core switch",
+    )
+    assert req.rack_id == 7
+    assert req.position == 42
+    assert req.serial == "ABC123"
+    assert req.asset_tag == "A-9"
+    assert req.comments == "core switch"
+
+
+def test_device_create_request_rejects_missing_device_type_id() -> None:
+    body = _minimal_create()
+    del body["device_type_id"]
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**body)
+
+
+def test_device_create_request_rejects_missing_role_id() -> None:
+    body = _minimal_create()
+    del body["role_id"]
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**body)
+
+
+def test_device_create_request_rejects_missing_site_id() -> None:
+    body = _minimal_create()
+    del body["site_id"]
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**body)
+
+
+def test_device_create_request_rejects_missing_status() -> None:
+    body = _minimal_create()
+    del body["status"]
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**body)
+
+
+def test_device_create_request_rejects_missing_name() -> None:
+    body = _minimal_create()
+    del body["name"]
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**body)
+
+
+def test_device_create_request_rejects_empty_name() -> None:
+    """ToR §4.3.4: name is 1-64 chars; empty string fails min_length=1."""
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**{**_minimal_create(), "name": ""})
+
+
+def test_device_create_request_accepts_name_exactly_64_chars() -> None:
+    DeviceCreateRequest(**{**_minimal_create(), "name": "x" * 64})
+
+
+def test_device_create_request_rejects_name_over_64_chars() -> None:
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**{**_minimal_create(), "name": "x" * 65})
+
+
+def test_device_create_request_rejects_serial_over_50_chars() -> None:
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**{**_minimal_create(), "serial": "x" * 51})
+
+
+def test_device_create_request_rejects_asset_tag_over_50_chars() -> None:
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**{**_minimal_create(), "asset_tag": "x" * 51})
+
+
+def test_device_create_request_rejects_comments_over_1000_chars() -> None:
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**{**_minimal_create(), "comments": "x" * 1001})
+
+
+def test_device_create_request_rejects_extra_fields() -> None:
+    """extra='forbid' catches typos like 'device_type' vs 'device_type_id'."""
+    with pytest.raises(ValidationError):
+        DeviceCreateRequest(**_minimal_create(), device_type="not-an-id")
+
+
+# ---------- to_netbox_create_payload ----------
+
+
+def test_to_netbox_create_payload_emits_required_fields_with_renames() -> None:
+    req = DeviceCreateRequest(**_minimal_create())
+    payload = to_netbox_create_payload(req)
+    # Renames: site_id → site, device_type_id → device_type, role_id → role.
+    assert payload == {
+        "device_type": 11,
+        "role": 31,
+        "site": 1,
+        "status": "active",
+        "name": "sw-99",
+    }
+
+
+def test_to_netbox_create_payload_omits_optional_fields_when_none() -> None:
+    req = DeviceCreateRequest(**_minimal_create())
+    payload = to_netbox_create_payload(req)
+    assert "rack" not in payload
+    assert "position" not in payload
+    assert "serial" not in payload
+    assert "comments" not in payload
+    assert "custom_fields" not in payload
+
+
+def test_to_netbox_create_payload_renames_rack_id_to_rack() -> None:
+    req = DeviceCreateRequest(**_minimal_create(), rack_id=7)
+    assert to_netbox_create_payload(req)["rack"] == 7
+
+
+def test_to_netbox_create_payload_nests_asset_tag_under_custom_fields() -> None:
+    req = DeviceCreateRequest(**_minimal_create(), asset_tag="A-9")
+    assert to_netbox_create_payload(req)["custom_fields"] == {"asset_tag": "A-9"}
+
+
+def test_to_netbox_create_payload_emits_all_fields_when_all_set() -> None:
+    req = DeviceCreateRequest(
+        **_minimal_create(),
+        rack_id=7,
+        position=42,
+        serial="ABC123",
+        asset_tag="A-9",
+        comments="core switch",
+    )
+    assert to_netbox_create_payload(req) == {
+        "device_type": 11,
+        "role": 31,
+        "site": 1,
+        "status": "active",
+        "name": "sw-99",
+        "rack": 7,
+        "position": 42,
+        "serial": "ABC123",
+        "comments": "core switch",
+        "custom_fields": {"asset_tag": "A-9"},
+    }

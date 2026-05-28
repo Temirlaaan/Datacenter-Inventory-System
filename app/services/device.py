@@ -180,6 +180,75 @@ class DeviceUpdateRequest(BaseModel):
     comments: str | None = Field(default=None, max_length=1000)
 
 
+class DeviceCreateRequest(BaseModel):
+    """``POST /api/v1/devices/`` payload — Sprint 5 Task 2.
+
+    Field set sourced from:
+    - ToR §4.3.4 editable fields (Status, Site, Rack, Position, Name, Serial,
+      Asset Tag, Comments) — also settable on CREATE.
+    - NetBox semantic requirements (``device_type``, ``role``) — required at
+      POST. ToR §4.3.4 marks them "NOT editable from mobile in MVP" but is
+      silent on creation; Sprint 5 includes them in the create payload (with
+      Task 2 plan flagging this addition explicitly).
+
+    ``extra='forbid'`` catches typos. Length bounds mirror
+    ``forms/device_create.yaml`` and ToR §4.3.4.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Required — NetBox semantics + ToR §4.3.4
+    device_type_id: int
+    role_id: int
+    site_id: int
+    status: str  # slug from /api/v1/meta/statuses; no default — engineer picks
+    name: str = Field(min_length=1, max_length=64)
+
+    # Optional — ToR §4.3.4 ("0 to N chars" for text; rack/position are
+    # explicitly optional on the form)
+    rack_id: int | None = None
+    position: int | None = None
+    serial: str | None = Field(default=None, max_length=50)
+    asset_tag: str | None = Field(default=None, max_length=50)
+    comments: str | None = Field(default=None, max_length=1000)
+
+
+def to_netbox_create_payload(req: DeviceCreateRequest) -> dict[str, Any]:
+    """Map a ``DeviceCreateRequest`` to NetBox's ``POST /api/dcim/devices/`` body.
+
+    Renames per ``forms/device_create.yaml``'s ``netbox_field``:
+    - ``site_id`` → ``site``
+    - ``rack_id`` → ``rack``
+    - ``device_type_id`` → ``device_type``
+    - ``role_id`` → ``role`` (NetBox 4.x convention; NetBox 3.x uses
+      ``device_role`` — flagged in ``docs/parking-lot.md`` alongside the
+      Sprint 4 Task 3 role-key entry)
+    - ``asset_tag`` → ``custom_fields.asset_tag`` (Sprint 3 mapping per
+      parking-lot)
+
+    Only fields the client provided appear in the output; optional fields
+    left as None are omitted.
+    """
+    payload: dict[str, Any] = {
+        "device_type": req.device_type_id,
+        "role": req.role_id,
+        "site": req.site_id,
+        "status": req.status,
+        "name": req.name,
+    }
+    if req.rack_id is not None:
+        payload["rack"] = req.rack_id
+    if req.position is not None:
+        payload["position"] = req.position
+    if req.serial is not None:
+        payload["serial"] = req.serial
+    if req.comments is not None:
+        payload["comments"] = req.comments
+    if req.asset_tag is not None:
+        payload["custom_fields"] = {"asset_tag": req.asset_tag}
+    return payload
+
+
 def to_netbox_changes(request: DeviceUpdateRequest) -> dict[str, Any]:
     """Map a ``DeviceUpdateRequest`` to NetBox's PATCH wire shape.
 
