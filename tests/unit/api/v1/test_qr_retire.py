@@ -135,11 +135,13 @@ class _StubLifecycleService:
         qr_id: str,
         expected_version: str | None,
         user: AuthUser,
-    ) -> QR:
+    ) -> tuple[QR, dict[str, Any] | None]:
         if self._error is not None:
             raise self._error
         assert self._retired is not None
-        return self._retired
+        # Endpoint discards the second tuple element; ``None`` keeps the stub
+        # honest about that contract.
+        return self._retired, None
 
 
 # ---------- handler logic (direct await) ----------

@@ -308,6 +308,58 @@ async def test_qr_code_repository_round_trips_retired_state() -> None:
     assert fetched is not None and fetched.status is QRStatus.RETIRED
 
 
+# --- find_by_bound_device_id (Sprint 5 Task 4) ---
+
+
+async def test_find_by_bound_device_id_returns_qr_when_present() -> None:
+    batch = _batch()
+    bound = QR(
+        id="DCQR-BOUNDED1",
+        batch_id=batch.id,
+        status=QRStatus.BOUND,
+        bound_to_device_id=42,
+        bound_at=_NOW,
+        bound_by_email="alice@example.com",
+        retired_at=None,
+        retired_reason=None,
+    )
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert([bound])
+        await session.commit()
+
+        fetched = await QRCodeRepository(session).find_by_bound_device_id(42)
+    assert fetched == bound
+
+
+async def test_find_by_bound_device_id_returns_none_when_no_bound_qr() -> None:
+    async with get_sessionmaker()() as session:
+        assert await QRCodeRepository(session).find_by_bound_device_id(42) is None
+
+
+async def test_find_by_bound_device_id_returns_none_when_only_retired_qrs_for_device() -> None:
+    """Historical bound_to_device_id is preserved on RETIRED rows (Sprint 2),
+    but find_by_bound_device_id filters to status='bound' so they don't match.
+    """
+    batch = _batch()
+    retired_with_history = QR(
+        id="DCQR-USEDONCE",
+        batch_id=batch.id,
+        status=QRStatus.RETIRED,
+        bound_to_device_id=42,  # historical
+        bound_at=_NOW,
+        bound_by_email="alice@example.com",
+        retired_at=_NOW,
+        retired_reason=None,
+    )
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert([retired_with_history])
+        await session.commit()
+
+        assert await QRCodeRepository(session).find_by_bound_device_id(42) is None
+
+
 # === AuditLogRepository =======================================================
 
 
@@ -474,7 +526,7 @@ async def test_qr_code_repository_get_by_id_for_update_issues_for_update_clause(
 
     statements: list[str] = []
 
-    def _record(conn, cursor, statement, params, context, executemany):  # type: ignore[no-untyped-def]
+    def _record(conn, cursor, statement, params, context, executemany):
         if "qr_codes" in statement and "SELECT" in statement.upper():
             statements.append(statement)
 

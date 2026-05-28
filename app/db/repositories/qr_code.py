@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.qr import QRCodeModel
 from app.db.repositories.errors import RepositoryError
-from app.domain.qr import QR
+from app.domain.qr import QR, QRStatus
 
 
 def _to_domain(model: QRCodeModel) -> QR:
@@ -68,6 +68,21 @@ class QRCodeRepository:
         stmt = select(QRCodeModel).where(QRCodeModel.batch_id == batch_id).order_by(QRCodeModel.id)
         result = await self.session.execute(stmt)
         return [_to_domain(model) for model in result.scalars()]
+
+    async def find_by_bound_device_id(self, device_id: int) -> QR | None:
+        """Return the BOUND QR for ``device_id``, or ``None`` if none.
+
+        The ``qr_one_per_device`` partial unique index guarantees at most one
+        BOUND row per device, so this returns a single ``QR`` or ``None``. Used
+        by Sprint 5 Task 4 decommission to find the QR (if any) to retire
+        before changing the device's status.
+        """
+        stmt = select(QRCodeModel).where(
+            QRCodeModel.bound_to_device_id == device_id,
+            QRCodeModel.status == QRStatus.BOUND,
+        )
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return _to_domain(model) if model is not None else None
 
     async def exists(self, qr_id: str) -> bool:
         stmt = select(QRCodeModel.id).where(QRCodeModel.id == qr_id).limit(1)

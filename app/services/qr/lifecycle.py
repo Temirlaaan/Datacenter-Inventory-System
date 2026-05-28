@@ -218,14 +218,18 @@ class QRLifecycleService:
         qr_id: str,
         expected_version: str | None,
         user: AuthUser,
-    ) -> QR:
+    ) -> tuple[QR, dict[str, Any] | None]:
         """Transition a FREE or BOUND QR to RETIRED.
 
-        FREE → RETIRED is a pure app-DB transaction (no NetBox call, atomic
-        SUCCESS audit row). BOUND → RETIRED clears ``custom_fields.qr_id`` on
-        the bound device via ``patch_with_attribution`` and uses the same
-        three-branch compensation as bind, with the compensation **restoring**
-        ``qr_id`` instead of clearing it.
+        Returns ``(retired_qr, updated_device_dict | None)``. FREE → RETIRED is
+        a pure app-DB transaction (no NetBox call, atomic SUCCESS audit row);
+        the second element is ``None``. BOUND → RETIRED clears
+        ``custom_fields.qr_id`` on the bound device via
+        ``patch_with_attribution`` and returns its response dict as the second
+        element so callers (Sprint 5 Task 4 decommission) can read
+        ``last_updated`` for follow-on OCC. Uses the same three-branch
+        compensation as bind, with the compensation **restoring** ``qr_id``
+        instead of clearing it.
 
         Raises ``MissingVersionError`` if BOUND and ``expected_version`` is
         ``None``; lets ``WriteConflictError`` / ``NetBoxNotFound`` /
@@ -248,7 +252,8 @@ class QRLifecycleService:
             raise QRStateConflictError(qr.status)
 
         if qr.status is QRStatus.FREE:
-            return await self._retire_free(qr_id=qr_id, user=user)
+            retired = await self._retire_free(qr_id=qr_id, user=user)
+            return retired, None
 
         # qr.status is QRStatus.BOUND
         if expected_version is None:
@@ -468,9 +473,13 @@ class QRLifecycleService:
         device_id: int,
         expected_version: str,
         user: AuthUser,
-    ) -> QR:
-        """BOUND → RETIRED — clear ``custom_fields.qr_id`` then DB transition."""
-        await self._write_service.patch_with_attribution(
+    ) -> tuple[QR, dict[str, Any]]:
+        """BOUND → RETIRED — clear ``custom_fields.qr_id`` then DB transition.
+
+        Returns ``(retired_qr, updated_device_dict)`` so callers can read the
+        post-retire ``last_updated`` (Sprint 5 Task 4 decommission OCC chain).
+        """
+        updated_device = await self._write_service.patch_with_attribution(
             netbox_path=f"/api/dcim/devices/{device_id}/",
             netbox_object_type="dcim.device",
             netbox_object_id=device_id,
@@ -483,12 +492,13 @@ class QRLifecycleService:
         )
         # NetBox now shows qr_id=None. From here, any failure demands
         # compensation (restore qr_id=qr.id on the device).
-        return await self._commit_retire_or_compensate(
+        retired = await self._commit_retire_or_compensate(
             qr_id=qr.id,
             device_id=device_id,
             expected_version=expected_version,
             user=user,
         )
+        return retired, updated_device
 
     async def _commit_retire_or_compensate(
         self,

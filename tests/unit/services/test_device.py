@@ -530,8 +530,10 @@ def test_device_create_request_rejects_comments_over_1000_chars() -> None:
 
 def test_device_create_request_rejects_extra_fields() -> None:
     """extra='forbid' catches typos like 'device_type' vs 'device_type_id'."""
+    # The typo is intentional — pass it as **kwargs so mypy doesn't reject the
+    # call before Pydantic gets to.
     with pytest.raises(ValidationError):
-        DeviceCreateRequest(**_minimal_create(), device_type="not-an-id")
+        DeviceCreateRequest(**{**_minimal_create(), "device_type": "not-an-id"})
 
 
 # ---------- to_netbox_create_payload ----------

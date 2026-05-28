@@ -264,7 +264,9 @@ async def retire_qr(
     destructive; safer default than ``dcinv-mobile-user``.
     """
     try:
-        retired = await lifecycle.retire(
+        # Endpoint only needs the retired QR; the updated-device dict is for
+        # Sprint 5 Task 4 (decommission OCC chain).
+        retired, _ = await lifecycle.retire(
             qr_id=qr_id,
             expected_version=request.version,
             user=user,

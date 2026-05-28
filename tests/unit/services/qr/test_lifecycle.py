@@ -852,12 +852,15 @@ async def test_retire_free_transitions_to_retired_with_zero_netbox_calls(
 
         # respx mock with no routes — any NetBox call would fail
         with respx.mock(assert_all_called=False) as router:
-            retired = await service.retire(_QR_ID, None, _user())
+            retired, updated_device = await service.retire(_QR_ID, None, _user())
 
         assert router.calls.call_count == 0
 
     assert retired.status is QRStatus.RETIRED
     assert retired.bound_to_device_id is None
+    # FREE path: no NetBox PATCH, so updated_device is None
+    # (Sprint 5 Task 4 contract — pins the tuple shape for decommission callers).
+    assert updated_device is None
     assert qr_repo.updates == [retired]
     assert write_service.calls == []
 
@@ -889,9 +892,10 @@ async def test_retire_free_with_version_provided_silently_ignores_it(
         service, _s, qr_repo, _a, write_service = _build_service(client)
         qr_repo.by_id[_QR_ID] = _free_qr()
 
-        retired = await service.retire(_QR_ID, "any-version-string", _user())
+        retired, updated_device = await service.retire(_QR_ID, "any-version-string", _user())
 
     assert retired.status is QRStatus.RETIRED
+    assert updated_device is None  # FREE path: still no device dict regardless of version arg
     assert write_service.calls == []  # still no NetBox call
 
 
@@ -994,9 +998,12 @@ async def test_retire_bound_happy_path_returns_retired_qr(
         service, session, qr_repo, audit_repo, write_service = _build_service(client)
         qr_repo.by_id[_QR_ID] = _bound_qr()
 
-        retired = await service.retire(_QR_ID, _VERSION, _user())
+        retired, updated_device = await service.retire(_QR_ID, _VERSION, _user())
 
     assert retired.status is QRStatus.RETIRED
+    # BOUND path: updated_device is patch_with_attribution's return value
+    # (Sprint 5 Task 4 contract — decommission reads .last_updated for OCC chain).
+    assert updated_device == write_service.return_value
     assert qr_repo.updates == [retired]
     assert len(write_service.calls) == 1
     call = write_service.calls[0]
