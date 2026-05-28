@@ -8,6 +8,8 @@
   Mobile entry point is ToR §4.3.2's "Create New Device" button on the
   Free QR screen. Translates NetBox 4xx validation errors to structured
   422 responses (Sprint 5 Correction 2).
+- ``POST /api/v1/devices/{device_id}/comments`` (Sprint 5 Task 3) — append
+  a NetBox journal entry to the device. ToR §4.3.6.
 
 All require the ``dcinv-mobile-user`` role.
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AuthUser, require_role
@@ -23,6 +26,7 @@ from app.db.repositories.audit_log import AuditLogRepository
 from app.db.session import get_session
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxValidationError
+from app.services.comment import CommentService
 from app.services.device import (
     DeviceCreateRequest,
     DeviceResponse,
@@ -45,6 +49,33 @@ def get_device_service() -> DeviceService:
 def get_write_service(session: AsyncSession = Depends(get_session)) -> NetBoxWriteService:
     """Build the three-record-write service from the per-request session."""
     return NetBoxWriteService(get_netbox_client(), session, AuditLogRepository(session))
+
+
+def get_comment_service(
+    write_service: NetBoxWriteService = Depends(get_write_service),
+) -> CommentService:
+    """Build the per-request CommentService (Sprint 5 Task 3)."""
+    return CommentService(write_service)
+
+
+class AddCommentRequest(BaseModel):
+    """``POST /api/v1/devices/{id}/comments`` payload. Sprint 5 Task 3.
+
+    ``max_length=2000`` (Sprint 5 Correction 3): per-incident notes (RMA
+    numbers, ticket refs, observation context) — bounds audit_log JSONB
+    growth (50 ops/day * 2k chars = 100k/day vs 500k at 10k). NetBox
+    journal `comments` supports more, but 2k is the policy cap.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    comment: str = Field(min_length=1, max_length=2000)
+
+
+class AddCommentResponse(BaseModel):
+    """201 response — just the journal entry id."""
+
+    id: int
 
 
 @router.post("/", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)
@@ -92,6 +123,33 @@ async def create_device(
             },
         )
     return DeviceResponse(data=to_device_data(created), version=created["last_updated"])
+
+
+@router.post(
+    "/{device_id}/comments",
+    response_model=AddCommentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_comment(
+    device_id: int,
+    request: AddCommentRequest,
+    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    comment_service: CommentService = Depends(get_comment_service),
+) -> AddCommentResponse:
+    """Append a NetBox journal entry to ``device_id``. Sprint 5 Task 3, ToR §4.3.6.
+
+    NetBoxNotFound / NetBoxClientError flow through ``main.py``'s global
+    handlers (404 / 502). No specialised 422 translation here — add-comment
+    has a much narrower failure mode than device-create (no FK constraints,
+    no uniqueness rules), so the generic 502 is appropriate. Sprint 6
+    candidate to extend NetBoxValidationError catching across all endpoints.
+    """
+    created = await comment_service.add_comment(
+        device_id=device_id,
+        comment=request.comment,
+        user=user,
+    )
+    return AddCommentResponse(id=created["id"])
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
