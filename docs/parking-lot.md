@@ -21,6 +21,16 @@ NetBox statuses:
 discovered dynamically from NetBox via the `/api/v1/meta/statuses` endpoint
 — they do not hardcode the status set).
 
+**Slug verification gate (Sprint 5 Task 4 — `app/services/device_decommission.py`):**
+The decommission service hardcodes `changes={"status": "decommissioning"}` as
+the lowercase NetBox-convention slug. When the NetBox admin adds the status,
+record the exact slug returned by `OPTIONS /api/dcim/devices/`'s
+`actions.POST.status.choices[].value` field. If it differs from
+`"decommissioning"` (e.g. some NetBox installs use display-cased slugs),
+update the constant in `device_decommission.py` to match — single call
+site, one focused commit. Production deploy of Sprint 5 gates on this
+verification.
+
 ---
 
 ## NetBox custom field name verification (deployment dependency for production)
@@ -83,6 +93,29 @@ mobile-app QA.
 **How to fix if any assumption differs:** adjust the extraction in
 `to_device_data` in one focused commit; update the affected unit tests in
 `tests/unit/services/test_device.py` to match the real shape.
+
+---
+
+## RBAC: device-create permission level (decided in Sprint 5, revisit post-rollout)
+
+Sprint 5 decision G allows any `dcinv-mobile-user` to call
+`POST /api/v1/devices/`. This is consistent with ToR §4.3's role assignments
+but may be too permissive in practice — device creation is not a routine
+mobile operation (existing devices are scanned, not created), and a
+mis-creation pollutes NetBox with hard-to-spot junk records.
+
+Consider after rollout feedback:
+
+- **Option A** — Add a `dcinv-mobile-power-user` Keycloak role for trusted
+  engineers; restrict device create + decommission to it. Bind/retire/update
+  stay on `dcinv-mobile-user`.
+- **Option B** — Restrict device create to `dcinv-admin` only (matches
+  decommission's role per decision G). Mobile engineers create-request via
+  out-of-band tooling; admin executes.
+
+**Decision deferred** to post-rollout operational feedback. Both options
+are non-breaking (tightening a role is just a config swap on the endpoint's
+`require_role(...)`). Sprint 5 does not implement.
 
 ---
 

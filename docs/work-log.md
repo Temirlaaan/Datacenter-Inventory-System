@@ -429,3 +429,107 @@ DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_tes
   NETBOX_URL=https://netbox.example.com NETBOX_SERVICE_TOKEN=x KEYCLOAK_BASE_URL=https://sso.example.com \
   uv run pytest --cov=app --cov-branch
 ```
+
+---
+
+## Sprint 5 — Device Write Completion (closed 2026-05-28)
+
+**Status:** Closed. Tasks 1–4 complete, close-out done.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 1 | `NetBoxWriteService.post_with_attribution` — create-path peer of `patch_with_attribution`. Handles two attribution shapes via the same call: pre-existing target (add-comment passes `netbox_object_id=device_id` + `entity_id=str(device_id)`) and self-attributing create (device create passes `netbox_object_id=None` + `entity_id=None`, both derived from `created["id"]`). `attach_journal=False` for add-comment where the POST IS the journal entry. Shared `_record_audit` extracted from `patch_with_attribution`'s inline closure so both apparatus methods reuse the same best-effort audit logic (decision B uniform). New `NetBoxValidationError(NetBoxClientError)` raised by `NetBoxClient._send` for non-404 4xx, backward-compatible subclass so Sprint 3/4 tests pass unchanged |
+| 2 | Device create: `POST /api/v1/devices/` (role `dcinv-mobile-user`). `DeviceCreateRequest` Pydantic schema with `extra='forbid'` mirrors the ToR §4.3.2 mandatory-on-create field set (name, status_id, site_id, rack_id, role_id, device_type_id, position, serial, comments, asset_tag). `to_netbox_create_payload(req)` renames `*_id` → NetBox FK keys (`site_id` → `site`, `device_type_id` → `device_type`, `role_id` → `role`). `device_create.yaml` form config split from `device_edit.yaml` (decision E — avoids the creation-only flag complexity in a single YAML; the mobile app picks the right form per screen). **Correction 2:** `NetBoxValidationError` translated to a structured 422 with `error.code="NETBOX_VALIDATION_ERROR"` carrying NetBox's actual message + status — so the mobile client can surface validation failures (duplicate name, position collision, invalid status) rather than the global 502. Other NetBox errors (404 on referenced FK, 5xx) flow through `main.py`'s global handlers unchanged |
+| 3 | Add-comment: `POST /api/v1/devices/{id}/comments` (role `dcinv-mobile-user`). New `CommentService` is a thin wrapper over `post_with_attribution` with `attach_journal=False`. Audit attribution `entity_type="device"`, `entity_id=str(device_id)` (caller-provided, not derived). 201 response is just `{"id": journal_entry_id}` — minimal surface. **Correction 3:** `max_length=2000` on `comment` field — bounds audit_log JSONB growth (50 ops/day * 2k chars = 100k/day vs 500k at 10k); NetBox journal `comments` supports more, but 2k is the policy cap |
+| 4 | Device decommission: `POST /api/v1/devices/{id}/decommission` (role `dcinv-admin`, decision G). New `DeviceDecommissionService` with QR-first ordering (decision C — keeps failure modes recoverable). Flow: lookup bound QR via new `QRCodeRepository.find_by_bound_device_id` → if present, retire via `QRLifecycleService.retire` (Sprint 4 reuse) → PATCH device `status` to `"decommissioning"`. **Three-branch compensation on the device PATCH** when a QR was retired in Step B: re-bind the QR via `QRLifecycleService.bind` using the captured post-retire device version. Branch 2 (re-bind ok) → `DeviceDecommissionRolledBackError` → 500 `DECOMMISSION_ROLLED_BACK`. Branch 3 (re-bind fails) → `DeviceDecommissionInconsistencyError` → 500 `DECOMMISSION_INCONSISTENCY` + best-effort danger journal on the device. **Correction 4:** when `retire` itself raises `QRRetireInconsistencyError` (Sprint 4 Branch 3), decommission aborts (no device PATCH) and maps to the distinct 500 `QR_INCONSISTENT_AT_DECOMMISSION_ATTEMPT` — the QR is in an undefined state and changing the device status would compound the inconsistency. **Step 0 prerequisite** (apparatus change): `QRLifecycleService.retire` return signature extended to `tuple[QR, dict[str, Any] | None]` so decommission can capture the post-retire `last_updated` for the deterministic OCC token used in re-bind. Endpoint callers destructure `retired_qr, _ = await lifecycle.retire(...)` |
+| 5 | Acceptance + close-out (this entry) |
+
+### Quality bar at close
+
+- **589 tests** (Sprint 4 closed at 460; Sprint 5 added 129 net new), **100% line + branch coverage** across `app/` (1691 statements, 178 branches) — `--cov-fail-under=100` gate passes
+- ruff + black + mypy clean (drive-by fix in this close-out: two pre-existing mypy errors from Tasks 2/3 close-outs — intentional-typo arg in `test_device.py:534`, now-unused `# type: ignore[no-untyped-def]` in `test_repositories.py` — addressed in the Task 4 commit)
+- Migration chain unchanged (Sprint 5 added no migrations; `device.decommission` and `device.add_comment` audit rows ride on the existing `audit_log` table without schema change)
+
+### Pyproject deviations from baseline
+
+**None.** No new dependencies, no version bumps.
+
+### Architectural decisions worth carrying forward
+
+- **`post_with_attribution` as the create-path peer of `patch_with_attribution`** (Task 1, decision Q1 from skeleton). Separate method, not a flag on the patch method — POST has no optimistic-concurrency check, no re-read, and the journal target derivation differs (caller-provided ID vs derived-from-response). Shared `_record_audit` keeps the best-effort audit logic in one place. **Two attribution shapes** through the same signature: pre-existing target (`netbox_object_id=int` + `entity_id=str(...)`) for add-comment, self-attributing (`netbox_object_id=None` + `entity_id=None`, both derived from `created["id"]`) for device create. The "don't fragment the apparatus per call-site" rule held.
+- **`NetBoxValidationError(NetBoxClientError)` as a backward-compatible subclass.** Raised by `NetBoxClient._send` for non-404 4xx. Sprint 3/4 tests that catch the base `NetBoxClientError` still pass; Sprint 5's create endpoint catches the subclass specifically to emit the structured 422. Add-comment doesn't catch it (Sprint 5 deliberate scope decision — narrow failure mode, the generic 502 is appropriate; Sprint 6 candidate to extend specialised 422 translation across all write endpoints).
+- **QR-first decommission ordering with re-bind compensation** (Task 4, decision C). Retiring the QR before the device-status PATCH means a stuck "QR retired, device still active" outcome is more recoverable than "device decommissioning, QR still bound". The re-bind compensation uses the **captured post-retire `last_updated`** as the OCC token — deterministic: if a third party modified the device between our retire and our re-bind, the re-bind raises `WriteConflictError` (escalates to Branch 3 inconsistency) rather than silently skating past with `expected_version=None`. That `WriteConflictError` IS the operational signal we want — concurrent edits during a decommission are unusual and worth human attention.
+- **The decommission service's `device_decommission_db_failed_qr_recompensated` log key** (Task 4). Branch 2 log key for "device PATCH failed but compensation re-bind succeeded" — paired with the `DeviceDecommissionRolledBackError`-coded 500 response so operators can grep for the partial-failure pattern without correlating across audit rows. Branch 3 emits `device_decommission_inconsistency_unrecoverable` at critical level; Correction 4 emits `device_decommission_aborted_qr_inconsistent` at critical level.
+- **`QRLifecycleService.retire` return extended additively** (Task 4 Step 0). New shape `tuple[QR, dict[str, Any] | None]` mirrors `bind`'s `tuple[QR, dict[str, Any]]`; FREE path returns `(qr, None)`, BOUND path returns `(qr, updated_device_dict)`. Endpoint callers destructure `retired_qr, _ = ...`; behavior unchanged at the endpoint. Mechanical churn (one endpoint + a handful of test destructures) but enables decommission's OCC chain.
+- **Decommission service's compensation never goes through `patch_with_attribution`** — same pattern as Sprint 4's bind/retire compensation. The Branch 3 danger journal is posted via the raw `NetBoxClient.post` to avoid writing a misleading second journal entry attributing the compensation as a regular bind.
+- **`QRCodeRepository.find_by_bound_device_id(device_id) -> QR | None`** — single-row lookup defended by the `qr_one_per_device` partial unique index (≤1 BOUND row per device, guaranteed by schema). Returns `None` cleanly when the device has no bound QR (or has only historical RETIRED rows with the device_id preserved per Sprint 2 design).
+- **Decommission DI deliberately omits `QRBatchRepository`** despite the task plan listing it. The decommission flow has no use for the batch repo; injecting it would be dead code. Plan list was a hand-rolled DI menu, not a behavioural spec. Documented here so the plan-vs-code deviation isn't mysterious.
+- **Decommission accepts `reason: str | None` but currently only binds it to a structured log field.** Plumbing it into the NetBox journal entry's comments is a Sprint 6 candidate; the forward-compatible signature avoids needing a body-shape change later.
+
+### Sprint 5 retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all 4 work tasks plus the skeleton review. The Task 4 skeleton review (Q1-Q5) caught architectural ambiguities up front (post_with_attribution as separate method, decommission as its own service, QR-first ordering with compensation logic required, add-comment as a separate endpoint, device_create.yaml split from device_edit.yaml) — none of these were obvious from the sprint plan alone, and a code-first approach would have rewritten them.
+- TDD discipline plus failure-mode counterparts caught real bugs at test time: Task 1's happy-path miscount (pre-check commit caused commits=2 not 1; fixed via the fake session's `commits_to_succeed_first`); Task 1's H1 from code review (bind endpoint forgot `qr_id=bound_qr.id` kwarg in `to_device_data` → device.qr_id was None); Task 2's RUF002 ambiguous character + the `_post_call` helper's hardcoded `netbox_path`.
+- 100% line + branch coverage held through 4 implementation tasks. The `--cov-fail-under=100` gate ran clean on the close-out.
+- The "don't fragment the apparatus per call-site" rule held under pressure. Task 1 considered extending `patch_with_attribution` with a `method` flag; the skeleton review rejected that and committed to `post_with_attribution` as a separate method. Task 4 considered branching `patch_with_attribution`'s journal logic for decommission's danger entry; instead it posts via the raw `NetBoxClient.post`, same pattern as Sprint 4 compensation. Apparatus stayed clean.
+- Captured `post_retire_version` from `retire`'s response (Task 4 Step 0) instead of passing `expected_version=None` on re-bind. Deterministic OCC tokens make the compensation behaviour predictable; the `WriteConflictError` it produces on concurrent edits is informative, not annoying.
+
+**What slowed us down:**
+- Cross-task fixture pollution intermittently produced 27 failures when running `tests/integration/test_repositories.py` alongside `tests/unit/services/test_device.py` standalone. Full-suite ordering avoids it; just an artifact of ad-hoc test selection during diagnostics. Not a real regression.
+- The test DB container went stale twice during the sprint (tmpfs ephemeral) — needed `docker compose -f docker-compose.test.yml up -d` to bring back. Same friction Sprint 3-4 noted; permanent fix is a non-tmpfs volume.
+- `_device_dict` test fixtures in service tests were missing required fields (`serial`, `comments`) that `to_device_data` reads. Surfaced as `KeyError` on first run of the new Task 4 service tests; fixed by adding the keys. Will revisit Sprint 6 — a shared `_device_factory` helper would prevent the recurrence.
+- Two pre-existing mypy errors slipped past Tasks 2/3 close-outs: intentional-typo `device_type` kwarg in `test_device.py:534` (Pydantic ValidationError test) and a now-unused `# type: ignore[no-untyped-def]` in `test_repositories.py`. Surfaced when Task 4 ran the mypy gate against the full tree; fixed inline in the Task 4 commit. Task close-outs going forward should re-run `mypy app/ tests/` (not just `app/`) before declaring clean.
+
+**Discrepancies between ToR / Architecture and what shipped:**
+- **`decommissioning` status slug is unverified.** Sprint 5 Task 4 hardcodes `changes={"status": "decommissioning"}` as the assumed NetBox-convention lowercase slug. Production deploy gates on `OPTIONS /api/dcim/devices/`'s `actions.POST.status.choices[].value` matching — if it differs (some NetBox installs use display-cased slugs), update the constant in `device_decommission.py`. One focused call site, isolated by design. Carried in `docs/parking-lot.md` under "Pending NetBox configuration".
+- **Add-comment endpoint doesn't have specialised 422 translation** for `NetBoxValidationError`. Decision: add-comment's failure mode is much narrower than device-create (no FK constraints, no uniqueness rules), so the generic 502 is appropriate. Sprint 6 candidate to extend the catch across all write endpoints once we know which 4xx shapes NetBox actually returns in production.
+- **Decommission `reason` field plumbed only to logs**, not to the NetBox journal entry's comments. Sprint 6 work — the forward-compatible signature avoids needing a body-shape change later.
+- **`device_create.yaml` form config exists but isn't served by an endpoint yet.** Sprint 3 shipped `GET /api/v1/meta/device-form` returning the edit form; Sprint 5 splits the create form into its own YAML but doesn't add a sibling endpoint. The split was the right architectural move (avoids the creation-only flag complexity), but the mobile-facing endpoint is Sprint 6 work.
+- **RBAC for device create:** decision G allows any `dcinv-mobile-user`. Flagged in `docs/parking-lot.md` for post-rollout reconsideration — device create is not a routine mobile op (existing devices are scanned, not created), and Option A (`dcinv-mobile-power-user` role) or Option B (admin-only) may fit better.
+
+**Deliberately deferred (carried into Sprint 6+):**
+- **Error-shape unification on `GET /qr/{qr_id}`** — Sprint 2's `HTTPException(detail=...)` shape stays. Same Sprint 5 candidate noted in Sprint 4 close-out; not picked up this sprint.
+- **Sessions: `shift_sessions` table + `POST /api/v1/sessions/{start,end}`** — Sprint 6+.
+- **`GET /api/v1/admin/audit` query endpoint** — Sprint 6+ when there's a use case.
+- **`GET /api/v1/meta/device-create-form`** — endpoint to serve the new `device_create.yaml` to mobile (Sprint 5 shipped the YAML split but not the endpoint).
+- **Standalone `/devices/{id}` populating `qr_id`** from the app DB — still `None` on that path. Sprint 6+ when a UI consumer needs it (the combined `GET /qr/{id}` already provides it).
+- **Plumbing decommission's `reason` into the NetBox journal comment** — Sprint 6.
+- **Specialised 422 translation across all NetBox-write endpoints** (decision C extension from Task 3) — Sprint 6.
+- **NetBox circuit breaker** (Architecture §3.3) — deferred (Sprint 3 decision D).
+- **PDF label generation, web admin pages** — later sprints.
+- **Idempotency-key TTL cleanup job** — pre-existing deferral.
+- **Manual smoke against real Keycloak / NetBox** — skipped (no reachable instances in this environment, same as Sprints 1-4). The respx-mocked unit + real-Postgres integration tests cover all branches incl. three-branch compensation.
+
+### Files added in Sprint 5 (high-level)
+
+- `backend/app/services/comment.py` (Task 3) — `CommentService`
+- `backend/app/services/device_decommission.py` (Task 4) — `DeviceDecommissionService` + 2 new exception classes
+- `backend/app/services/forms/device_create.yaml` (Task 2) — create form config split from `device_edit.yaml`
+- `backend/tests/unit/services/test_comment.py` (Task 3)
+- `backend/tests/unit/services/test_device_decommission.py` (Task 4, 11 tests)
+- `backend/tests/unit/api/v1/test_device_create.py` (Task 2)
+- `backend/tests/unit/api/v1/test_device_comments.py` (Task 3)
+- `backend/tests/unit/api/v1/test_device_decommission.py` (Task 4, 13 tests)
+- `backend/tests/integration/test_device_create.py` (Task 2)
+- `backend/tests/integration/test_device_comments.py` (Task 3)
+- `backend/tests/integration/test_device_decommission.py` (Task 4, 4 tests)
+
+### Files modified in Sprint 5
+
+- `backend/app/services/netbox_write.py` (Task 1) — `+post_with_attribution`, `+_record_audit` (extracted from `patch_with_attribution`'s inline closure), `+_post_create_journal_entry`
+- `backend/app/netbox/errors.py` (Task 1) — `+NetBoxValidationError(NetBoxClientError)`
+- `backend/app/netbox/client.py` (Task 1) — `_send` raises `NetBoxValidationError` for non-404 4xx
+- `backend/app/services/device.py` (Task 2) — `+DeviceCreateRequest`, `+to_netbox_create_payload`
+- `backend/app/db/repositories/qr_code.py` (Task 4) — `+find_by_bound_device_id`
+- `backend/app/services/qr/lifecycle.py` (Task 4 Step 0) — `retire` return shape `QR` → `tuple[QR, dict[str, Any] | None]`; `_retire_bound` captures and threads through the `patch_with_attribution` return dict
+- `backend/app/api/v1/qr.py` (Task 4 Step 0) — `retire_qr` destructures the new tuple
+- `backend/app/api/v1/devices.py` (Tasks 2, 3, 4) — `+create_device`, `+add_comment`, `+decommission_device` endpoints + 3 new FastAPI DI factories + 3 new Pydantic request schemas
+- `backend/tests/unit/services/qr/test_lifecycle.py` (Task 4 Step 0) — retire test return-value assertions updated for tuple
+- `backend/tests/unit/api/v1/test_qr_retire.py` (Task 4 Step 0) — stub `retire` signature updated for tuple
+- `backend/tests/integration/test_repositories.py` (Task 4) — +3 tests for `find_by_bound_device_id`; drive-by drop of now-unused `# type: ignore[no-untyped-def]`
+- `backend/tests/unit/services/test_device.py` (Task 4 drive-by) — `extra='forbid'` test fixed to pass typo via `**dict` (was tripping mypy on the intentional bad kwarg)
+- `docs/sprint-5.md` — per-task detail filled in across the sprint; 4 corrections incorporated (Correction 1 status slug verification gate, Correction 2 NetBoxValidationError translation, Correction 3 max_length=2000, Correction 4 QRRetireInconsistencyError abort path)
+- `docs/parking-lot.md` — Sprint 4's "Pending NetBox configuration" entry extended with the Sprint 5 Task 4 slug-verification gate; RBAC decision G (device-create permission level) added as post-rollout revisit
