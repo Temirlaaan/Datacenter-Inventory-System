@@ -1,0 +1,68 @@
+# Device-edit form configuration — server-driven (Architecture §5, CLAUDE.md #5).
+#
+# The mobile app renders this form from generic field *types*; it never knows
+# field names. Adding or removing an editable field is an edit to this file plus
+# a backend redeploy — no mobile build. Bump `version` on every change so the
+# mobile client refetches (Architecture §5.3).
+#
+# Field set is fixed by Sprint 3 decision F / ToR §4.3.4 — no additions.
+version: "2026-05-19.1"
+fields:
+  - key: status
+    label: Status
+    type: choice
+    required: true
+    choices_endpoint: /api/v1/meta/statuses
+
+  - key: site
+    label: Site
+    type: reference
+    required: true
+    search_endpoint: /api/v1/meta/sites
+    confirmation:
+      trigger: value_changed_from_initial
+      message: "Changing site is a significant move. Confirm you are physically relocating this device."
+
+  - key: rack
+    label: Rack
+    type: reference
+    required: false
+    search_endpoint: /api/v1/meta/racks
+    depends_on:
+      - site
+
+  - key: position
+    label: Position (U)
+    type: integer
+    required: false
+    min: 1
+    max_from: selected_rack.u_height
+    depends_on:
+      - rack
+
+  - key: name
+    label: Name
+    type: text
+    required: true
+    max_length: 64
+
+  - key: serial
+    label: Serial Number
+    type: text
+    required: false
+    max_length: 50
+
+  # NetBox device asset tag. Architecture §5.1 maps this to a custom field;
+  # verify `custom_fields.asset_tag` matches the deployed NetBox before Task 6
+  # wires the device PATCH (NetBox also has a native `asset_tag` field).
+  - key: cf_asset_tag
+    label: Asset Tag
+    type: text
+    required: false
+    max_length: 50
+    netbox_field: custom_fields.asset_tag
+
+  - key: comments
+    label: Comments
+    type: multiline_text
+    required: false
