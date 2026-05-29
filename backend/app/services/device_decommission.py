@@ -29,6 +29,8 @@ critical and re-raises; the endpoint translates to a structured
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,13 +116,6 @@ class DeviceDecommissionService:
                 "transaction — would conflict with patch_with_attribution's audit tx"
             )
 
-        log = logger.bind(
-            device_id=device_id,
-            expected_version=expected_version,
-            reason=reason,
-            request_id=current_request_id(),
-        )
-
         # Step A — find bound QR (read-only). qr_one_per_device partial unique
         # index guarantees ≤1.
         async with self._session.begin():
@@ -139,9 +134,13 @@ class DeviceDecommissionService:
                 # Correction 4: QR is in undefined state; don't make it worse
                 # by changing the device status on top. Endpoint translates
                 # this to QR_INCONSISTENT_AT_DECOMMISSION_ATTEMPT 500.
-                log.critical(
+                logger.critical(
                     "device_decommission_aborted_qr_inconsistent",
                     qr_id=bound_qr.id,
+                    device_id=device_id,
+                    expected_version=expected_version,
+                    reason=reason,
+                    request_id=current_request_id(),
                 )
                 raise
             # BOUND retire path always returns the updated device dict.
@@ -176,6 +175,7 @@ class DeviceDecommissionService:
             await self._compensate_rebind_or_inconsistency(
                 bound_qr_id=bound_qr.id,
                 device_id=device_id,
+                expected_version=expected_version,
                 post_retire_version=post_retire_version,
                 user=user,
                 original_err=patch_err,
@@ -188,10 +188,11 @@ class DeviceDecommissionService:
         *,
         bound_qr_id: str,
         device_id: int,
+        expected_version: str,
         post_retire_version: str,
         user: AuthUser,
         original_err: BaseException,
-    ) -> None:
+    ) -> NoReturn:
         """Branch 2/3 compensation. Always raises.
 
         Re-binds the QR via ``QRLifecycleService.bind`` using the captured
@@ -214,6 +215,8 @@ class DeviceDecommissionService:
                 "device_decommission_inconsistency_unrecoverable",
                 qr_id=bound_qr_id,
                 device_id=device_id,
+                expected_version=expected_version,
+                post_retire_version=post_retire_version,
                 request_id=request_id,
                 original_error=repr(original_err),
                 rebind_error=repr(rebind_err),
@@ -231,6 +234,8 @@ class DeviceDecommissionService:
             "device_decommission_db_failed_qr_recompensated",
             qr_id=bound_qr_id,
             device_id=device_id,
+            expected_version=expected_version,
+            post_retire_version=post_retire_version,
             request_id=request_id,
             original_error=repr(original_err),
         )

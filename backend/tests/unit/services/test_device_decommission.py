@@ -454,6 +454,38 @@ async def test_decommission_propagates_write_conflict_from_status_patch(
 # ========== Q3 Branch 2: re-bind compensation succeeds ==========
 
 
+async def test_decommission_write_conflict_on_status_patch_after_retire_compensates_via_rebind(
+    clean_env: None, netbox_env: None
+) -> None:
+    """WriteConflictError on the status PATCH after a successful retire MUST
+    trigger compensation, NOT propagate as 409. Pins the service-layer decision:
+    once the QR is retired, system consistency is the priority — even a stale
+    device-version conflict gets re-bound. The endpoint's 409 DEVICE_CONFLICT
+    handler only fires for retire-step conflicts (no compensation needed) or
+    no-bound-QR conflicts (nothing to undo)."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, write_service, lifecycle = _build_service(client)
+        qr_repo.bound_by_device[_DEVICE_ID] = _bound_qr()
+        write_service.raises = WriteConflictError(
+            current_object={"id": _DEVICE_ID, "last_updated": _FINAL_VERSION},
+            current_version=_FINAL_VERSION,
+        )
+
+        with pytest.raises(DeviceDecommissionRolledBackError) as exc_info:
+            await service.decommission(
+                device_id=_DEVICE_ID,
+                expected_version=_VERSION,
+                reason=None,
+                user=_user(),
+            )
+
+    # Re-bind fired with the post-retire OCC token (NOT propagated as 409).
+    assert len(lifecycle.bind_calls) == 1
+    assert lifecycle.bind_calls[0]["expected_version"] == _POST_RETIRE_VERSION
+    assert exc_info.value.device_id == _DEVICE_ID
+    assert exc_info.value.qr_id == _QR_ID
+
+
 async def test_decommission_device_patch_fails_after_qr_retire_compensates_via_rebind(
     clean_env: None, netbox_env: None
 ) -> None:
