@@ -14,9 +14,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import httpx
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,8 +94,35 @@ async def _run_with_timeout(check: Callable[[], Awaitable[dict[str, str]]]) -> d
         return {"status": "timeout", "detail": "budget_exceeded"}
 
 
+def _auto_end_job_sub_object(request: Request) -> dict[str, object]:
+    """Build the ``auto_end_job`` /health sub-object (Sprint 7 Task 1 decision A).
+
+    Reads :class:`~app.services.auto_end_job.AutoEndJobStatus` from
+    ``app.state``. The status object is created unconditionally by the
+    lifespan so the response shape is consistent regardless of
+    ``SHIFT_AUTO_END_ENABLED`` — operators always see ``enabled``,
+    ``last_iteration_at``, and ``status`` fields.
+
+    Sprint 7 Task 1 decision 1: this sub-object is INFORMATIONAL ONLY. A
+    ``"stale"`` status does NOT flip the overall ``/health`` result to
+    ``degraded`` — the existing 503 trigger stays narrow ("external
+    dependency unreachable"). Operators alert on the sub-field directly.
+    """
+    job_status = request.app.state.auto_end_job_status
+    settings = get_settings()
+    last_at = job_status.last_iteration_at
+    return {
+        "enabled": job_status.enabled,
+        "last_iteration_at": last_at.isoformat() if last_at is not None else None,
+        "status": job_status.health_status(
+            now=datetime.now(UTC),
+            interval_seconds=settings.shift_auto_end_interval_seconds,
+        ),
+    }
+
+
 @router.get("/health")
-async def health(response: Response) -> dict[str, object]:
+async def health(request: Request, response: Response) -> dict[str, object]:
     """Aggregate downstream checks. 200 if all ok; 503 otherwise."""
     db, netbox, keycloak = await asyncio.gather(
         _run_with_timeout(_check_db),
@@ -105,4 +133,8 @@ async def health(response: Response) -> dict[str, object]:
     all_ok = all(c["status"] == "ok" for c in checks.values())
     if not all_ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return {"status": "ok" if all_ok else "degraded", "checks": checks}
+    return {
+        "status": "ok" if all_ok else "degraded",
+        "checks": checks,
+        "auto_end_job": _auto_end_job_sub_object(request),
+    }

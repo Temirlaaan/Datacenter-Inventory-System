@@ -291,3 +291,118 @@ def test_health_completes_within_budget_when_one_check_hangs(
     assert body["checks"]["netbox"]["status"] == "timeout"
     assert body["checks"]["db"]["status"] == "ok"
     assert body["checks"]["keycloak"]["status"] == "ok"
+
+
+# ---------- auto_end_job sub-object (Sprint 7 Task 1) ------------------------
+
+
+def _disable_auto_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent the lifespan from scheduling the background task in tests.
+
+    The /health sub-object reads ``app.state.auto_end_job_status``, which is
+    populated unconditionally by the lifespan. Disabling the task keeps each
+    test deterministic — we mutate the status object directly below.
+    """
+    monkeypatch.setenv("SHIFT_AUTO_END_ENABLED", "false")
+
+
+def test_health_includes_auto_end_job_sub_object_with_enabled_field(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    from app.main import app
+
+    with TestClient(app) as client:
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "auto_end_job" in body
+    assert body["auto_end_job"] == {
+        "enabled": False,
+        "last_iteration_at": None,
+        "status": "healthy",
+    }
+
+
+def test_health_auto_end_job_reports_stale_when_last_iteration_at_is_old(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.auto_end_job import AutoEndJobStatus
+
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_INTERVAL_SECONDS", "300")
+    from app.main import app
+
+    with TestClient(app) as client:
+        # Mutate the status after the lifespan attached it. Mock the loop
+        # having last run 16 minutes ago — older than 3 * 300s = 900s.
+        app.state.auto_end_job_status = AutoEndJobStatus(
+            enabled=True,
+            last_iteration_at=datetime.now(UTC) - timedelta(minutes=16),
+        )
+        resp = client.get("/health")
+
+    assert resp.status_code == 200  # decision 1: stale job does NOT flip overall to 503
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["auto_end_job"]["enabled"] is True
+    assert body["auto_end_job"]["status"] == "stale"
+    assert body["auto_end_job"]["last_iteration_at"] is not None
+
+
+def test_health_auto_end_job_reports_healthy_with_recent_iteration(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.auto_end_job import AutoEndJobStatus
+
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_INTERVAL_SECONDS", "300")
+    from app.main import app
+
+    with TestClient(app) as client:
+        # Last iteration 1 minute ago — well within 3 * 300s.
+        app.state.auto_end_job_status = AutoEndJobStatus(
+            enabled=True,
+            last_iteration_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        resp = client.get("/health")
+
+    body = resp.json()
+    assert body["auto_end_job"]["status"] == "healthy"
+
+
+def test_health_stale_auto_end_job_does_not_make_overall_status_degraded(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 1: the auto_end_job sub-object is informational. A stale loop
+    does NOT cause /health to return 503 or set status='degraded'. Operators
+    alert on the sub-field separately."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.auto_end_job import AutoEndJobStatus
+
+    _stub_checks(monkeypatch)  # all downstreams ok
+    _disable_auto_end(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_INTERVAL_SECONDS", "300")
+    from app.main import app
+
+    with TestClient(app) as client:
+        # Pathologically stale loop.
+        app.state.auto_end_job_status = AutoEndJobStatus(
+            enabled=True,
+            last_iteration_at=datetime.now(UTC) - timedelta(days=7),
+        )
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["auto_end_job"]["status"] == "stale"
