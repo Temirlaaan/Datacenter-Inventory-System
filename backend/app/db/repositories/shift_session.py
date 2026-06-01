@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
@@ -10,6 +11,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.shift_session import ShiftSessionModel
 from app.domain.shift_session import ShiftSession
+
+
+@dataclass(frozen=True, slots=True)
+class ShiftSessionQueryFilters:
+    """Filter spec for ``ShiftSessionRepository.query`` (Sprint 7 Task 3).
+
+    All fields default to ``None`` / ``False`` so the admin endpoint can build
+    the dataclass from optional query params without per-field branching.
+    ``from_`` is named with a trailing underscore because ``from`` is a Python
+    keyword; the wire spelling stays ``?from=...`` via ``Query(alias="from")``.
+    """
+
+    user_keycloak_id: UUID | None = None
+    from_: datetime | None = None
+    to: datetime | None = None
+    active_only: bool = False
 
 
 def _to_domain(model: ShiftSessionModel) -> ShiftSession:
@@ -82,6 +99,41 @@ class ShiftSessionRepository:
             )
         )
         await self.session.execute(stmt)
+
+    async def query(
+        self,
+        *,
+        filters: ShiftSessionQueryFilters,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[ShiftSession], bool]:
+        """Return ``(rows, has_more)`` for the given filters + page (Sprint 7 Task 3).
+
+        Ordered by ``shift_start_at DESC, id DESC`` so the most recent shifts
+        surface first with a stable tiebreaker for identical-timestamp rows.
+        ``has_more`` computed via ``LIMIT page_size + 1`` — same pattern as
+        :py:meth:`app.db.repositories.audit_log.AuditLogRepository.query`,
+        no separate ``COUNT(*)`` round-trip.
+        """
+        stmt = select(ShiftSessionModel)
+        if filters.user_keycloak_id is not None:
+            stmt = stmt.where(ShiftSessionModel.user_keycloak_id == filters.user_keycloak_id)
+        if filters.from_ is not None:
+            stmt = stmt.where(ShiftSessionModel.shift_start_at >= filters.from_)
+        if filters.to is not None:
+            stmt = stmt.where(ShiftSessionModel.shift_start_at <= filters.to)
+        if filters.active_only:
+            stmt = stmt.where(ShiftSessionModel.shift_end_at.is_(None))
+
+        offset = (page - 1) * page_size
+        stmt = (
+            stmt.order_by(ShiftSessionModel.shift_start_at.desc(), ShiftSessionModel.id.desc())
+            .offset(offset)
+            .limit(page_size + 1)
+        )
+        models = (await self.session.execute(stmt)).scalars().all()
+        has_more = len(models) > page_size
+        return [_to_domain(m) for m in models[:page_size]], has_more
 
     async def find_stale_active(self, *, older_than: datetime) -> list[ShiftSession]:
         """Return active shifts whose ``shift_start_at`` predates ``older_than``.

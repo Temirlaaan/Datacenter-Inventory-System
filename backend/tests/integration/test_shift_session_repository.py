@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.db.repositories.shift_session import ShiftSessionRepository
+from app.db.repositories.shift_session import ShiftSessionQueryFilters, ShiftSessionRepository
 from app.db.session import get_engine, get_sessionmaker
 from app.domain.shift_session import ShiftEndReason, ShiftSession
 
@@ -329,3 +329,160 @@ async def test_find_stale_active_orders_by_shift_start_at_ascending() -> None:
             older_than=base - timedelta(hours=12)
         )
     assert [r.id for r in rows] == [older.id, newer_but_still_stale.id]
+
+
+# --- query (Sprint 7 Task 3) -------------------------------------------------
+
+
+async def test_query_with_no_filters_returns_all_rows_in_desc_order() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    older = _active_at(start_at=base - timedelta(hours=2), user_keycloak_id=_USER_A, tablet_id="t1")
+    newer = _active_at(start_at=base - timedelta(hours=1), user_keycloak_id=_USER_B, tablet_id="t2")
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(older)
+        await repo.insert(newer)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, has_more = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(), page=1, page_size=20
+        )
+    assert [r.id for r in rows] == [newer.id, older.id]
+    assert has_more is False
+
+
+async def test_query_filters_by_user_keycloak_id() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    alice = _active_at(start_at=base - timedelta(hours=1), user_keycloak_id=_USER_A, tablet_id="t1")
+    bob = _active_at(start_at=base - timedelta(hours=2), user_keycloak_id=_USER_B, tablet_id="t2")
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(alice)
+        await repo.insert(bob)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, _ = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(user_keycloak_id=_USER_A),
+            page=1,
+            page_size=20,
+        )
+    assert [r.id for r in rows] == [alice.id]
+
+
+async def test_query_filters_by_from_to_on_shift_start_at_inclusive() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    s1 = _active_at(start_at=base - timedelta(hours=10), user_keycloak_id=_USER_A, tablet_id="t1")
+    s2 = _active_at(start_at=base - timedelta(hours=5), user_keycloak_id=_USER_B, tablet_id="t2")
+    s3 = _active_at(
+        start_at=base - timedelta(hours=2),
+        user_keycloak_id=UUID("33333333-3333-3333-3333-333333333333"),
+        tablet_id="t3",
+    )
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        for s in (s1, s2, s3):
+            await repo.insert(s)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, _ = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(
+                from_=base - timedelta(hours=5), to=base - timedelta(hours=2)
+            ),
+            page=1,
+            page_size=20,
+        )
+    assert sorted(r.id for r in rows) == sorted([s2.id, s3.id])
+
+
+async def test_query_active_only_true_excludes_ended_shifts() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    active = _active_at(
+        start_at=base - timedelta(hours=1), user_keycloak_id=_USER_A, tablet_id="t1"
+    )
+    ended = _active_at(
+        start_at=base - timedelta(hours=2), user_keycloak_id=_USER_B, tablet_id="t2"
+    ).end(reason=ShiftEndReason.MANUAL, at=base - timedelta(minutes=30))
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(active)
+        await repo.insert(ended)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, _ = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(active_only=True), page=1, page_size=20
+        )
+    assert [r.id for r in rows] == [active.id]
+
+
+async def test_query_active_only_false_includes_ended_shifts() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    active = _active_at(
+        start_at=base - timedelta(hours=1), user_keycloak_id=_USER_A, tablet_id="t1"
+    )
+    ended = _active_at(
+        start_at=base - timedelta(hours=2), user_keycloak_id=_USER_B, tablet_id="t2"
+    ).end(reason=ShiftEndReason.MANUAL, at=base - timedelta(minutes=30))
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(active)
+        await repo.insert(ended)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, _ = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(), page=1, page_size=20
+        )
+    assert sorted(r.id for r in rows) == sorted([active.id, ended.id])
+
+
+async def test_query_pagination_walks_pages_with_has_more() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    users = [UUID(f"{i:08x}-0000-0000-0000-000000000000") for i in range(1, 6)]
+    sessions = [
+        _active_at(start_at=base - timedelta(hours=i), user_keycloak_id=users[i], tablet_id=f"t{i}")
+        for i in range(5)
+    ]
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        for s in sessions:
+            await repo.insert(s)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        page1, has_more1 = await repo.query(filters=ShiftSessionQueryFilters(), page=1, page_size=2)
+        page2, has_more2 = await repo.query(filters=ShiftSessionQueryFilters(), page=2, page_size=2)
+        page3, has_more3 = await repo.query(filters=ShiftSessionQueryFilters(), page=3, page_size=2)
+    assert len(page1) == 2 and has_more1 is True
+    assert len(page2) == 2 and has_more2 is True
+    assert len(page3) == 1 and has_more3 is False
+    assert len({r.id for r in page1 + page2 + page3}) == 5
+
+
+async def test_query_returns_empty_for_out_of_range_page() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    async with get_sessionmaker()() as db:
+        await ShiftSessionRepository(db).insert(
+            _active_at(start_at=base, user_keycloak_id=_USER_A, tablet_id="t1")
+        )
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows, has_more = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(), page=10, page_size=20
+        )
+    assert rows == []
+    assert has_more is False
+
+
+async def test_query_returns_empty_when_table_empty() -> None:
+    async with get_sessionmaker()() as db:
+        rows, has_more = await ShiftSessionRepository(db).query(
+            filters=ShiftSessionQueryFilters(), page=1, page_size=20
+        )
+    assert rows == []
+    assert has_more is False
