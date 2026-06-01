@@ -24,11 +24,11 @@ class AuditResult(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AuditLogEntry:
-    """A single audit-log row pre-insert. Fields per ToR §7.2.3.
+    """A single audit-log row. Fields per ToR §7.2.3.
 
-    ``id`` is BIGSERIAL on the DB side and is never read back by callers — this
-    is append-only forensics, not a queryable timeline yet. Add it if a sprint
-    requires reading back inserted rows.
+    Insert path: pass ``id=None`` (the default); BIGSERIAL is populated DB-side.
+    Read path: ``id`` carries the persisted primary key — added in Sprint 7
+    Task 2 when the audit-log query endpoint started reading rows back.
 
     The ``before_json`` / ``after_json`` dicts are stored as JSONB. The frozen
     dataclass holds a reference to whatever dict the caller passes; mutating it
@@ -46,3 +46,4 @@ class AuditLogEntry:
     before_json: dict[str, Any]
     after_json: dict[str, Any]
     result: AuditResult
+    id: int | None = None

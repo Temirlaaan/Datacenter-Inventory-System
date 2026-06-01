@@ -62,3 +62,18 @@ def test_audit_log_entry_is_frozen_and_rejects_attribute_assignment() -> None:
     entry = _entry()
     with pytest.raises(dataclasses.FrozenInstanceError):
         entry.result = AuditResult.FAILURE  # type: ignore[misc]
+
+
+def test_audit_log_entry_id_defaults_to_none_for_insert_path() -> None:
+    """Sprint 7 Task 2: id is None pre-insert (BIGSERIAL populates DB-side).
+    The insert path keeps working with all-positional constructors that
+    pre-date the field."""
+    entry = _entry()
+    assert entry.id is None
+
+
+def test_audit_log_entry_id_round_trips_when_populated_on_read() -> None:
+    """Sprint 7 Task 2: the audit-log query endpoint reads rows back with
+    the persisted id populated."""
+    entry = _entry(id=12345)
+    assert entry.id == 12345
