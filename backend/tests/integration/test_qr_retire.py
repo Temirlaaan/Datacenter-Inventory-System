@@ -32,6 +32,7 @@ from app.db.session import get_engine, get_sessionmaker
 from app.domain.qr import QR, QRBatch, QRStatus
 from app.main import app
 from app.netbox.client import get_netbox_client
+from tests.integration.conftest import seed_default_active_shift
 
 pytestmark = pytest.mark.integration
 
@@ -74,10 +75,16 @@ async def _truncate() -> AsyncGenerator[None, None]:
     get_sessionmaker.cache_clear()
     get_netbox_client.cache_clear()
     structlog.contextvars.clear_contextvars()
+    async with get_sessionmaker()() as session:
+        await seed_default_active_shift(session)
+        await session.commit()
     yield
     async with get_sessionmaker()() as session:
         await session.execute(
-            text("TRUNCATE qr_codes, qr_batches, audit_log, idempotency_keys CASCADE")
+            text(
+                "TRUNCATE qr_codes, qr_batches, audit_log,"
+                " idempotency_keys, shift_sessions CASCADE"
+            )
         )
         await session.commit()
     await get_engine().dispose()

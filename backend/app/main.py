@@ -17,6 +17,8 @@ from app.api.v1.devices import router as devices_router
 from app.api.v1.health import router as health_router
 from app.api.v1.meta import router as meta_router
 from app.api.v1.qr import router as qr_router
+from app.api.v1.sessions import router as sessions_router
+from app.auth.dependencies import NoActiveShiftError
 from app.config import get_settings
 from app.db.session import get_engine
 from app.netbox.client import get_netbox_client
@@ -46,6 +48,7 @@ app.include_router(admin_batches_router, prefix="/api/v1/admin/batches", tags=["
 app.include_router(qr_router, prefix="/api/v1/qr", tags=["qr"])
 app.include_router(meta_router, prefix="/api/v1/meta", tags=["meta"])
 app.include_router(devices_router, prefix="/api/v1/devices", tags=["devices"])
+app.include_router(sessions_router, prefix="/api/v1/sessions", tags=["sessions"])
 
 
 @app.exception_handler(NetBoxNotFound)
@@ -63,6 +66,23 @@ async def handle_netbox_error(_request: Request, exc: NetBoxClientError) -> JSON
     logger.warning("netbox_upstream_error", error=repr(exc))
     return JSONResponse(
         status_code=status.HTTP_502_BAD_GATEWAY, content={"detail": "NetBox upstream error"}
+    )
+
+
+@app.exception_handler(NoActiveShiftError)
+async def handle_no_active_shift(_request: Request, _exc: NoActiveShiftError) -> JSONResponse:
+    """Sprint 6 decision G: write endpoints require an active shift; the
+    dep-layer ``require_role_with_active_shift`` raises this when the user
+    has none, translated here to the structured 409 mobile clients can show.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "error": {
+                "code": "NO_ACTIVE_SHIFT",
+                "message": "No active shift — start a shift before performing this action.",
+            }
+        },
     )
 
 

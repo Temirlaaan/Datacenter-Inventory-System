@@ -71,7 +71,7 @@ def _format_journal_comment(
     return (
         f"Modified by {user.email or 'unknown'} via mobile app.\n"
         f"Request ID: {request_id}\n"
-        f"Session: {user.session_id or 'unknown'}\n"
+        f"Session: {user.shift_session_id or 'unknown'}\n"
         f"Changes:\n{_format_diff(original, changes)}"
     )
 
@@ -89,7 +89,7 @@ def _format_create_journal_comment(
     return (
         f"Created by {user.email or 'unknown'} via mobile app.\n"
         f"Request ID: {request_id}\n"
-        f"Session: {user.session_id or 'unknown'}\n"
+        f"Session: {user.shift_session_id or 'unknown'}\n"
         f"Object ID: {created.get('id', 'unknown')}"
     )
 
@@ -239,7 +239,10 @@ class NetBoxWriteService:
                 timestamp=timestamp,
                 user_email=user.email or "",
                 user_keycloak_id=UUID(user.sub),
-                session_id=UUID(user.session_id) if user.session_id else None,
+                # Sprint 6 decision D: session_id is now sourced from the
+                # active shift_sessions row populated by
+                # require_role_with_active_shift, not the JWT sid claim.
+                session_id=user.shift_session_id,
                 operation=operation,
                 entity_type=entity_type,
                 entity_id=entity_id,

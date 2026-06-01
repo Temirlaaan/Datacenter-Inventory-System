@@ -17,6 +17,7 @@ class Base(DeclarativeBase):
 from app.db.models.audit import AuditLogModel  # noqa: E402
 from app.db.models.idempotency import IdempotencyKeyModel  # noqa: E402
 from app.db.models.qr import QRBatchModel, QRCodeModel  # noqa: E402
+from app.db.models.shift_session import ShiftSessionModel  # noqa: E402
 
 __all__ = [
     "AuditLogModel",
@@ -24,4 +25,5 @@ __all__ = [
     "IdempotencyKeyModel",
     "QRBatchModel",
     "QRCodeModel",
+    "ShiftSessionModel",
 ]

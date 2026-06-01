@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import AuthUser, require_role
+from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session
@@ -135,7 +135,7 @@ class DeviceDecommissionRequest(BaseModel):
 @router.post("/", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)
 async def create_device(
     request: DeviceCreateRequest,
-    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     write_service: NetBoxWriteService = Depends(get_write_service),
 ) -> DeviceResponse | JSONResponse:
     """Create a new NetBox device. ToR §4.3.2 (Create New Device flow).
@@ -187,7 +187,7 @@ async def create_device(
 async def add_comment(
     device_id: int,
     request: AddCommentRequest,
-    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     comment_service: CommentService = Depends(get_comment_service),
 ) -> AddCommentResponse:
     """Append a NetBox journal entry to ``device_id``. Sprint 5 Task 3, ToR §4.3.6.
@@ -210,7 +210,7 @@ async def add_comment(
 async def decommission_device(
     device_id: int,
     request: DeviceDecommissionRequest,
-    user: AuthUser = Depends(require_role("dcinv-admin")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     service: DeviceDecommissionService = Depends(get_decommission_service),
 ) -> DeviceResponse | JSONResponse:
     """Decommission ``device_id``. Sprint 5 Task 4, ToR §4.3.5.
@@ -328,7 +328,7 @@ async def update_device(
     device_id: int,
     request: DeviceUpdateRequest,
     if_unmodified_since: str = Header(..., alias="If-Unmodified-Since"),
-    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     write_service: NetBoxWriteService = Depends(get_write_service),
 ) -> DeviceResponse | JSONResponse:
     """PATCH editable fields on a NetBox device with optimistic concurrency.

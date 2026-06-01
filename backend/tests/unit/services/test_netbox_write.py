@@ -95,8 +95,20 @@ class _FailingAuditRepo:
 # ---------- helpers ----------
 
 
-def _user(*, email: str | None = "alice@example.com", session_id: str | None = None) -> AuthUser:
-    return AuthUser(sub=_USER_SUB, email=email, roles=("dcinv-admin",), session_id=session_id)
+def _user(
+    *,
+    email: str | None = "alice@example.com",
+    shift_session_id: UUID | None = None,
+) -> AuthUser:
+    # Sprint 6 Task 4: audit row session_id is sourced from shift_session_id
+    # (populated by require_role_with_active_shift), not the JWT sid claim.
+    return AuthUser(
+        sub=_USER_SUB,
+        email=email,
+        roles=("dcinv-admin",),
+        session_id=None,
+        shift_session_id=shift_session_id,
+    )
 
 
 def _device(version: str = _VERSION, **overrides: Any) -> dict[str, Any]:
@@ -380,32 +392,37 @@ async def test_patch_with_attribution_audit_request_id_matches_contextvar(
     assert str(repo.entries[0].request_id) == bound_id
 
 
-async def test_patch_with_attribution_records_session_id_from_auth_user(
+async def test_patch_with_attribution_records_session_id_from_active_shift(
     clean_env: None, netbox_env: None
 ) -> None:
-    """Decision C: session_id comes from the JWT sid claim carried on AuthUser."""
+    """Sprint 6 decision D: session_id is sourced from the active shift_sessions
+    row populated by ``require_role_with_active_shift``, not the JWT sid claim."""
     repo = _RecordingAuditRepo()
-    session_id = "22222222-2222-2222-2222-222222222222"
+    shift_session_id = UUID("22222222-2222-2222-2222-222222222222")
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:
             router.get(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device())
             router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device(_NEW_VERSION))
             router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").respond(status_code=201, json={"id": 1})
-            await _call(_service(client, repo), user=_user(session_id=session_id))
+            await _call(_service(client, repo), user=_user(shift_session_id=shift_session_id))
 
-    assert str(repo.entries[0].session_id) == session_id
+    assert repo.entries[0].session_id == shift_session_id
 
 
-async def test_patch_with_attribution_records_none_session_id_when_absent(
+async def test_patch_with_attribution_records_none_session_id_when_no_shift_id_on_user(
     clean_env: None, netbox_env: None
 ) -> None:
+    """Defensive: if ``shift_session_id`` is absent on the AuthUser (e.g. an
+    unauthenticated test wiring) the audit row still inserts with NULL — the
+    dep-layer gate is what enforces "no write without shift", not the service.
+    """
     repo = _RecordingAuditRepo()
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:
             router.get(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device())
             router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device(_NEW_VERSION))
             router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").respond(status_code=201, json={"id": 1})
-            await _call(_service(client, repo), user=_user(session_id=None))
+            await _call(_service(client, repo), user=_user(shift_session_id=None))
 
     assert repo.entries[0].session_id is None
 
@@ -460,7 +477,7 @@ def test_format_diff_shows_none_for_field_absent_from_original() -> None:
 def test_format_journal_comment_includes_user_request_and_diff() -> None:
     request_id = UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab")
     comment = _format_journal_comment(
-        user=_user(session_id="22222222-2222-2222-2222-222222222222"),
+        user=_user(shift_session_id=UUID("22222222-2222-2222-2222-222222222222")),
         request_id=request_id,
         original=_device(),
         changes={"name": "sw-01-new"},
@@ -471,9 +488,9 @@ def test_format_journal_comment_includes_user_request_and_diff() -> None:
     assert "name: 'sw-01' → 'sw-01-new'" in comment
 
 
-def test_format_journal_comment_falls_back_when_email_and_session_absent() -> None:
+def test_format_journal_comment_falls_back_when_email_and_shift_session_absent() -> None:
     comment = _format_journal_comment(
-        user=_user(email=None, session_id=None),
+        user=_user(email=None, shift_session_id=None),
         request_id=UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab"),
         original=_device(),
         changes={"name": "x"},
@@ -847,20 +864,21 @@ async def test_post_with_attribution_audit_request_id_matches_contextvar(
     assert str(repo.entries[0].request_id) == bound_id
 
 
-async def test_post_with_attribution_records_session_id_from_auth_user(
+async def test_post_with_attribution_records_session_id_from_active_shift(
     clean_env: None, netbox_env: None
 ) -> None:
+    """Sprint 6 decision D: session_id is sourced from the active shift, not JWT sid."""
     repo = _RecordingAuditRepo()
-    session_id = "22222222-2222-2222-2222-222222222222"
+    shift_session_id = UUID("22222222-2222-2222-2222-222222222222")
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:
             router.post(f"{NETBOX_URL}{_CREATE_PATH}").respond(
                 status_code=201, json=_created_device()
             )
             router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").respond(status_code=201, json={"id": 1})
-            await _post_call(_service(client, repo), user=_user(session_id=session_id))
+            await _post_call(_service(client, repo), user=_user(shift_session_id=shift_session_id))
 
-    assert str(repo.entries[0].session_id) == session_id
+    assert repo.entries[0].session_id == shift_session_id
 
 
 # ---------- format helper (pure functions) ----------
@@ -869,7 +887,7 @@ async def test_post_with_attribution_records_session_id_from_auth_user(
 def test_format_create_journal_comment_includes_user_request_and_object_id() -> None:
     request_id = UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab")
     comment = _format_create_journal_comment(
-        user=_user(session_id="22222222-2222-2222-2222-222222222222"),
+        user=_user(shift_session_id=UUID("22222222-2222-2222-2222-222222222222")),
         request_id=request_id,
         created={"id": 99, "name": "sw-99"},
     )
@@ -879,9 +897,9 @@ def test_format_create_journal_comment_includes_user_request_and_object_id() -> 
     assert "Object ID: 99" in comment
 
 
-def test_format_create_journal_comment_falls_back_when_email_and_session_absent() -> None:
+def test_format_create_journal_comment_falls_back_when_email_and_shift_session_absent() -> None:
     comment = _format_create_journal_comment(
-        user=_user(email=None, session_id=None),
+        user=_user(email=None, shift_session_id=None),
         request_id=UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab"),
         created={"id": 99},
     )

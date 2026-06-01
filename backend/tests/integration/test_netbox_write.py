@@ -12,6 +12,7 @@ import sys
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 import respx
@@ -31,7 +32,7 @@ pytestmark = pytest.mark.integration
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _USER_SUB = "11111111-1111-1111-1111-111111111111"
-_SESSION_ID = "22222222-2222-2222-2222-222222222222"
+_SHIFT_SESSION_ID = UUID("22222222-2222-2222-2222-222222222222")
 _DEVICE_PATH = "/api/dcim/devices/5/"
 _JOURNAL_PATH = "/api/extras/journal-entries/"
 _VERSION = "2026-05-18T10:00:00.000000Z"
@@ -87,9 +88,14 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
 
 
-def _user(session_id: str | None = None) -> AuthUser:
+def _user(shift_session_id: UUID | None = None) -> AuthUser:
+    # Sprint 6 Task 4: session_id is now sourced from shift_session_id.
     return AuthUser(
-        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",), session_id=session_id
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        session_id=None,
+        shift_session_id=shift_session_id,
     )
 
 
@@ -138,7 +144,7 @@ async def test_patch_with_attribution_writes_success_audit_row() -> None:
             )
             router.post(f"{base}{_JOURNAL_PATH}").respond(status_code=201, json={"id": 1})
             async with get_sessionmaker()() as session:
-                result = await _patch(client, session, user=_user(_SESSION_ID))
+                result = await _patch(client, session, user=_user(_SHIFT_SESSION_ID))
 
     assert result["name"] == "sw-01-new"
     async with get_sessionmaker()() as session:
@@ -159,7 +165,7 @@ async def test_patch_with_attribution_writes_success_audit_row() -> None:
     assert row.entity_id == "5"
     assert row.before_json == {"object": _device(), "expected_version": _VERSION}
     assert row.after_json["observed_version"] == _VERSION
-    assert row.session_id == _SESSION_ID
+    assert row.session_id == str(_SHIFT_SESSION_ID)
 
 
 async def test_patch_with_attribution_writes_conflict_audit_row() -> None:
@@ -259,7 +265,7 @@ async def test_post_with_attribution_writes_success_audit_row() -> None:
                         "site": 1,
                         "status": "active",
                     },
-                    user=_user(session_id=_SESSION_ID),
+                    user=_user(shift_session_id=_SHIFT_SESSION_ID),
                     attach_journal=True,
                 )
 
@@ -282,4 +288,4 @@ async def test_post_with_attribution_writes_success_audit_row() -> None:
     assert row.entity_id == "99"  # derived from created["id"]
     assert row.before_json == {}
     assert row.after_json == {"object": created}
-    assert row.session_id == _SESSION_ID
+    assert row.session_id == str(_SHIFT_SESSION_ID)

@@ -183,6 +183,22 @@ async def test_handle_netbox_error_returns_502() -> None:
     assert resp.status_code == 502
 
 
+async def test_handle_no_active_shift_returns_409_with_structured_body() -> None:
+    """Sprint 6 Task 4 step (a): dep-layer ``NoActiveShiftError`` translates to
+    the structured 409 ``{"error": {"code": "NO_ACTIVE_SHIFT", ...}}`` body
+    mobile clients can render."""
+    import json
+
+    from app.auth.dependencies import NoActiveShiftError
+    from app.main import handle_no_active_shift
+
+    resp = await handle_no_active_shift(cast(Request, None), NoActiveShiftError())
+
+    assert resp.status_code == 409
+    body = json.loads(bytes(resp.body))
+    assert body["error"]["code"] == "NO_ACTIVE_SHIFT"
+
+
 # ---------- PATCH /devices/{id} ----------
 
 

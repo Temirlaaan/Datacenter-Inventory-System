@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import AuthUser, require_role
+from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
@@ -156,7 +156,7 @@ async def lookup_qr(
 async def bind_qr(
     qr_id: str,
     request: QRBindRequest,
-    user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
     session: AsyncSession = Depends(get_session),
 ) -> QRLookupResponse | JSONResponse:
@@ -254,7 +254,7 @@ async def bind_qr(
 async def retire_qr(
     qr_id: str,
     request: QRRetireRequest,
-    user: AuthUser = Depends(require_role("dcinv-admin")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
     session: AsyncSession = Depends(get_session),
 ) -> QRRetireResponse | JSONResponse:

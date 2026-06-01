@@ -23,6 +23,7 @@ from app.auth.dependencies import AuthUser, get_current_user
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
 from app.main import app
+from tests.integration.conftest import seed_default_active_shift
 
 pytestmark = pytest.mark.integration
 
@@ -60,9 +61,12 @@ async def _truncate() -> AsyncGenerator[None, None]:
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
     structlog.contextvars.clear_contextvars()
+    async with get_sessionmaker()() as session:
+        await seed_default_active_shift(session)
+        await session.commit()
     yield
     async with get_sessionmaker()() as session:
-        await session.execute(text("TRUNCATE audit_log"))
+        await session.execute(text("TRUNCATE audit_log, shift_sessions CASCADE"))
         await session.commit()
     await get_engine().dispose()
     get_settings.cache_clear()

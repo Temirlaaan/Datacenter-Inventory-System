@@ -252,3 +252,112 @@ async def test_require_role_raises_403_when_role_missing(
     with pytest.raises(HTTPException) as exc:
         await dep(user)
     assert exc.value.status_code == 403
+
+
+# ---------- require_role_with_active_shift (Sprint 6 Task 4 step a) ----------
+
+
+def _user(*, sub: str, roles: tuple[str, ...] = ("dcinv-mobile-user",)) -> object:
+    """Build a minimal AuthUser. Imported lazily to avoid pulling app deps at module load."""
+    from app.auth.dependencies import AuthUser
+
+    return AuthUser(sub=sub, email="alice@example.com", roles=roles, session_id=None)
+
+
+class _FakeTx:
+    async def __aenter__(self) -> _FakeTx:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool:
+        return False
+
+
+class _FakeSession:
+    """Minimal stand-in for AsyncSession exposing only ``begin()`` and ``in_transaction()``."""
+
+    def in_transaction(self) -> bool:
+        return False
+
+    def begin(self) -> _FakeTx:
+        return _FakeTx()
+
+
+class _FakeShiftSessionRepo:
+    """Stand-in for ShiftSessionRepository — returns a canned active or None."""
+
+    def __init__(self, active: object) -> None:
+        self._active = active
+
+    async def get_active_for_user(self, _user_keycloak_id: object) -> object:
+        return self._active
+
+
+def _build_active_shift(user_sub: str, shift_id: str = "33333333-3333-3333-3333-333333333333"):
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from app.domain.shift_session import ShiftSession
+
+    return ShiftSession(
+        id=UUID(shift_id),
+        user_email="alice@example.com",
+        user_keycloak_id=UUID(user_sub),
+        shift_start_at=datetime(2026, 5, 29, 9, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="tablet-01",
+        end_reason=None,
+    )
+
+
+async def test_require_role_with_active_shift_returns_user_with_populated_shift_session_id(
+    clean_env: None, auth_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: role present + active shift exists → AuthUser carries the shift's UUID."""
+    from uuid import UUID
+
+    from app.auth import dependencies as deps
+
+    user_sub = "11111111-1111-1111-1111-111111111111"
+    shift = _build_active_shift(user_sub)
+    monkeypatch.setattr(
+        deps, "ShiftSessionRepository", lambda _session: _FakeShiftSessionRepo(shift)
+    )
+
+    dep = deps.require_role_with_active_shift("dcinv-mobile-user")
+    result = await dep(user=_user(sub=user_sub), session=_FakeSession())
+
+    assert result.shift_session_id == shift.id
+    assert isinstance(result.shift_session_id, UUID)
+    # Other fields preserved.
+    assert result.sub == user_sub
+    assert result.roles == ("dcinv-mobile-user",)
+
+
+async def test_require_role_with_active_shift_raises_403_when_role_missing(
+    clean_env: None, auth_env: None
+) -> None:
+    """Role check fires before the DB lookup — no shift repo call."""
+    from app.auth.dependencies import require_role_with_active_shift
+
+    dep = require_role_with_active_shift("dcinv-mobile-user")
+    with pytest.raises(HTTPException) as exc:
+        await dep(user=_user(sub="x", roles=("dcinv-admin",)), session=_FakeSession())
+    assert exc.value.status_code == 403
+
+
+async def test_require_role_with_active_shift_raises_no_active_shift_when_no_shift(
+    clean_env: None, auth_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision G: role present but no active shift → NoActiveShiftError (→ 409 NO_ACTIVE_SHIFT)."""
+    from app.auth import dependencies as deps
+
+    monkeypatch.setattr(
+        deps, "ShiftSessionRepository", lambda _session: _FakeShiftSessionRepo(None)
+    )
+
+    dep = deps.require_role_with_active_shift("dcinv-mobile-user")
+    with pytest.raises(deps.NoActiveShiftError):
+        await dep(
+            user=_user(sub="11111111-1111-1111-1111-111111111111"),
+            session=_FakeSession(),
+        )

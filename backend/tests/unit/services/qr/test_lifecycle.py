@@ -173,8 +173,21 @@ class _FakeWriteService:
 # ---------- helpers ----------
 
 
-def _user(*, email: str | None = "alice@example.com", session_id: str | None = None) -> AuthUser:
-    return AuthUser(sub=_USER_SUB, email=email, roles=("dcinv-mobile-user",), session_id=session_id)
+def _user(
+    *,
+    email: str | None = "alice@example.com",
+    shift_session_id: UUID | None = None,
+) -> AuthUser:
+    # Sprint 6 Task 4 step b2: audit row session_id is sourced from
+    # shift_session_id (populated by require_role_with_active_shift), not
+    # the JWT sid claim.
+    return AuthUser(
+        sub=_USER_SUB,
+        email=email,
+        roles=("dcinv-mobile-user",),
+        session_id=None,
+        shift_session_id=shift_session_id,
+    )
 
 
 def _free_qr(qr_id: str = _QR_ID) -> QR:
@@ -709,7 +722,9 @@ async def test_bind_compensation_audit_request_id_matches_contextvar(
 async def test_bind_compensation_audit_records_user_attribution(
     clean_env: None, netbox_env: None
 ) -> None:
-    session_id = "22222222-2222-2222-2222-222222222222"
+    """Sprint 6 decision D: compensation audit row sources session_id from
+    the active shift on AuthUser, not the JWT sid claim."""
+    shift_session_id = UUID("22222222-2222-2222-2222-222222222222")
     async with NetBoxClient.from_settings() as client:
         service, session, qr_repo, audit_repo, _ws = _build_service(client)
         qr_repo.by_id[_QR_ID] = _free_qr()
@@ -723,12 +738,14 @@ async def test_bind_compensation_audit_records_user_attribution(
                 json=_device_dict(_NEW_VERSION, qr_id=None)
             )
             with pytest.raises(QRBindRolledBackError):
-                await service.bind(_QR_ID, _DEVICE_ID, _VERSION, _user(session_id=session_id))
+                await service.bind(
+                    _QR_ID, _DEVICE_ID, _VERSION, _user(shift_session_id=shift_session_id)
+                )
 
     entry = audit_repo.entries[0]
     assert entry.user_email == "alice@example.com"
     assert entry.user_keycloak_id == UUID(_USER_SUB)
-    assert entry.session_id == UUID(session_id)
+    assert entry.session_id == shift_session_id
 
 
 async def test_bind_compensation_audit_user_with_no_email_writes_empty_string(

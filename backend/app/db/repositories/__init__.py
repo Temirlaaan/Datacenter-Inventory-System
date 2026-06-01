@@ -9,10 +9,12 @@ from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.errors import RepositoryError
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
+from app.db.repositories.shift_session import ShiftSessionRepository
 
 __all__ = [
     "AuditLogRepository",
     "QRBatchRepository",
     "QRCodeRepository",
     "RepositoryError",
+    "ShiftSessionRepository",
 ]

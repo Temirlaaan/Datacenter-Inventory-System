@@ -452,7 +452,8 @@ class QRLifecycleService:
                     timestamp=timestamp,
                     user_email=user.email or "",
                     user_keycloak_id=UUID(user.sub),
-                    session_id=UUID(user.session_id) if user.session_id else None,
+                    # Sprint 6 decision D: source from active shift, not JWT sid.
+                    session_id=user.shift_session_id,
                     operation="qr.retire",
                     entity_type="qr",
                     entity_id=qr_id,
@@ -681,7 +682,8 @@ class QRLifecycleService:
                 timestamp=datetime.now(UTC),
                 user_email=user.email or "",
                 user_keycloak_id=UUID(user.sub),
-                session_id=UUID(user.session_id) if user.session_id else None,
+                # Sprint 6 decision D: source from active shift, not JWT sid.
+                session_id=user.shift_session_id,
                 operation=operation,
                 entity_type="qr",
                 entity_id=qr_id,
