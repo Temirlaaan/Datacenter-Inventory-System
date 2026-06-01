@@ -24,13 +24,14 @@ from uuid import UUID
 class ShiftEndReason(StrEnum):
     """How a shift was ended. Values match the ``shift_end_reason`` Postgres enum.
 
-    ``admin_force_close`` is reserved for the Sprint 7+ admin endpoint; Sprint 6's
-    ``POST /sessions/end`` accepts only ``manual`` and ``inactivity_timeout``.
+    Names mirror ToR §7.2.4 canon. ``FORCED`` is written only by the admin
+    force-close endpoint; ``POST /sessions/end`` accepts only ``manual`` and
+    ``auto_timeout`` at the wire layer.
     """
 
     MANUAL = "manual"
-    INACTIVITY_TIMEOUT = "inactivity_timeout"
-    ADMIN_FORCE_CLOSE = "admin_force_close"
+    AUTO_TIMEOUT = "auto_timeout"
+    FORCED = "forced"
 
 
 class IllegalShiftTransition(Exception):

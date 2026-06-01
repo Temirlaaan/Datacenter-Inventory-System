@@ -206,24 +206,22 @@ async def test_end_session_handler_returns_session_on_happy_path_manual(
     assert stub.end_calls == [{"user_keycloak_id": _USER_A, "reason": ShiftEndReason.MANUAL}]
 
 
-async def test_end_session_handler_returns_session_on_happy_path_inactivity_timeout(
+async def test_end_session_handler_returns_session_on_happy_path_auto_timeout(
     session: AsyncSession,
 ) -> None:
-    ended = _ended(reason=ShiftEndReason.INACTIVITY_TIMEOUT)
+    ended = _ended(reason=ShiftEndReason.AUTO_TIMEOUT)
     stub = _StubShiftSessionService(end_return=ended)
 
     result = await end_session(
-        request=SessionEndRequest(end_reason="inactivity_timeout"),
+        request=SessionEndRequest(end_reason="auto_timeout"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
     )
 
     assert isinstance(result, SessionResponse)
     assert result.session is not None
-    assert result.session.end_reason is ShiftEndReason.INACTIVITY_TIMEOUT
-    assert stub.end_calls == [
-        {"user_keycloak_id": _USER_A, "reason": ShiftEndReason.INACTIVITY_TIMEOUT}
-    ]
+    assert result.session.end_reason is ShiftEndReason.AUTO_TIMEOUT
+    assert stub.end_calls == [{"user_keycloak_id": _USER_A, "reason": ShiftEndReason.AUTO_TIMEOUT}]
 
 
 async def test_end_session_handler_returns_409_when_no_active_shift(
@@ -385,18 +383,19 @@ async def test_post_end_returns_200_on_happy_path(
     assert body["session"]["end_reason"] == "manual"
 
 
-async def test_post_end_returns_422_for_admin_force_close_reason(
+async def test_post_end_returns_422_for_forced_reason(
     client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
 ) -> None:
     # Decision E: the wire format restricts end_reason to {manual,
-    # inactivity_timeout}. admin_force_close is reserved for the Sprint 7+
-    # admin endpoint and MUST be rejected at the schema layer.
+    # auto_timeout}. ``forced`` is admin-only (written by the Sprint 7 admin
+    # force-close endpoint) and MUST be rejected at the schema layer of the
+    # mobile-facing /sessions/end route.
     as_user("dcinv-mobile-user")
     app.dependency_overrides[get_shift_session_service] = lambda: _StubShiftSessionService(
         end_return=_ended()
     )
 
-    resp = await client.post("/api/v1/sessions/end", json={"end_reason": "admin_force_close"})
+    resp = await client.post("/api/v1/sessions/end", json={"end_reason": "forced"})
 
     assert resp.status_code == 422
 

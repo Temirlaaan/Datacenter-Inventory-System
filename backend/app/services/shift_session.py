@@ -13,10 +13,11 @@ Decisions (see ``docs/sprint-6.md`` §"Cross-cutting decisions"):
   caught by the ``shift_sessions_one_active_per_user`` partial unique index and
   surfaced as ``SessionAlreadyActive`` carrying the winning row so the endpoint
   can populate the 409 body.
-- **E** — service-layer ``end`` accepts ANY ``ShiftEndReason`` so a Sprint 7+
-  admin endpoint can reuse it for ``admin_force_close``. The wire-format
-  restriction to ``{manual, inactivity_timeout}`` is enforced by Task 3's
-  Pydantic ``Literal``.
+- **E** — service-layer ``end`` accepts ANY ``ShiftEndReason`` so the Sprint
+  7 admin force-close endpoint can reuse it for ``forced`` and the Sprint 7
+  auto-end background job can reuse it for ``auto_timeout``. The wire-format
+  restriction to ``{manual, auto_timeout}`` on ``POST /sessions/end`` is
+  enforced by that endpoint's Pydantic ``Literal``.
 - **F.a** — the Task 4 dep layer resolves a user's active shift; this service
   exposes ``get_active`` to support that lookup.
 

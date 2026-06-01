@@ -4,9 +4,9 @@
   ``{tablet_id}``. 409 ``SESSION_ALREADY_ACTIVE`` (carries the existing shift
   per decision B) if one is already open for the JWT-identified user.
 - ``POST /api/v1/sessions/end`` — end the user's active shift. Body
-  ``{end_reason}`` restricted to ``manual`` / ``inactivity_timeout`` per
-  decision E (``admin_force_close`` reserved for the Sprint 7+ admin endpoint).
-  409 ``NO_ACTIVE_SHIFT`` if there isn't one.
+  ``{end_reason}`` restricted to ``manual`` / ``auto_timeout`` per
+  decision E (``forced`` is admin-only — written by the Sprint 7 admin
+  force-close endpoint). 409 ``NO_ACTIVE_SHIFT`` if there isn't one.
 - ``GET /api/v1/sessions/active`` — return the caller's active shift or
   ``{"session": null}`` if none.
 
@@ -80,13 +80,13 @@ class SessionEndRequest(BaseModel):
     """``POST /api/v1/sessions/end`` payload.
 
     Decision E: ``end_reason`` is restricted to ``manual`` and
-    ``inactivity_timeout`` at the wire layer. ``admin_force_close`` is reserved
-    for the Sprint 7+ admin endpoint and is rejected with 422 here.
+    ``auto_timeout`` at the wire layer. ``forced`` is admin-only (written by
+    the Sprint 7 admin force-close endpoint) and is rejected with 422 here.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    end_reason: Literal["manual", "inactivity_timeout"]
+    end_reason: Literal["manual", "auto_timeout"]
 
 
 def _to_session_info(session: ShiftSession) -> SessionInfo:

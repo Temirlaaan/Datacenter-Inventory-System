@@ -58,8 +58,8 @@ def _ended(reason: ShiftEndReason = ShiftEndReason.MANUAL) -> ShiftSession:
 def test_shift_end_reason_values_are_lowercase_strings() -> None:
     # Lowercase matches the Postgres enum literals defined in the migration.
     assert ShiftEndReason.MANUAL.value == "manual"
-    assert ShiftEndReason.INACTIVITY_TIMEOUT.value == "inactivity_timeout"
-    assert ShiftEndReason.ADMIN_FORCE_CLOSE.value == "admin_force_close"
+    assert ShiftEndReason.AUTO_TIMEOUT.value == "auto_timeout"
+    assert ShiftEndReason.FORCED.value == "forced"
 
 
 # ShiftSession.__post_init__ — legal construction -------------------------------
@@ -77,14 +77,14 @@ def test_shift_session_construct_ended_with_paired_end_fields_succeeds() -> None
     assert session.end_reason is ShiftEndReason.MANUAL
 
 
-def test_shift_session_construct_ended_with_inactivity_timeout_succeeds() -> None:
-    session = _ended(ShiftEndReason.INACTIVITY_TIMEOUT)
-    assert session.end_reason is ShiftEndReason.INACTIVITY_TIMEOUT
+def test_shift_session_construct_ended_with_auto_timeout_succeeds() -> None:
+    session = _ended(ShiftEndReason.AUTO_TIMEOUT)
+    assert session.end_reason is ShiftEndReason.AUTO_TIMEOUT
 
 
-def test_shift_session_construct_ended_with_admin_force_close_succeeds() -> None:
-    session = _ended(ShiftEndReason.ADMIN_FORCE_CLOSE)
-    assert session.end_reason is ShiftEndReason.ADMIN_FORCE_CLOSE
+def test_shift_session_construct_ended_with_forced_succeeds() -> None:
+    session = _ended(ShiftEndReason.FORCED)
+    assert session.end_reason is ShiftEndReason.FORCED
 
 
 # ShiftSession.__post_init__ — illegal construction -----------------------------
@@ -145,16 +145,16 @@ def test_shift_session_end_from_active_with_manual_returns_new_ended_session() -
     assert original.is_active is True
 
 
-def test_shift_session_end_from_active_with_inactivity_timeout_succeeds() -> None:
+def test_shift_session_end_from_active_with_auto_timeout_succeeds() -> None:
     original = _active()
-    ended = original.end(reason=ShiftEndReason.INACTIVITY_TIMEOUT, at=_END_AT)
-    assert ended.end_reason is ShiftEndReason.INACTIVITY_TIMEOUT
+    ended = original.end(reason=ShiftEndReason.AUTO_TIMEOUT, at=_END_AT)
+    assert ended.end_reason is ShiftEndReason.AUTO_TIMEOUT
 
 
-def test_shift_session_end_from_active_with_admin_force_close_succeeds() -> None:
+def test_shift_session_end_from_active_with_forced_succeeds() -> None:
     original = _active()
-    ended = original.end(reason=ShiftEndReason.ADMIN_FORCE_CLOSE, at=_END_AT)
-    assert ended.end_reason is ShiftEndReason.ADMIN_FORCE_CLOSE
+    ended = original.end(reason=ShiftEndReason.FORCED, at=_END_AT)
+    assert ended.end_reason is ShiftEndReason.FORCED
 
 
 def test_shift_session_end_preserves_identity_user_and_tablet_fields() -> None:

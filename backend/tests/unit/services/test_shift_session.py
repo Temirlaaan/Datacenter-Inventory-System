@@ -287,8 +287,8 @@ async def test_start_inside_active_transaction_raises_runtime_error() -> None:
     "reason",
     [
         ShiftEndReason.MANUAL,
-        ShiftEndReason.INACTIVITY_TIMEOUT,
-        ShiftEndReason.ADMIN_FORCE_CLOSE,
+        ShiftEndReason.AUTO_TIMEOUT,
+        ShiftEndReason.FORCED,
     ],
 )
 async def test_end_succeeds_with_each_reason(reason: ShiftEndReason, frozen_now: datetime) -> None:

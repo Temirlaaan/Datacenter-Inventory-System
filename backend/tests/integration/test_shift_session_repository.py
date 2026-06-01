@@ -105,7 +105,7 @@ async def test_shift_session_repository_round_trips_ended_session() -> None:
         shift_start_at=_NOW,
         shift_end_at=_LATER,
         tablet_id="tablet-01",
-        end_reason=ShiftEndReason.INACTIVITY_TIMEOUT,
+        end_reason=ShiftEndReason.AUTO_TIMEOUT,
     )
     async with get_sessionmaker()() as db:
         await ShiftSessionRepository(db).insert(ended)
@@ -113,7 +113,7 @@ async def test_shift_session_repository_round_trips_ended_session() -> None:
 
         fetched = await ShiftSessionRepository(db).get_by_id(ended.id)
     assert fetched == ended
-    assert fetched is not None and fetched.end_reason is ShiftEndReason.INACTIVITY_TIMEOUT
+    assert fetched is not None and fetched.end_reason is ShiftEndReason.AUTO_TIMEOUT
 
 
 # --- get_active_for_user -----------------------------------------------------
