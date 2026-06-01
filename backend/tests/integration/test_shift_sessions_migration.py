@@ -85,7 +85,7 @@ async def test_migration_creates_shift_end_reason_enum_type() -> None:
             )
         )
         labels = [row[0] for row in result]
-    assert labels == ["manual", "inactivity_timeout", "admin_force_close"]
+    assert labels == ["manual", "auto_timeout", "forced"]
 
 
 async def test_migration_creates_shift_end_consistency_check_constraint() -> None:
@@ -173,7 +173,7 @@ async def test_check_constraint_accepts_ended_session_with_both_end_fields_set()
                 "  shift_end_at, tablet_id, end_reason)"
                 " VALUES ('aaaaaaaa-0000-0000-0000-000000000004',"
                 " 'alice@example.com', :user_id, NOW(),"
-                " NOW(), 'tablet-01', 'inactivity_timeout')"
+                " NOW(), 'tablet-01', 'auto_timeout')"
             ),
             {"user_id": _USER_A},
         )
@@ -260,7 +260,11 @@ async def test_partial_unique_index_allows_active_sessions_for_different_users()
 
 
 async def test_downgrade_drops_shift_sessions_table_and_enum_type() -> None:
-    _alembic("downgrade", "-1")
+    # Target the explicit pre-shift_sessions revision rather than ``-1`` so this
+    # test keeps working as new migrations stack on top of the table-creation
+    # migration (Sprint 7 Task 0 added the enum-rename migration on top, so
+    # ``-1`` would now downgrade only the rename, not the table itself).
+    _alembic("downgrade", "b2c3d4e5f6a7")
     try:
         get_engine.cache_clear()
         get_sessionmaker.cache_clear()
@@ -281,3 +285,71 @@ async def test_downgrade_drops_shift_sessions_table_and_enum_type() -> None:
         get_sessionmaker.cache_clear()
     finally:
         _alembic("upgrade", "head")
+
+
+# ----- enum rename migration (Sprint 7 Task 0) --------------------------------
+
+
+async def test_rename_migration_rewrites_pre_rename_rows_in_place() -> None:
+    """``ALTER TYPE ... RENAME VALUE`` must rewrite existing rows in place.
+
+    Inserts two rows with the pre-rename labels (``inactivity_timeout`` and
+    ``admin_force_close``) at the pre-rename schema head, applies the rename
+    migration, and asserts the rows now read the ToR-canonical labels. Done
+    via raw SQL with explicit ``::shift_end_reason`` casts — the post-rename
+    ``ShiftSessionRepository`` and domain ``ShiftEndReason`` use the new
+    constants, so they cannot construct a pre-rename row.
+    """
+    _alembic("downgrade", "c3d4e5f6a7b8")
+    get_engine.cache_clear()
+    get_sessionmaker.cache_clear()
+    row_id_inactivity = "aaaaaaaa-0000-0000-0000-0000000000ab"
+    row_id_force_close = "aaaaaaaa-0000-0000-0000-0000000000ac"
+    try:
+        async with get_sessionmaker()() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO shift_sessions"
+                    " (id, user_email, user_keycloak_id, shift_start_at,"
+                    "  shift_end_at, tablet_id, end_reason)"
+                    " VALUES (:id, 'alice@example.com', :user_id, NOW(),"
+                    " NOW(), 'tablet-01', 'inactivity_timeout'::shift_end_reason)"
+                ),
+                {"id": row_id_inactivity, "user_id": _USER_A},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO shift_sessions"
+                    " (id, user_email, user_keycloak_id, shift_start_at,"
+                    "  shift_end_at, tablet_id, end_reason)"
+                    " VALUES (:id, 'bob@example.com', :user_id, NOW(),"
+                    " NOW(), 'tablet-02', 'admin_force_close'::shift_end_reason)"
+                ),
+                {"id": row_id_force_close, "user_id": _USER_B},
+            )
+            await session.commit()
+        await get_engine().dispose()
+        get_engine.cache_clear()
+        get_sessionmaker.cache_clear()
+        _alembic("upgrade", "head")
+        get_engine.cache_clear()
+        get_sessionmaker.cache_clear()
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                text(
+                    "SELECT end_reason::text FROM shift_sessions"
+                    " WHERE id IN (:id_a, :id_b) ORDER BY id"
+                ),
+                {"id_a": row_id_inactivity, "id_b": row_id_force_close},
+            )
+            labels = [row[0] for row in result]
+        assert labels == ["auto_timeout", "forced"]
+    finally:
+        # Per-test fixture's TRUNCATE handles row cleanup; ensure the schema
+        # is at head with caches cleared for the next test.
+        async with get_sessionmaker()() as session:
+            await session.execute(text("TRUNCATE shift_sessions CASCADE"))
+            await session.commit()
+        await get_engine().dispose()
+        get_engine.cache_clear()
+        get_sessionmaker.cache_clear()
