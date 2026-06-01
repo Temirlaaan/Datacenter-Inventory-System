@@ -533,3 +533,106 @@ DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_tes
 - `backend/tests/unit/services/test_device.py` (Task 4 drive-by) — `extra='forbid'` test fixed to pass typo via `**dict` (was tripping mypy on the intentional bad kwarg)
 - `docs/sprint-5.md` — per-task detail filled in across the sprint; 4 corrections incorporated (Correction 1 status slug verification gate, Correction 2 NetBoxValidationError translation, Correction 3 max_length=2000, Correction 4 QRRetireInconsistencyError abort path)
 - `docs/parking-lot.md` — Sprint 4's "Pending NetBox configuration" entry extended with the Sprint 5 Task 4 slug-verification gate; RBAC decision G (device-create permission level) added as post-rollout revisit
+
+---
+
+## Sprint 6 — Shift Sessions (closed 2026-05-30)
+
+**Status:** Closed. Tasks 1–5 complete.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 1 | `shift_sessions` storage layer: Alembic migration `c3d4e5f6a7b8` adds the table + `shift_end_reason` Postgres enum (`manual` / `inactivity_timeout` / `admin_force_close`) + `shift_end_consistency` CHECK (pairs `shift_end_at` with `end_reason`) + `shift_sessions_one_active_per_user` partial unique index (`WHERE shift_end_at IS NULL`). `app/domain/shift_session.py` adds `ShiftEndReason`, `IllegalShiftTransition`, frozen `ShiftSession` dataclass with `is_active` property + `end()` transition; `__post_init__` mirrors the CHECK so violations surface at construction. `app/db/models/shift_session.py` + `app/db/repositories/shift_session.py` (`get_by_id`, `get_active_for_user`, `insert`, `update`). `insert` deliberately does NOT wrap `IntegrityError` (unlike `AuditLogRepository`) — Task 2 catches the partial-unique-index race specifically to emit `SESSION_ALREADY_ACTIVE`. Mirrors Sprint 2's `qr_codes` DB-enforced-state pattern. |
+| 2 | `ShiftSessionService` (`app/services/shift_session.py`) with `start`, `end`, `get_active`. Pure app-DB orchestration — no NetBox, no audit row (shifts are session metadata, not "operations on entities" — Architecture §3.1's three-record write doesn't apply). Exceptions: `SessionAlreadyActive(active)` (carries the existing shift for the 409 body) and `NoActiveShift(user_keycloak_id)`. `start()` catches the `IntegrityError` race, re-reads in a fresh tx, and raises `SessionAlreadyActive(winner)`; triple race (winner ended between the IntegrityError and re-read) lets the original `IntegrityError` propagate (practically impossible, accepted trade-off). Defensive `in_transaction()` guard mirrors `QRLifecycleService`. Service-layer `end` accepts any `ShiftEndReason` — wire-format restriction to `{manual, inactivity_timeout}` is enforced at the endpoint layer (decision E). |
+| 3 | Three session endpoints in `app/api/v1/sessions.py`, all role `dcinv-mobile-user` (decision I): `POST /api/v1/sessions/start` (body `{tablet_id}`, `min_length=1`, 409 `SESSION_ALREADY_ACTIVE` carries the existing shift per decision B), `POST /api/v1/sessions/end` (body `{end_reason: Literal["manual","inactivity_timeout"]}` — `admin_force_close` rejected as 422 per decision E), `GET /api/v1/sessions/active` (200 + `{"session": null}` when none — chose explicit null over 404 so mobile uses a single null-check, not a try/except). The null path returns a raw `JSONResponse` to bypass `response_model_exclude_none` collapsing it to `{}`. |
+| 4 | **Re-source `audit_log.session_id` across all four write services + dep-layer 409 gate.** Step (a): `AuthUser` gets `shift_session_id: UUID \| None` (default None — backward compatible); new `NoActiveShiftError` + `require_role_with_active_shift(role)` factory composes role gate + active-shift DB lookup; `app/main.py` registers the structured 409 handler. Step (b): `NetBoxWriteService._record_audit` + both `_format_journal_comment` / `_format_create_journal_comment` (the "Session:" text in NetBox journal entries) + `QRLifecycleService._retire_free` + `_best_effort_compensation_audit` all switched from `user.session_id` (JWT sid) to `user.shift_session_id`. Step (c): 6 write endpoints (`POST /qr/{id}/{bind,retire}`, `POST/PATCH /devices/{,id,id/comments,id/decommission}`) switched from `require_role` to `require_role_with_active_shift`; integration test fixtures + `tests/unit/api/v1/conftest.py` extended to seed a canonical active shift before each test and TRUNCATE `shift_sessions` after. Step (d): new `tests/integration/test_active_shift_gate.py` pins the 409 gate on all 6 endpoints + the end-to-end smoke (`POST /sessions/start` → `PATCH /devices/{id}` → assert `audit_log.session_id == shift.id` → `POST /sessions/end`). **`QRGenerationService` was deliberately NOT changed** — the admin-only batch path hardcodes `session_id=None` and is out of plan scope; admins can't open a shift via the current API. |
+| 5 | Acceptance + close-out (this entry). |
+
+### Quality bar at close
+
+- **685 tests** (Sprint 5 → 589; Sprint 6 +96 net new), **100% line + branch coverage** across `app/` (1894 statements, 202 branches) — `--cov-fail-under=100` gate passes.
+- ruff + black + mypy clean.
+- One new migration (`c3d4e5f6a7b8_shift_sessions`); round-trips cleanly (`alembic upgrade head && downgrade -1 && upgrade head`); downgrade drops the index, the table, and the `shift_end_reason` enum in the right order.
+
+### Pyproject deviations from baseline
+
+**None.** No new dependencies, no version bumps.
+
+### Architectural decisions worth carrying forward
+
+- **`audit_log.session_id` semantic change (decision D — load-bearing for any future audit-query work).** Pre-Sprint-6 rows hold a JWT `sid` (ephemeral token UUID; a single shift typically spans several `sid` values as tokens rotate). Post-Sprint-6 rows hold a `shift_sessions.id` (shift UUID; one per engineer-shift). Schema unchanged — both columns are `UUID NOT NULL` — but the meaning of the value flipped. Audit-query consumers must either handle both interpretations or filter by `created_at > 2026-05-30`. No historical migration: rewriting old rows to a synthesised shift would invent attribution that didn't exist.
+- **Decision E split for auto-end (10-min inactivity, ToR §4.1.3).** Mobile owns the 10-minute idle timer and calls `POST /sessions/end` with `{"end_reason": "inactivity_timeout"}`. The Sprint 7+ backend job will be the 12-hour-orphan fallback for crashed/offline tablets — `inactivity_timeout` is reused as the reason because operationally they're the same outcome ("tablet stopped sending heartbeats"). Backend `/end` accepts only `{manual, inactivity_timeout}` at the wire layer; `admin_force_close` is reserved for the Sprint 7+ admin endpoint, which will define its own auth surface.
+- **Decision J for Keycloak revocation (load-bearing for the mobile/backend split).** Backend `/sessions/end` does NOT call Keycloak's revoke endpoint. Mobile is responsible for calling Keycloak's `/logout/revoke` with its refresh token AFTER `/sessions/end` returns success. Preserves Sprint 1's "mobile owns its tokens" principle, avoids adding a Keycloak admin client + new env vars (`KEYCLOAK_ADMIN_CLIENT_*`) to the backend, and matches the way mobile already speaks to Keycloak for OIDC login/refresh. **If a future requirement forces server-side revocation** (e.g. an admin force-close), the cleanest path is a new dedicated service rather than coupling it to `/sessions/end`.
+- **`require_role_with_active_shift` as the single composite dep for write endpoints** (decision F.a). Role-gates first (so unauthorised callers don't pay the DB lookup) then does ONE indexed `SELECT * FROM shift_sessions WHERE user_keycloak_id = ? AND shift_end_at IS NULL` per request (the partial unique index makes this an index scan). The lookup is wrapped in an explicit `async with session.begin()` so SQLAlchemy 2.0's autobegun tx is committed/closed before downstream services open their own `session.begin()` blocks — without that, `QRLifecycleService.bind`'s defensive `in_transaction()` guard fires. Same pattern as Sprint 4 Q2.
+- **No FOR UPDATE row lock on `end()`** — the partial unique index guarantees ≤1 active shift per user, so a concurrent end race collapses to last-write-wins on `shift_end_at` (acceptable: the operation is idempotent enough for a phone with twitchy connectivity). The TASK 2 plan called this out explicitly to make the omission obvious rather than accidental.
+- **Triple-race in `start()` propagates `IntegrityError` rather than fabricating a `SessionAlreadyActive` with no payload.** If the partial-unique-index race fires AND a concurrent end happens between the IntegrityError and our re-read, the re-read returns None. Three concurrent requests for the same user within microseconds is theoretical; surfacing the raw `IntegrityError` as a 500 is more honest than constructing a placeholder.
+- **`AuthUser.session_id` (JWT sid) kept on the dataclass** even though no service reads it after this sprint. Removing it would cascade to every test that constructs an AuthUser. Conservative; can be deleted in a follow-up if it stays unused.
+- **Decision C: `/end` acts on the JWT-identified user's active session, not a session UUID in the body.** Avoids mobile having to persist the session UUID across app restarts; the server resolves it from `sub`.
+- **`POST /api/v1/admin/batches/` is deliberately NOT gated** by `require_role_with_active_shift`. Batch generation is admin-only and the admin doesn't have a session API yet (decision I — sessions are mobile-driven). `QRGenerationService` hardcodes `session_id=None`, unchanged this sprint. Revisit when an admin sessions surface lands.
+
+### Sprint 6 retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm scaled to a 4-step task. Task 4 was decomposed in the plan into steps (a)→(d) with explicit "what's red after each step" expectations; that prediction held — exactly the integration tests the plan anticipated went red after step (b), and only those, with one bonus auth-test-fake-session miss caught quickly.
+- TDD discipline held on Tasks 1-3 (tests before code, including failure-mode counterparts). Task 4 was a re-sourcing task across existing services; "write the new shape first" doesn't quite apply, but the per-step gate-running rhythm caught regressions immediately rather than at the close-out.
+- Apparatus reuse was uniform: Sprint 2's CHECK + partial unique index pattern carried over to `shift_sessions` 1:1; Sprint 4's defensive `in_transaction()` guard pattern applied to `ShiftSessionService`; Sprint 4/5's `_user(...)` fake-AuthUser pattern extended cleanly to `shift_session_id`.
+- 100% coverage held through 4 implementation tasks. The `--cov-fail-under=100` gate ran clean on the close-out.
+- The Task 4 plan correctly predicted that `require_role_with_active_shift` would conflict with downstream services' own `session.begin()` blocks unless wrapped in an explicit `async with session.begin()` itself — the same fix Sprint 4 Q2 documented. Saved a debugging cycle.
+
+**What slowed us down:**
+- Step (a) of Task 4 initially shipped without the explicit `async with session.begin()` wrap around the shift lookup. SQLAlchemy 2.0's autobegun tx then conflicted with `QRLifecycleService.bind`'s `self._session.begin()`, surfacing as the cryptic `RuntimeError("QRLifecycleService.bind called inside an active transaction")` on the first integration-test run after the endpoint switch. One commit to fix; documented in the dep's comment for future reference.
+- IDE noise (wrong Python interpreter path → constant false "module not found" diagnostics) continued across the sprint, same as Sprints 1-5. Not a real problem; just a steady drip of false positives in the editor.
+- Test-DB container went stale once during the sprint (tmpfs ephemeral). Same friction Sprints 3-5 noted; permanent fix would be a non-tmpfs volume.
+- The `tests/unit/api/v1/conftest.py` change to seed the canonical shift had to be paired with corresponding seed logic in 6 integration test files. Mechanical but boring; would have been cleaner with a shared `pytest_plugins` autouse, but the existing per-file `_truncate` fixtures already had per-file truncation scopes (some include `qr_codes`, some don't), so a shared autouse would have over-truncated. Per-file seeding it is.
+
+**Discrepancies between ToR / Architecture and what shipped:**
+- **`shift_sessions.id` vs JWT `sid` semantic change in `audit_log`** (decision D) is the only material divergence from Sprint 3's documented attribution. ToR §4.3.1's "Session: {session_id}" reference matches the new meaning; Architecture §3.1's three-record write apparatus is unchanged (still three records per write, still shared `request_id`).
+- **`POST /api/v1/admin/batches/` keeps `session_id=None` on audit rows** — admin batch generation never had a shift attribution and still doesn't. Operationally this is a non-issue (audit rows still carry `user_keycloak_id` + `user_email` + `request_id`).
+
+**Deliberately deferred (carried into Sprint 7+):**
+- **Auto-end stale sessions (background job)** — backend fallback for tablets that crashed without sending the 10-minute idle `/end` call. Sprint 7 candidate; scope = a periodic job (cron or async task) that ends any `shift_sessions` row with `shift_start_at < NOW() - 12h AND shift_end_at IS NULL` with `end_reason='inactivity_timeout'`. 12h is liberal — mobile catches the 10-min case correctly under normal operation; the job is the safety net for the abnormal case.
+- **Admin endpoints**: `GET /api/v1/admin/sessions` (list all shifts, filter by user/date) and `POST /api/v1/admin/sessions/{id}/force-close` (uses the reserved `admin_force_close` end reason). Both need an admin sessions surface — see decision I.
+- **`POST /api/v1/admin/batches/` gating** — once admins have a shift surface, batch generation should also require an active shift for consistency with the rest of the write API. Architecturally a one-line endpoint change + an audit-row session_id source swap in `QRGenerationService`.
+- **`GET /api/v1/admin/audit` query endpoint** — needed Sprint 6's sessions to be useful as a filter; now unblocked. Sprint 7+.
+- **Sprint 5 carry-overs** (still deferred): decommission `reason` plumbed into NetBox journal comment; error-shape unification on `GET /qr/{id}`; `GET /api/v1/meta/device-create-form`; standalone `/devices/{id}` populating `qr_id`; specialised 422 translation across all write endpoints.
+- **PDF labels, web admin, NetBox circuit breaker, idempotency-key TTL cleanup** — pre-existing deferrals.
+- **Manual smoke against real Keycloak / NetBox** — skipped (no reachable instances in this environment, same as Sprints 1-5).
+
+### Files added in Sprint 6 (high-level)
+
+- `backend/alembic/versions/c3d4e5f6a7b8_shift_sessions.py` (Task 1) — migration
+- `backend/app/domain/shift_session.py` (Task 1) — `ShiftEndReason`, `IllegalShiftTransition`, `ShiftSession`
+- `backend/app/db/models/shift_session.py` (Task 1) — `ShiftSessionModel`
+- `backend/app/db/repositories/shift_session.py` (Task 1) — `ShiftSessionRepository`
+- `backend/app/services/shift_session.py` (Task 2) — `ShiftSessionService` + `SessionAlreadyActive` / `NoActiveShift` exceptions
+- `backend/app/api/v1/sessions.py` (Task 3) — router + 3 endpoints + DI factory
+- `backend/tests/unit/domain/test_shift_session.py` (Task 1, 19 tests)
+- `backend/tests/integration/test_shift_sessions_migration.py` (Task 1, 12 tests)
+- `backend/tests/integration/test_shift_session_repository.py` (Task 1, 12 tests)
+- `backend/tests/unit/services/test_shift_session.py` (Task 2, 17 tests)
+- `backend/tests/unit/api/v1/test_sessions.py` (Task 3, 24 tests)
+- `backend/tests/integration/test_active_shift_gate.py` (Task 4, 7 tests — 6 gate + 1 E2E)
+
+### Files modified in Sprint 6
+
+- `backend/app/db/models/__init__.py` (Task 1) — `+ShiftSessionModel` registration
+- `backend/app/db/repositories/__init__.py` (Task 1) — `+ShiftSessionRepository` export
+- `backend/app/main.py` (Tasks 3, 4) — `+sessions_router` mount + `+handle_no_active_shift` exception handler
+- `backend/app/auth/dependencies.py` (Task 4 step a) — `+AuthUser.shift_session_id`, `+NoActiveShiftError`, `+require_role_with_active_shift`
+- `backend/app/services/netbox_write.py` (Task 4 step b1) — 3 sites switched from `user.session_id` to `user.shift_session_id` (audit row + both journal-text formatters)
+- `backend/app/services/qr/lifecycle.py` (Task 4 step b2) — 2 audit-row sites switched to `user.shift_session_id`
+- `backend/app/api/v1/qr.py` (Task 4 step c) — `bind_qr` + `retire_qr` switched to `require_role_with_active_shift`
+- `backend/app/api/v1/devices.py` (Task 4 step c) — `create_device`, `update_device`, `add_comment`, `decommission_device` switched to `require_role_with_active_shift`
+- `backend/tests/integration/conftest.py` (Task 4 step c) — `+DEFAULT_USER_KEYCLOAK_ID`, `+DEFAULT_SHIFT_SESSION_ID`, `+seed_default_active_shift(session)` helper
+- `backend/tests/unit/api/v1/conftest.py` (Task 4 step c) — autouse fixture seeds the canonical shift; TRUNCATE extended to `shift_sessions`
+- 6 integration test files (Task 4 step c) — autouse fixtures seed the canonical shift; TRUNCATE extended to `shift_sessions`
+- `backend/tests/unit/services/test_netbox_write.py` (Task 4 step b1) — `_user(...)` helper switched to `shift_session_id`; the two session_id-on-audit tests now assert against the shift UUID
+- `backend/tests/unit/services/qr/test_lifecycle.py` (Task 4 step b2) — `_user(...)` helper switched; compensation audit test updated
+- `backend/tests/integration/test_netbox_write.py` (Task 4 step c) — `_user(...)` + the two session_id assertions migrated to `_SHIFT_SESSION_ID`
+- `backend/tests/unit/auth/test_dependencies.py` (Task 4 step a) — 3 new tests for `require_role_with_active_shift` (happy path, 403, NoActiveShiftError)
+- `backend/tests/unit/api/v1/test_devices.py` (Task 4 step a) — `+test_handle_no_active_shift_returns_409_with_structured_body`
+- `docs/sprint-6.md` — per-task plans filled in across the sprint (this work-log entry is the close-out artifact)
+- `docs/parking-lot.md` — admin sessions / `admin_force_close` / auto-end job carved out as Sprint 7+ deferrals
+- `CLAUDE.md` — Repository Status updated for Sprint 6 closure

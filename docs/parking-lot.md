@@ -130,3 +130,59 @@ This is acceptable for the MVP.
 **Phase 2 must add:** alerting on these partial-failure events — e.g. a count of
 `result='partial_failure'` `audit_log` rows per hour, surfaced to whoever owns
 operational monitoring. Until then, partial failures are visible only in logs.
+
+---
+
+## Admin sessions surface (deferred from Sprint 6 to Sprint 7+)
+
+Sprint 6 shipped mobile-driven shift sessions: `POST /api/v1/sessions/start`,
+`POST /api/v1/sessions/end`, `GET /api/v1/sessions/active`, all role
+`dcinv-mobile-user` (decision I). The `shift_end_reason` Postgres enum already
+includes `admin_force_close`, but it's reserved — Sprint 6's `/end` accepts
+only `manual` and `inactivity_timeout` at the wire layer.
+
+Sprint 7+ deliverables:
+
+- **`GET /api/v1/admin/sessions`** — list shifts (filter by user / date range /
+  open-or-closed). Needed by ops to answer "who has an open shift right now".
+- **`POST /api/v1/admin/sessions/{id}/force-close`** — admin closes someone
+  else's shift with `end_reason='admin_force_close'`. Used when a tablet is
+  stolen/lost or an engineer leaves without ending their shift.
+- **Auto-end stale-sessions background job** — scans
+  `shift_start_at < NOW() - 12h AND shift_end_at IS NULL` and ends with
+  `end_reason='inactivity_timeout'`. Backend fallback for tablets that
+  crashed without sending the mobile-owned 10-minute idle `/end` call
+  (decision E split). 12h is liberal — mobile catches the 10-min case
+  correctly under normal operation; the job is the safety net for the
+  abnormal case.
+- **Gate `POST /api/v1/admin/batches/` on an active shift** — Sprint 6 left
+  batch generation un-gated because admins can't open a shift via the current
+  API. Once an admin sessions surface exists, batch generation should also
+  require an active shift for consistency, and `QRGenerationService` should
+  switch its audit row's `session_id` from the hardcoded `None` to
+  `user.shift_session_id`.
+
+These are all non-breaking additions; Sprint 6's mobile flow is unaffected.
+
+---
+
+## `audit_log.session_id` semantic change (Sprint 6 decision D, for any future audit-query work)
+
+Pre-Sprint-6 `audit_log` rows hold a **JWT `sid`** (ephemeral access-token UUID;
+a single shift spans several `sid` values as tokens rotate). Post-Sprint-6 rows
+hold a **`shift_sessions.id`** (one UUID per engineer-shift). Schema is
+unchanged (both are `UUID NOT NULL`); only the meaning of the value flipped.
+No historical migration was performed — rewriting old rows to a synthesised
+shift would invent attribution that didn't exist.
+
+**Consumers of `audit_log.session_id` (now or in the future) must either:**
+
+- handle both interpretations explicitly (e.g. "≤2026-05-30 = JWT sid; later =
+  shift id"), or
+- filter their queries to `audit_log.timestamp > '2026-05-30 ...'` so only
+  shift-id values are in scope.
+
+The Sprint 7+ `GET /api/v1/admin/audit` query endpoint should default to the
+shift-id interpretation and refuse to filter older rows by `session_id` (or
+return them with an explicit "JWT sid era" flag) so naive UIs don't conflate
+the two eras.
