@@ -200,6 +200,13 @@ async def test_decommission_unbound_device_persists_decommissioning_status_and_a
             f"/api/v1/devices/{_DEVICE_ID}/decommission",
             json={"version": _VERSION, "reason": "end of life"},
         )
+        # Sprint 7 Task 4: reason flows through to the NetBox journal comment.
+        journal_calls = [c for c in router.calls if c.request.url.path == _JOURNAL_PATH]
+        assert len(journal_calls) == 1
+        import json as _json
+
+        journal_body = _json.loads(journal_calls[0].request.content)
+        assert "Reason: end of life" in journal_body["comments"]
 
     assert resp.status_code == 200
     body = resp.json()

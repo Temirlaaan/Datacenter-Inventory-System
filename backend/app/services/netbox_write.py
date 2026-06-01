@@ -66,12 +66,20 @@ def _format_journal_comment(
     request_id: UUID,
     original: dict[str, Any],
     changes: dict[str, Any],
+    reason: str | None = None,
 ) -> str:
-    """The human-readable attribution comment posted to the NetBox journal (§3.1)."""
+    """The human-readable attribution comment posted to the NetBox journal (§3.1).
+
+    ``reason`` (Sprint 7 Task 4) is rendered between the attribution block and
+    the diff when provided — gives auditors the WHY alongside the WHAT.
+    Absent line (not ``Reason: None``) when not provided.
+    """
+    reason_line = f"Reason: {reason}\n" if reason is not None else ""
     return (
         f"Modified by {user.email or 'unknown'} via mobile app.\n"
         f"Request ID: {request_id}\n"
         f"Session: {user.shift_session_id or 'unknown'}\n"
+        f"{reason_line}"
         f"Changes:\n{_format_diff(original, changes)}"
     )
 
@@ -119,6 +127,7 @@ class NetBoxWriteService:
         changes: dict[str, Any],
         user: AuthUser,
         entity_id: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Re-read, conflict-check, PATCH, then attribute via journal + audit row.
 
@@ -198,6 +207,7 @@ class NetBoxWriteService:
             user=user,
             original=original,
             changes=changes,
+            reason=reason,
         )
         await self._record_audit(
             request_id=request_id,
@@ -271,6 +281,7 @@ class NetBoxWriteService:
         user: AuthUser,
         original: dict[str, Any],
         changes: dict[str, Any],
+        reason: str | None = None,
     ) -> None:
         """Best-effort journal POST (decision B): log on failure, never raise."""
         payload = {
@@ -278,7 +289,11 @@ class NetBoxWriteService:
             "assigned_object_id": netbox_object_id,
             "kind": "info",
             "comments": _format_journal_comment(
-                user=user, request_id=request_id, original=original, changes=changes
+                user=user,
+                request_id=request_id,
+                original=original,
+                changes=changes,
+                reason=reason,
             ),
         }
         try:

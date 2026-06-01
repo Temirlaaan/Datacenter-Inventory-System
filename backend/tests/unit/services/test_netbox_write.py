@@ -136,6 +136,7 @@ async def _call(
     expected_version: str = _VERSION,
     changes: dict[str, Any] | None = None,
     user: AuthUser | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     return await service.patch_with_attribution(
         netbox_path=_DEVICE_PATH,
@@ -146,6 +147,7 @@ async def _call(
         expected_version=expected_version,
         changes={"name": "sw-01-new"} if changes is None else changes,
         user=user or _user(),
+        reason=reason,
     )
 
 
@@ -238,6 +240,25 @@ async def test_patch_with_attribution_posts_journal_entry_with_attribution(
     assert body["assigned_object_id"] == 5
     assert body["kind"] == "info"
     assert "alice@example.com" in body["comments"]
+
+
+async def test_patch_with_attribution_journal_comment_includes_reason_when_provided(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Sprint 7 Task 4: ``reason`` flows from patch_with_attribution through
+    _post_journal_entry into the journal POST body's ``comments`` field."""
+    repo = _RecordingAuditRepo()
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device())
+            router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").respond(json=_device(_NEW_VERSION))
+            journal_route = router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").respond(
+                status_code=201, json={"id": 1}
+            )
+            await _call(_service(client, repo), reason="Rack moved out of service")
+
+    body = json.loads(journal_route.calls.last.request.content)
+    assert "Reason: Rack moved out of service" in body["comments"]
 
 
 # ---------- conflict path ----------
@@ -497,6 +518,37 @@ def test_format_journal_comment_falls_back_when_email_and_shift_session_absent()
     )
     assert "Modified by unknown" in comment
     assert "Session: unknown" in comment
+
+
+def test_format_journal_comment_includes_reason_when_provided() -> None:
+    """Sprint 7 Task 4: ``reason`` is rendered between the Session line and
+    the Changes block so auditors see the WHY alongside the WHAT."""
+    comment = _format_journal_comment(
+        user=_user(shift_session_id=UUID("22222222-2222-2222-2222-222222222222")),
+        request_id=UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab"),
+        original=_device(),
+        changes={"status": "decommissioning"},
+        reason="Rack moved out of service",
+    )
+    assert "Reason: Rack moved out of service\n" in comment
+    # Ordering: Reason appears between Session and Changes.
+    session_idx = comment.index("Session:")
+    reason_idx = comment.index("Reason:")
+    changes_idx = comment.index("Changes:")
+    assert session_idx < reason_idx < changes_idx
+
+
+def test_format_journal_comment_omits_reason_line_when_none() -> None:
+    """Backward-compatible default: absent line (NOT ``Reason: None``) when
+    the caller did not pass a reason. Existing callers stay unchanged."""
+    comment = _format_journal_comment(
+        user=_user(shift_session_id=UUID("22222222-2222-2222-2222-222222222222")),
+        request_id=UUID("8400e7f2-aaaa-bbbb-cccc-1234567890ab"),
+        original=_device(),
+        changes={"name": "sw-01-new"},
+    )
+    assert "Reason:" not in comment
+    assert "Reason: None" not in comment
 
 
 # ============================================================================

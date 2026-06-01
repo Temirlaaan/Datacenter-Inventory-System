@@ -102,9 +102,12 @@ class DeviceDecommissionService:
     ) -> DeviceResponse:
         """Decommission ``device_id``. QR-first ordering with re-bind compensation.
 
-        ``reason`` is accepted for forward-compatibility but currently only
-        flows into the structured log binding; Sprint 6 candidate to plumb it
-        into the NetBox journal entry's comments.
+        ``reason`` flows into the NetBox journal entry comment (Sprint 7 Task
+        4) AND the structured ``device_decommission_aborted_qr_inconsistent``
+        log binding on the QR-retire-inconsistent failure path. The audit row
+        does NOT carry it — the row's ``after_json`` diff captures the
+        before/after state and reason is a human-readable attribution, not
+        machine-queried forensics.
         """
         # Defensive guard — same pattern as QRLifecycleService.bind/retire. The
         # decommission flow opens its own session.begin() inside
@@ -162,6 +165,7 @@ class DeviceDecommissionService:
                 expected_version=expected_version_for_patch,
                 changes={"status": _DECOMMISSIONING_STATUS},
                 user=user,
+                reason=reason,
             )
         except Exception as patch_err:
             if bound_qr is None:
