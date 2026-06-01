@@ -177,3 +177,34 @@ async def test_patch_device_returns_409_and_writes_conflict_audit_row(
     assert len(rows) == 1
     assert rows[0].result == "conflict"
     assert rows[0].operation == "device.update"
+
+
+async def test_patch_device_returns_422_when_netbox_rejects_with_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """Sprint 7 Task 5: end-to-end NetBox 400 → structured 422 with the
+    NetBox body surfaced in ``netbox_detail``. Audit row records FAILURE."""
+    _as_mobile_user()
+    base = _netbox_base()
+    netbox_body = {"status": ["Invalid value for status."]}
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{base}{_DEVICE_PATH}").respond(json=_device())
+        router.patch(f"{base}{_DEVICE_PATH}").respond(status_code=400, json=netbox_body)
+
+        resp = await client.patch(
+            "/api/v1/devices/5",
+            json={"name": "sw-01-new"},
+            headers={"If-Unmodified-Since": _VERSION},
+        )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(text("SELECT result::text, operation FROM audit_log"))).all()
+    assert len(rows) == 1
+    assert rows[0].result == "failure"
+    assert rows[0].operation == "device.update"

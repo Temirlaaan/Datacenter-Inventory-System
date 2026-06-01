@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1._helpers import netbox_validation_error_response
 from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_code import QRCodeRepository
@@ -161,20 +162,8 @@ async def create_device(
             attach_journal=True,
         )
     except NetBoxValidationError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={
-                "error": {
-                    "code": "NETBOX_VALIDATION_ERROR",
-                    "message": (
-                        exc.detail
-                        if isinstance(exc.detail, str)
-                        else "NetBox rejected the create request"
-                    ),
-                    "netbox_status": exc.status_code,
-                    "netbox_detail": exc.detail,
-                }
-            },
+        return netbox_validation_error_response(
+            exc, fallback_message="NetBox rejected the create request"
         )
     return DeviceResponse(data=to_device_data(created), version=created["last_updated"])
 
@@ -189,20 +178,21 @@ async def add_comment(
     request: AddCommentRequest,
     user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     comment_service: CommentService = Depends(get_comment_service),
-) -> AddCommentResponse:
+) -> AddCommentResponse | JSONResponse:
     """Append a NetBox journal entry to ``device_id``. Sprint 5 Task 3, ToR §4.3.6.
 
-    NetBoxNotFound / NetBoxClientError flow through ``main.py``'s global
-    handlers (404 / 502). No specialised 422 translation here — add-comment
-    has a much narrower failure mode than device-create (no FK constraints,
-    no uniqueness rules), so the generic 502 is appropriate. Sprint 6
-    candidate to extend NetBoxValidationError catching across all endpoints.
+    NetBoxNotFound flows through ``main.py``'s 404 handler. Sprint 7 Task 5:
+    NetBoxValidationError (other 4xx) translates to the structured 422 here;
+    other NetBox errors (5xx, timeout) flow through ``main.py``'s 502 handler.
     """
-    created = await comment_service.add_comment(
-        device_id=device_id,
-        comment=request.comment,
-        user=user,
-    )
+    try:
+        created = await comment_service.add_comment(
+            device_id=device_id,
+            comment=request.comment,
+            user=user,
+        )
+    except NetBoxValidationError as exc:
+        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the comment")
     return AddCommentResponse(id=created["id"])
 
 
@@ -307,6 +297,15 @@ async def decommission_device(
                 }
             },
         )
+    except NetBoxValidationError as exc:
+        # Sprint 7 Task 5: surfaces when NetBox rejects the device status
+        # PATCH for the unbound-device path, or rejects the QR-retire's
+        # device PATCH. The bound-device + device-PATCH-fails path is
+        # converted to DeviceDecommissionRolledBackError by the
+        # compensation logic above (already handled).
+        return netbox_validation_error_response(
+            exc, fallback_message="NetBox rejected the decommission"
+        )
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
@@ -361,4 +360,6 @@ async def update_device(
                 }
             },
         )
+    except NetBoxValidationError as exc:
+        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the update")
     return DeviceResponse(data=to_device_data(updated), version=updated["last_updated"])

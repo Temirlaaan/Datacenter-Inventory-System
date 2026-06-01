@@ -167,25 +167,27 @@ async def test_add_comment_writes_no_secondary_journal_entry(
 async def test_add_comment_netbox_4xx_writes_failure_audit_row_with_device_entity_id(
     client: httpx.AsyncClient,
 ) -> None:
-    """NetBox rejects with 400 → FAILURE audit row lands with entity_id=
-    str(device_id) (caller-provided, not "unknown"); response 502 via
-    global handler (no specialised 422 for add-comment per Task 3 plan)."""
+    """NetBox rejects with 400 → Sprint 7 Task 5 translates to structured 422
+    with the NetBox body in ``netbox_detail``. FAILURE audit row lands with
+    entity_id=str(device_id) (caller-provided, not "unknown")."""
     _as_mobile_user()
     base = _netbox_base()
+    netbox_body = {"comments": ["bad request"]}
 
     with respx.mock(assert_all_called=True) as router:
-        router.post(f"{base}{_JOURNAL_PATH}").respond(
-            status_code=400, json={"comments": ["bad request"]}
-        )
+        router.post(f"{base}{_JOURNAL_PATH}").respond(status_code=400, json=netbox_body)
 
         resp = await client.post(
             f"/api/v1/devices/{_DEVICE_ID}/comments",
             json={"comment": "test"},
         )
 
-    # NetBoxValidationError IS-A NetBoxClientError → global handler → 502.
-    # Add-comment doesn't have specialised 422 translation (Sprint 6 candidate).
-    assert resp.status_code == 502
+    # Sprint 7 Task 5: NBV now translates to structured 422 at the endpoint.
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
 
     async with get_sessionmaker()() as session:
         rows = (

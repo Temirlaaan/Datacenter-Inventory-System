@@ -34,6 +34,7 @@ from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_sessionmaker
 from app.domain.qr import QR, QRBatch, QRStatus
 from app.main import app
+from app.netbox.errors import NetBoxValidationError
 from app.services.netbox_write import WriteConflictError
 from app.services.qr.lifecycle import (
     QRAlreadyBoundError,
@@ -297,6 +298,31 @@ async def test_bind_qr_handler_returns_500_on_inconsistency(
     assert result.status_code == 500
     body = json.loads(bytes(result.body))
     assert body["error"]["code"] == "QR_BIND_INCONSISTENCY"
+
+
+async def test_bind_qr_handler_translates_netbox_validation_error_to_422(
+    session: AsyncSession,
+) -> None:
+    """Sprint 7 Task 5: rare in practice but covered for consistency — if
+    NetBox rejects the bind's device PATCH with 4xx, 502 is misleading."""
+    netbox_body = {"custom_fields": ["Invalid qr_id format."]}
+    stub = _StubLifecycleService(error=NetBoxValidationError(status_code=400, detail=netbox_body))
+
+    result = await bind_qr(
+        qr_id=_QR_ID,
+        request=QRBindRequest(device_id=_DEVICE_ID, version=_VERSION),
+        user=make_user("dcinv-mobile-user"),
+        lifecycle=cast(QRLifecycleService, stub),
+        session=session,
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 422
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+    assert body["error"]["message"] == "NetBox rejected the bind"
 
 
 async def test_get_lifecycle_service_builds_a_qr_lifecycle_service(

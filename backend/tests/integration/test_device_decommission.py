@@ -230,6 +230,36 @@ async def test_decommission_unbound_device_persists_decommissioning_status_and_a
     assert audits[0].entity_id == str(_DEVICE_ID)
 
 
+async def test_decommission_unbound_returns_422_when_netbox_rejects_with_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """Sprint 7 Task 5: end-to-end NBV on the unbound-device path → structured 422."""
+    _as_admin()
+    base = _netbox_base()
+    netbox_body = {"status": ["Invalid status transition."]}
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{base}{_DEVICE_PATH}").respond(json=_device(_VERSION, qr_id=None))
+        router.patch(f"{base}{_DEVICE_PATH}").respond(status_code=400, json=netbox_body)
+
+        resp = await client.post(
+            f"/api/v1/devices/{_DEVICE_ID}/decommission",
+            json={"version": _VERSION, "reason": "end of life"},
+        )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+
+    # FAILURE audit row landed from patch_with_attribution.
+    async with get_sessionmaker()() as session:
+        audits = (await session.execute(text("SELECT result::text FROM audit_log"))).all()
+    assert len(audits) == 1
+    assert audits[0].result == "failure"
+
+
 # ========== bound device — retire + decommission, two audit rows ==========
 
 

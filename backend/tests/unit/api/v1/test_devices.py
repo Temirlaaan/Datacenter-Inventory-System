@@ -294,6 +294,28 @@ async def test_update_device_handler_returns_409_on_write_conflict() -> None:
     assert body["error"]["current_state"]["name"] == "sw-01"
 
 
+async def test_update_device_handler_translates_netbox_validation_error_to_422() -> None:
+    """Sprint 7 Task 5: NBV from the device PATCH surfaces as structured 422."""
+    netbox_body = {"status": ["Invalid value for status."]}
+    stub = _StubWriteService(error=NetBoxValidationError(status_code=400, detail=netbox_body))
+
+    result = await update_device(
+        device_id=5,
+        request=DeviceUpdateRequest(name="ignored"),
+        if_unmodified_since=_VERSION,
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, stub),
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 422
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+    assert body["error"]["message"] == "NetBox rejected the update"
+
+
 async def test_get_write_service_builds_a_netbox_write_service() -> None:
     fake_session = cast(AsyncSession, object())
     assert isinstance(get_write_service(session=fake_session), NetBoxWriteService)

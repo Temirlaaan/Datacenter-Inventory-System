@@ -19,12 +19,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1._helpers import netbox_validation_error_response
 from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session
 from app.netbox.client import get_netbox_client
+from app.netbox.errors import NetBoxValidationError
 from app.services.device import DeviceService, to_device_data
 from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 from app.services.qr.lifecycle import (
@@ -231,6 +233,11 @@ async def bind_qr(
                 }
             },
         )
+    except NetBoxValidationError as exc:
+        # Sprint 7 Task 5: rare in practice (qr_one_per_device index +
+        # NetBoxNotFound handle the common conflicts), but if NetBox does
+        # reject the device PATCH with a 4xx, 502 is misleading.
+        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the bind")
 
     # Build the combined response: QR (with batch info) + device. Decision H:
     # device.qr_id is sourced from the app DB (the QR we just bound), not from
@@ -329,6 +336,11 @@ async def retire_qr(
                 }
             },
         )
+    except NetBoxValidationError as exc:
+        # Sprint 7 Task 5: included for consistency — if NetBox rejects the
+        # device PATCH that clears custom_fields.qr_id on BOUND→RETIRED, 502
+        # is misleading.
+        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the retire")
 
     batch = await QRBatchRepository(session).get_by_id(retired.batch_id)
     assert batch is not None

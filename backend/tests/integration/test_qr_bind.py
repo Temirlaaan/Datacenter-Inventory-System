@@ -252,6 +252,38 @@ async def test_bind_persists_bound_state_and_writes_success_audit_row(
     assert audits[0].entity_id == _QR_ID
 
 
+async def test_bind_returns_422_when_netbox_rejects_device_patch_with_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """Sprint 7 Task 5: NetBox 400 on the device PATCH → structured 422.
+    Rare in practice (qr_one_per_device index + version checks usually catch
+    invalid binds first) but covered for consistency."""
+    _as_mobile_user()
+    await _seed_free_qr(_QR_ID)
+    base = _netbox_base()
+    netbox_body = {"custom_fields": ["Invalid qr_id format."]}
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{base}{_DEVICE_PATH}").respond(json=_device(qr_id=None))
+        router.patch(f"{base}{_DEVICE_PATH}").respond(status_code=400, json=netbox_body)
+
+        resp = await client.post(
+            f"/api/v1/qr/{_QR_ID}/bind",
+            json={"device_id": _DEVICE_ID, "version": _VERSION},
+        )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+
+    # FAILURE audit row from patch_with_attribution.
+    async with get_sessionmaker()() as session:
+        audits = (await session.execute(text("SELECT result::text FROM audit_log"))).all()
+    assert any(a.result == "failure" for a in audits)
+
+
 # ========== Optimistic concurrency conflict ==========
 
 

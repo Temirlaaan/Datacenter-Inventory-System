@@ -20,7 +20,7 @@ from app.api.v1.devices import (
 )
 from app.auth.dependencies import AuthUser
 from app.main import app
-from app.netbox.errors import NetBoxNotFound, NetBoxServerError
+from app.netbox.errors import NetBoxNotFound, NetBoxServerError, NetBoxValidationError
 from app.services.comment import CommentService
 
 
@@ -79,6 +79,33 @@ async def test_add_comment_handler_passes_device_id_comment_user_through() -> No
     assert stub.last_kwargs is not None
     assert stub.last_kwargs["device_id"] == 5
     assert stub.last_kwargs["comment"] == "Replaced PSU 1"
+
+
+async def test_add_comment_handler_translates_netbox_validation_error_to_422() -> None:
+    """Sprint 7 Task 5: NBV from NetBox 4xx (e.g. invalid kind/assignee)
+    surfaces as the structured 422 instead of a generic 502."""
+    import json
+
+    from fastapi.responses import JSONResponse
+
+    netbox_body = {"kind": ["Invalid kind."]}
+    stub = _StubCommentService(error=NetBoxValidationError(status_code=400, detail=netbox_body))
+
+    result = await add_comment(
+        device_id=5,
+        request=AddCommentRequest(comment="x"),
+        user=_user("dcinv-mobile-user"),
+        comment_service=cast(CommentService, stub),
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 422
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+    # Endpoint-specific fallback when detail is not a string.
+    assert body["error"]["message"] == "NetBox rejected the comment"
 
 
 # ---------- routing / role / validation (AsyncClient) ----------

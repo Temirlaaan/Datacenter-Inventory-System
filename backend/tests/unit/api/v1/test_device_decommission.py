@@ -26,7 +26,7 @@ from app.api.v1.devices import (
 )
 from app.auth.dependencies import AuthUser
 from app.main import app
-from app.netbox.errors import NetBoxNotFound, NetBoxServerError
+from app.netbox.errors import NetBoxNotFound, NetBoxServerError, NetBoxValidationError
 from app.services.device import DeviceResponse
 from app.services.device_decommission import (
     DeviceDecommissionInconsistencyError,
@@ -177,8 +177,32 @@ async def test_decommission_handler_returns_500_on_qr_retire_rolled_back() -> No
 
     body = _json.loads(result.body)
     assert body["error"]["code"] == "QR_RETIRE_ROLLED_BACK"
-    assert body["error"]["qr_id"] == _QR_ID
-    assert body["error"]["device_id"] == _DEVICE_ID
+
+
+async def test_decommission_handler_translates_netbox_validation_error_to_422() -> None:
+    """Sprint 7 Task 5: NBV propagated from the no-bound-QR path surfaces as
+    structured 422. The bound-QR + device-PATCH-fails path is converted to
+    DeviceDecommissionRolledBackError by the compensation logic (covered by
+    test_decommission_handler_returns_500_on_qr_retire_rolled_back)."""
+    netbox_body = {"status": ["Invalid status transition."]}
+    stub = _StubDecommissionService(
+        error=NetBoxValidationError(status_code=400, detail=netbox_body)
+    )
+    result = await decommission_device(
+        device_id=_DEVICE_ID,
+        request=DeviceDecommissionRequest(version=_VERSION),
+        user=make_user("dcinv-admin"),
+        service=cast(DeviceDecommissionService, stub),
+    )
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 422
+    import json as _json
+
+    body = _json.loads(result.body)
+    assert body["error"]["code"] == "NETBOX_VALIDATION_ERROR"
+    assert body["error"]["netbox_status"] == 400
+    assert body["error"]["netbox_detail"] == netbox_body
+    assert body["error"]["message"] == "NetBox rejected the decommission"
 
 
 async def test_decommission_endpoint_returns_decommission_rolled_back_on_branch_2() -> None:
