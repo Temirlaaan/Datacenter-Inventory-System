@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -20,22 +21,66 @@ from app.api.v1.qr import router as qr_router
 from app.api.v1.sessions import router as sessions_router
 from app.auth.dependencies import NoActiveShiftError
 from app.config import get_settings
-from app.db.session import get_engine
+from app.db.session import get_engine, get_sessionmaker
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxClientError, NetBoxNotFound
 from app.observability.logging import configure_logging
+from app.services.auto_end_job import AutoEndJobStatus, auto_end_loop
 
 logger = structlog.get_logger()
 
+# Bounded shutdown wait for the auto-end loop. The loop wakes immediately on
+# its cancel_event, so 5s is generous; 1s would be too tight if the GIL is
+# loaded at shutdown. Sprint 7 Task 1 decision A.
+_AUTO_END_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Validate settings (fail-fast), configure logging, dispose engine on shutdown."""
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info("app_starting", log_level=settings.log_level)
+
+    # Auto-end stale shift sessions (Sprint 7 Task 1). The status object is
+    # ALWAYS attached to app.state so /health has a consistent shape; the
+    # task is only scheduled when SHIFT_AUTO_END_ENABLED is true.
+    #
+    # IMPORTANT: this is a single-replica pattern. Running N replicas wastes
+    # Nx the DB scans even though the partial unique index on shift_sessions
+    # + idempotent end_reason='auto_timeout' prevent double-firing harm.
+    # Sprint 8a will introduce a Postgres advisory lock or k8s CronJob for
+    # multi-replica safety.
+    app.state.auto_end_job_status = AutoEndJobStatus(enabled=settings.shift_auto_end_enabled)
+    app.state.auto_end_job_cancel = asyncio.Event()
+    app.state.auto_end_job_task = None
+    if settings.shift_auto_end_enabled:
+        app.state.auto_end_job_task = asyncio.create_task(
+            auto_end_loop(
+                sessionmaker=get_sessionmaker(),
+                status=app.state.auto_end_job_status,
+                cancel_event=app.state.auto_end_job_cancel,
+                interval_seconds=float(settings.shift_auto_end_interval_seconds),
+                threshold_hours=settings.shift_auto_end_threshold_hours,
+            )
+        )
+
     yield
+
     logger.info("app_stopping")
+    # Drain the auto-end loop before disposing the engine — the loop holds
+    # sessions from the same engine.
+    if app.state.auto_end_job_task is not None:
+        app.state.auto_end_job_cancel.set()
+        try:
+            await asyncio.wait_for(
+                app.state.auto_end_job_task,
+                timeout=_AUTO_END_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("auto_end_job_shutdown_timeout")
+            app.state.auto_end_job_task.cancel()
+
     # Close pooled connections — cheap if the engine/client were never actually used.
     await get_engine().dispose()
     await get_netbox_client().aclose()

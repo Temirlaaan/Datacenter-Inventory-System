@@ -26,6 +26,7 @@ from app.domain.shift_session import (
 from app.services.shift_session import (
     NoActiveShift,
     SessionAlreadyActive,
+    ShiftSessionNotFound,
     ShiftSessionService,
 )
 
@@ -359,3 +360,79 @@ def test_session_already_active_carries_active_session_attribute() -> None:
 def test_no_active_shift_carries_user_keycloak_id_attribute() -> None:
     exc = NoActiveShift(_USER_A)
     assert exc.user_keycloak_id == _USER_A
+
+
+def test_shift_session_not_found_carries_session_id_attribute() -> None:
+    sid = uuid4()
+    exc = ShiftSessionNotFound(sid)
+    assert exc.session_id == sid
+
+
+# ---------- end_by_id (Sprint 7 Task 1) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ShiftEndReason.MANUAL,
+        ShiftEndReason.AUTO_TIMEOUT,
+        ShiftEndReason.FORCED,
+    ],
+)
+async def test_end_by_id_succeeds_with_each_reason(
+    reason: ShiftEndReason, frozen_now: datetime
+) -> None:
+    existing = _active_for(_USER_A)
+    service, session, repo = _build_service()
+    repo.by_id[existing.id] = existing
+
+    ended = await service.end_by_id(session_id=existing.id, reason=reason)
+
+    assert ended.id == existing.id
+    assert ended.shift_end_at == frozen_now
+    assert ended.end_reason is reason
+    assert ended.is_active is False
+    assert repo.updates == [ended]
+    assert session.commits == 1
+
+
+async def test_end_by_id_with_unknown_id_raises_shift_session_not_found() -> None:
+    service, session, _repo = _build_service()
+    unknown = uuid4()
+
+    with pytest.raises(ShiftSessionNotFound) as exc:
+        await service.end_by_id(session_id=unknown, reason=ShiftEndReason.AUTO_TIMEOUT)
+
+    assert exc.value.session_id == unknown
+    assert session.rollbacks == 1
+    assert session.commits == 0
+
+
+async def test_end_by_id_with_already_ended_row_raises_illegal_shift_transition() -> None:
+    """The auto-end job + admin force-close both rely on this to detect a
+    concurrent end racing with their own — the caller swallows the exception
+    and treats it as an idempotent no-op."""
+    ended_already = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_A,
+        shift_start_at=datetime(2026, 5, 29, 8, 0, 0, tzinfo=UTC),
+        shift_end_at=datetime(2026, 5, 29, 16, 0, 0, tzinfo=UTC),
+        tablet_id="tablet-01",
+        end_reason=ShiftEndReason.MANUAL,
+    )
+    service, session, repo = _build_service()
+    repo.by_id[ended_already.id] = ended_already
+
+    with pytest.raises(IllegalShiftTransition):
+        await service.end_by_id(session_id=ended_already.id, reason=ShiftEndReason.AUTO_TIMEOUT)
+
+    assert session.rollbacks == 1
+    assert session.commits == 0
+
+
+async def test_end_by_id_inside_active_transaction_raises_runtime_error() -> None:
+    service, _session, _repo = _build_service(session=_FakeSession(in_transaction=True))
+
+    with pytest.raises(RuntimeError, match="active transaction"):
+        await service.end_by_id(session_id=uuid4(), reason=ShiftEndReason.AUTO_TIMEOUT)

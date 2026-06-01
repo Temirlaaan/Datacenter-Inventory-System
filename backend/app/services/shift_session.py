@@ -59,6 +59,20 @@ class NoActiveShift(Exception):
         self.user_keycloak_id = user_keycloak_id
 
 
+class ShiftSessionNotFound(Exception):
+    """``end_by_id()`` called with a session_id that doesn't exist.
+
+    Distinguished from ``IllegalShiftTransition`` (which fires when the row
+    exists but is already ended). Both callers (auto-end job + Sprint 7 Task
+    3 admin force-close) treat both as idempotent no-ops, but log them
+    distinctly so operators can tell "row vanished" from "concurrent end".
+    """
+
+    def __init__(self, session_id: UUID) -> None:
+        super().__init__(f"shift session {session_id} not found")
+        self.session_id = session_id
+
+
 class ShiftSessionService:
     """Coordinates ``shift_sessions`` lifecycle transitions."""
 
@@ -124,5 +138,31 @@ class ShiftSessionService:
             if active is None:
                 raise NoActiveShift(user_keycloak_id)
             ended = active.end(reason=reason, at=datetime.now(UTC))
+            await self._repo.update(ended)
+        return ended
+
+    async def end_by_id(self, *, session_id: UUID, reason: ShiftEndReason) -> ShiftSession:
+        """End a specific shift session by id with ``reason``.
+
+        Used by the Sprint 7 auto-end background job (passing
+        ``ShiftEndReason.AUTO_TIMEOUT``) and the Sprint 7 Task 3 admin
+        force-close endpoint (passing ``ShiftEndReason.FORCED``). Unlike
+        ``end()``, the target shift is identified by row id, not by user —
+        admins force-close someone else's shift; the job iterates rows it
+        scanned.
+
+        Raises ``ShiftSessionNotFound`` if no row matches ``session_id``, or
+        ``IllegalShiftTransition`` if the row exists but is already ended
+        (from ``ShiftSession.end()`` — both callers treat this as an
+        idempotent no-op since a concurrent process already ended the shift).
+        """
+        if self._session.in_transaction():
+            raise RuntimeError("ShiftSessionService.end_by_id called inside an active transaction")
+
+        async with self._session.begin():
+            existing = await self._repo.get_by_id(session_id)
+            if existing is None:
+                raise ShiftSessionNotFound(session_id)
+            ended = existing.end(reason=reason, at=datetime.now(UTC))
             await self._repo.update(ended)
         return ended

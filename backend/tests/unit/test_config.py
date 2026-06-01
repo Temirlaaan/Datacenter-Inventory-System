@@ -73,6 +73,61 @@ def test_settings_defaults_applied(clean_env: None, monkeypatch: pytest.MonkeyPa
     assert s.jwks_cache_ttl_seconds == 3600
 
 
+def test_settings_shift_auto_end_defaults_applied(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 7 Task 1 (decision A): three knobs control the auto-end loop.
+
+    The defaults are load-bearing — production runs without overrides — so
+    each default has a test that locks it in.
+    """
+    _set_all_required(monkeypatch)
+    from app.config import Settings
+
+    s = Settings()
+    assert s.shift_auto_end_enabled is True
+    assert s.shift_auto_end_interval_seconds == 300
+    assert s.shift_auto_end_threshold_hours == 12
+
+
+def test_settings_shift_auto_end_overrides_via_env(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operators tune interval/threshold without a code change."""
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_ENABLED", "false")
+    monkeypatch.setenv("SHIFT_AUTO_END_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("SHIFT_AUTO_END_THRESHOLD_HOURS", "24")
+    from app.config import Settings
+
+    s = Settings()
+    assert s.shift_auto_end_enabled is False
+    assert s.shift_auto_end_interval_seconds == 60
+    assert s.shift_auto_end_threshold_hours == 24
+
+
+def test_settings_shift_auto_end_interval_seconds_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_INTERVAL_SECONDS", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_shift_auto_end_threshold_hours_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("SHIFT_AUTO_END_THRESHOLD_HOURS", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_settings_database_url_requires_asyncpg_driver(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

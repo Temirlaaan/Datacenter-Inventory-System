@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     jwks_cache_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    shift_auto_end_enabled: bool = True
+    shift_auto_end_interval_seconds: int = Field(default=300, ge=1, le=86400)
+    shift_auto_end_threshold_hours: int = Field(default=12, ge=1, le=168)
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -247,3 +247,85 @@ async def test_insert_does_not_commit_implicitly() -> None:
     async with get_sessionmaker()() as db:
         result = await db.execute(text("SELECT COUNT(*) FROM shift_sessions"))
         assert result.scalar_one() == 0
+
+
+# --- find_stale_active (Sprint 7 Task 1) -------------------------------------
+
+
+def _active_at(*, start_at: datetime, user_keycloak_id: UUID, tablet_id: str) -> ShiftSession:
+    return ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=user_keycloak_id,
+        shift_start_at=start_at,
+        shift_end_at=None,
+        tablet_id=tablet_id,
+        end_reason=None,
+    )
+
+
+async def test_find_stale_active_returns_shifts_older_than_threshold() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    stale = _active_at(
+        start_at=base - timedelta(hours=13), user_keycloak_id=_USER_A, tablet_id="t1"
+    )
+    async with get_sessionmaker()() as db:
+        await ShiftSessionRepository(db).insert(stale)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows = await ShiftSessionRepository(db).find_stale_active(
+            older_than=base - timedelta(hours=12)
+        )
+    assert [r.id for r in rows] == [stale.id]
+
+
+async def test_find_stale_active_excludes_fresh_active_shift() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    fresh = _active_at(start_at=base - timedelta(hours=1), user_keycloak_id=_USER_A, tablet_id="t1")
+    async with get_sessionmaker()() as db:
+        await ShiftSessionRepository(db).insert(fresh)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows = await ShiftSessionRepository(db).find_stale_active(
+            older_than=base - timedelta(hours=12)
+        )
+    assert rows == []
+
+
+async def test_find_stale_active_excludes_already_ended_shift_even_if_old() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    old_ended = _active_at(
+        start_at=base - timedelta(hours=20), user_keycloak_id=_USER_A, tablet_id="t1"
+    ).end(reason=ShiftEndReason.MANUAL, at=base - timedelta(hours=18))
+    async with get_sessionmaker()() as db:
+        await ShiftSessionRepository(db).insert(old_ended)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows = await ShiftSessionRepository(db).find_stale_active(
+            older_than=base - timedelta(hours=12)
+        )
+    assert rows == []
+
+
+async def test_find_stale_active_orders_by_shift_start_at_ascending() -> None:
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    older = _active_at(
+        start_at=base - timedelta(hours=24), user_keycloak_id=_USER_A, tablet_id="t1"
+    )
+    newer_but_still_stale = _active_at(
+        start_at=base - timedelta(hours=13), user_keycloak_id=_USER_B, tablet_id="t2"
+    )
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(newer_but_still_stale)
+        await repo.insert(older)
+        await db.commit()
+
+    async with get_sessionmaker()() as db:
+        rows = await ShiftSessionRepository(db).find_stale_active(
+            older_than=base - timedelta(hours=12)
+        )
+    assert [r.id for r in rows] == [older.id, newer_but_still_stale.id]

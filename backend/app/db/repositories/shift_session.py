@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -81,3 +82,29 @@ class ShiftSessionRepository:
             )
         )
         await self.session.execute(stmt)
+
+    async def find_stale_active(self, *, older_than: datetime) -> list[ShiftSession]:
+        """Return active shifts whose ``shift_start_at`` predates ``older_than``.
+
+        Caller (Sprint 7 Task 1 auto-end job) passes ``older_than`` so the
+        boundary is deterministic in tests; production passes
+        ``datetime.now(UTC) - timedelta(hours=SHIFT_AUTO_END_THRESHOLD_HOURS)``.
+
+        Ordered by ``shift_start_at`` ASC so the oldest stale shift is ended
+        first — deterministic and operationally sensible (longest-orphaned
+        gets cleaned up first if iteration is partial).
+
+        No new index needed: the partial unique index
+        ``shift_sessions_one_active_per_user`` already restricts the scanned
+        set to active rows (≤ 1 per user). See Sprint 7 Task 1 decision 6.
+        """
+        stmt = (
+            select(ShiftSessionModel)
+            .where(
+                ShiftSessionModel.shift_end_at.is_(None),
+                ShiftSessionModel.shift_start_at < older_than,
+            )
+            .order_by(ShiftSessionModel.shift_start_at.asc())
+        )
+        models = (await self.session.execute(stmt)).scalars().all()
+        return [_to_domain(m) for m in models]
