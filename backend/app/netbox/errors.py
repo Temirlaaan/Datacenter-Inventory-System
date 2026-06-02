@@ -37,3 +37,25 @@ class NetBoxServerError(NetBoxClientError):
 
 class NetBoxTimeout(NetBoxClientError):
     """Connection or read timeout after exhausting retries."""
+
+
+class NetBoxCircuitOpenError(NetBoxClientError):
+    """NetBox circuit breaker is OPEN — request rejected without hitting NetBox.
+
+    Raised by :class:`~app.netbox.client.NetBoxClient` when the per-process
+    circuit breaker (Architecture §3.3, Sprint 8a Task 2) has tripped due to
+    consecutive ``NetBoxServerError`` / ``NetBoxTimeout`` failures and is in
+    its OPEN state. The ``main.py`` handler translates this to a 503 +
+    structured body + ``Retry-After`` header so clients know to back off.
+
+    Distinguished from ``NetBoxServerError`` (which means "NetBox responded
+    with 5xx") by the fact that no NetBox call was made — the backend is
+    fast-failing on its own.
+    """
+
+    def __init__(self, *, recovery_timeout_seconds: int) -> None:
+        super().__init__(
+            f"NetBox circuit is open; reject without upstream call "
+            f"(recovery in ~{recovery_timeout_seconds}s)"
+        )
+        self.recovery_timeout_seconds = recovery_timeout_seconds

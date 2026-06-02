@@ -610,3 +610,168 @@ def test_netbox_validation_error_carries_status_and_detail() -> None:
     assert err.detail == detail
     # Subclass relationship — Sprint 5 plan invariant
     assert isinstance(err, NetBoxClientError)
+
+
+# ---------- Sprint 8a Task 2: NetBox circuit breaker -------------------------
+
+
+def _set_circuit_threshold(monkeypatch: pytest.MonkeyPatch, *, n: int) -> None:
+    """Lower the failure threshold so a few errors trip the circuit."""
+    monkeypatch.setenv("NETBOX_CIRCUIT_FAILURE_THRESHOLD", str(n))
+    monkeypatch.setenv("NETBOX_CIRCUIT_RECOVERY_TIMEOUT_SECONDS", "30")
+
+
+async def test_circuit_opens_after_threshold_consecutive_5xx_failures(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch, fast_backoff: None
+) -> None:
+    """Sprint 8a Task 2: after N consecutive NetBoxServerError outcomes, the
+    circuit opens; the next call raises NetBoxCircuitOpenError WITHOUT
+    hitting NetBox."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxCircuitOpenError, NetBoxServerError
+
+    _set_circuit_threshold(monkeypatch, n=2)
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=False) as router:
+            # All requests return 503 → after retries exhaust, raises NetBoxServerError.
+            router.get(f"{NETBOX_URL}/api/status/").respond(status_code=503, text="upstream down")
+
+            # Call 1 + Call 2: NetBoxServerError propagates, circuit count climbs.
+            for _ in range(2):
+                with pytest.raises(NetBoxServerError):
+                    await client.get("/api/status/")
+
+            # Call 3: circuit is now OPEN → fast-fail with NetBoxCircuitOpenError,
+            # WITHOUT making a 4th HTTP request (assert_all_called=False allows
+            # the route to NOT be hit again).
+            with pytest.raises(NetBoxCircuitOpenError) as exc_info:
+                await client.get("/api/status/")
+            assert exc_info.value.recovery_timeout_seconds == 30
+
+
+async def test_circuit_does_not_count_netbox_not_found_as_failure(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch, fast_backoff: None
+) -> None:
+    """NetBoxNotFound (404) is 'NetBox says your request is wrong', NOT 'NetBox
+    is broken'. A flood of 404s must not open the circuit."""
+    from app.netbox.client import NetBoxClient, _get_netbox_circuit
+    from app.netbox.errors import NetBoxNotFound
+
+    _set_circuit_threshold(monkeypatch, n=2)
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/missing/").respond(status_code=404)
+
+            for _ in range(5):  # well above threshold
+                with pytest.raises(NetBoxNotFound):
+                    await client.get("/api/missing/")
+
+    # Circuit stayed closed.
+    assert _get_netbox_circuit().state == "closed"
+
+
+async def test_circuit_does_not_count_netbox_validation_error_as_failure(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch, fast_backoff: None
+) -> None:
+    """NetBoxValidationError (4xx other than 404) — same as 404: not a circuit
+    signal. Bad input from clients shouldn't open the circuit."""
+    from app.netbox.client import NetBoxClient, _get_netbox_circuit
+    from app.netbox.errors import NetBoxValidationError
+
+    _set_circuit_threshold(monkeypatch, n=2)
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                status_code=400, json={"name": ["required"]}
+            )
+
+            for _ in range(5):  # well above threshold
+                with pytest.raises(NetBoxValidationError):
+                    await client.post("/api/dcim/devices/", json={})
+
+    assert _get_netbox_circuit().state == "closed"
+
+
+async def test_circuit_disabled_lets_all_failures_propagate(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch, fast_backoff: None
+) -> None:
+    """NETBOX_CIRCUIT_ENABLED=false disables the circuit entirely — every
+    call passes through to _send_impl regardless of prior failures."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxServerError
+
+    monkeypatch.setenv("NETBOX_CIRCUIT_ENABLED", "false")
+    _set_circuit_threshold(monkeypatch, n=1)  # would normally open after 1 failure
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/status/").respond(status_code=503)
+
+            for _ in range(5):
+                with pytest.raises(NetBoxServerError):
+                    await client.get("/api/status/")
+
+
+async def test_get_netbox_circuit_state_reports_closed_with_zero_failures(
+    clean_env: None, netbox_env: None
+) -> None:
+    """The /health sub-object snapshot reports clean state at process start."""
+    from app.netbox.client import get_netbox_circuit_state
+
+    snapshot = get_netbox_circuit_state()
+    assert snapshot == {
+        "enabled": True,
+        "state": "closed",
+        "failure_count": 0,
+        "open_until": None,
+    }
+
+
+async def test_get_netbox_circuit_state_when_disabled_reports_disabled_closed(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NETBOX_CIRCUIT_ENABLED", "false")
+    from app.netbox.client import get_netbox_circuit_state
+
+    snapshot = get_netbox_circuit_state()
+    assert snapshot["enabled"] is False
+    assert snapshot["state"] == "closed"
+    assert snapshot["open_until"] is None
+
+
+async def test_get_netbox_circuit_state_reports_open_with_open_until_iso(
+    clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch, fast_backoff: None
+) -> None:
+    """Once the circuit opens, the snapshot's open_until is a wall-clock ISO
+    string operators can display ('next retry at ...')."""
+    from app.netbox.client import NetBoxClient, get_netbox_circuit_state
+    from app.netbox.errors import NetBoxServerError
+
+    _set_circuit_threshold(monkeypatch, n=1)
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/status/").respond(status_code=503)
+            with pytest.raises(NetBoxServerError):
+                await client.get("/api/status/")
+
+    snapshot = get_netbox_circuit_state()
+    assert snapshot["enabled"] is True
+    assert snapshot["state"] == "open"
+    assert snapshot["failure_count"] >= 1
+    assert isinstance(snapshot["open_until"], str)
+    assert "T" in snapshot["open_until"]  # ISO 8601 — date/time separator
+
+
+def test_netbox_circuit_open_error_carries_recovery_timeout() -> None:
+    """The 503 handler reads ``recovery_timeout_seconds`` to populate the
+    Retry-After header + structured body."""
+    from app.netbox.errors import NetBoxCircuitOpenError, NetBoxClientError
+
+    err = NetBoxCircuitOpenError(recovery_timeout_seconds=42)
+    assert err.recovery_timeout_seconds == 42
+    # Subclass relationship — global NetBoxClientError handler still catches.
+    assert isinstance(err, NetBoxClientError)

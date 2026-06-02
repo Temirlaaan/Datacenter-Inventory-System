@@ -25,7 +25,7 @@ from app.auth.dependencies import NoActiveShiftError
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
 from app.netbox.client import get_netbox_client
-from app.netbox.errors import NetBoxClientError, NetBoxNotFound
+from app.netbox.errors import NetBoxCircuitOpenError, NetBoxClientError, NetBoxNotFound
 from app.observability.logging import configure_logging
 from app.services.auto_end_job import AutoEndJobStatus, auto_end_loop
 
@@ -106,6 +106,35 @@ async def handle_netbox_not_found(_request: Request, exc: NetBoxNotFound) -> JSO
     logger.info("netbox_not_found", error=str(exc))
     return JSONResponse(
         status_code=status.HTTP_404_NOT_FOUND, content={"detail": "not found in NetBox"}
+    )
+
+
+@app.exception_handler(NetBoxCircuitOpenError)
+async def handle_netbox_circuit_open(
+    _request: Request, exc: NetBoxCircuitOpenError
+) -> JSONResponse:
+    """Sprint 8a Task 2: NetBox circuit is OPEN — fast-fail with 503 + Retry-After.
+
+    Distinguished from the 502 ``NetBoxClientError`` handler below: 502 means
+    "I asked NetBox and got a bad response," 503 means "I'm currently
+    refusing to call NetBox because it's been failing." The handler is
+    registered BEFORE the broader ``NetBoxClientError`` handler so FastAPI's
+    most-specific-handler-wins dispatch routes correctly.
+    """
+    logger.warning(
+        "netbox_circuit_open_short_circuit",
+        recovery_timeout_seconds=exc.recovery_timeout_seconds,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": str(exc.recovery_timeout_seconds)},
+        content={
+            "error": {
+                "code": "NETBOX_CIRCUIT_OPEN",
+                "message": "NetBox is currently unavailable; try again later",
+                "retry_after_seconds": exc.recovery_timeout_seconds,
+            }
+        },
     )
 
 

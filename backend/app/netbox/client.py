@@ -16,13 +16,15 @@ from __future__ import annotations
 import asyncio
 from functools import lru_cache
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
+from circuitbreaker import CircuitBreaker
 
 from app.config import get_settings
 from app.netbox.errors import (
+    NetBoxCircuitOpenError,
     NetBoxNotFound,
     NetBoxServerError,
     NetBoxTimeout,
@@ -41,6 +43,55 @@ _RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
 )
 
 logger = structlog.get_logger()
+
+# Sprint 8a Task 2: process-wide NetBox circuit breaker (Architecture §3.3,
+# deferred since Sprint 3). Lazy-initialised so tests that wipe env vars via
+# ``clean_env`` can re-set them before the first call.
+_netbox_circuit_instance: CircuitBreaker | None = None
+
+
+def _get_netbox_circuit() -> CircuitBreaker:
+    """Build (or return cached) NetBox circuit breaker.
+
+    Only ``NetBoxServerError`` and ``NetBoxTimeout`` count as failures —
+    ``NetBoxNotFound`` (404) and ``NetBoxValidationError`` (4xx) are
+    "NetBox said your request is wrong," not "NetBox is broken," and must
+    not contribute to opening the circuit.
+    """
+    global _netbox_circuit_instance
+    if _netbox_circuit_instance is None:
+        settings = get_settings()
+        _netbox_circuit_instance = CircuitBreaker(
+            failure_threshold=settings.netbox_circuit_failure_threshold,
+            recovery_timeout=settings.netbox_circuit_recovery_timeout_seconds,
+            expected_exception=(NetBoxServerError, NetBoxTimeout),
+            name="netbox",
+        )
+    return _netbox_circuit_instance
+
+
+def reset_netbox_circuit() -> None:
+    """Clear the cached circuit so the next call re-reads settings.
+
+    Used by the test ``clean_env`` fixture so each test starts with a fresh
+    circuit (no failure-count leakage across tests).
+    """
+    global _netbox_circuit_instance
+    _netbox_circuit_instance = None
+
+
+def get_netbox_circuit_state() -> dict[str, Any]:
+    """Snapshot of the circuit's current state for the ``/health`` sub-object."""
+    settings = get_settings()
+    if not settings.netbox_circuit_enabled:
+        return {"enabled": False, "state": "closed", "failure_count": 0, "open_until": None}
+    circuit = _get_netbox_circuit()
+    return {
+        "enabled": True,
+        "state": circuit.state,
+        "failure_count": circuit.failure_count,
+        "open_until": circuit.open_until.isoformat() if circuit.opened else None,
+    }
 
 
 class NetBoxClient:
@@ -100,6 +151,46 @@ class NetBoxClient:
         return await self._send("POST", path, json=json, timeout_seconds=_WRITE_TIMEOUT_SECONDS)
 
     async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        timeout_seconds: float = _READ_TIMEOUT_SECONDS,
+    ) -> httpx.Response:
+        """Public send entry point — applies the circuit breaker around
+        ``_send_impl`` (Sprint 8a Task 2). When the circuit is OPEN, raises
+        :class:`NetBoxCircuitOpenError` without hitting NetBox; when CLOSED
+        or HALF_OPEN, delegates to ``_send_impl`` via ``circuit.call_async``
+        so the circuit's failure counter tracks ``NetBoxServerError`` /
+        ``NetBoxTimeout`` outcomes.
+        """
+        settings = get_settings()
+        if not settings.netbox_circuit_enabled:
+            return await self._send_impl(
+                method, path, params=params, json=json, timeout_seconds=timeout_seconds
+            )
+        circuit = _get_netbox_circuit()
+        if circuit.opened:
+            raise NetBoxCircuitOpenError(
+                recovery_timeout_seconds=settings.netbox_circuit_recovery_timeout_seconds
+            )
+        # circuitbreaker package ships no type stubs (mypy override above);
+        # cast at the boundary so the public method's typed return holds.
+        return cast(
+            httpx.Response,
+            await circuit.call_async(
+                self._send_impl,
+                method,
+                path,
+                params=params,
+                json=json,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+
+    async def _send_impl(
         self,
         method: str,
         path: str,

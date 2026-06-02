@@ -406,3 +406,74 @@ def test_health_stale_auto_end_job_does_not_make_overall_status_degraded(
     body = resp.json()
     assert body["status"] == "ok"
     assert body["auto_end_job"]["status"] == "stale"
+
+
+# ---------- netbox_circuit sub-object (Sprint 8a Task 2) ---------------------
+
+
+def test_health_includes_netbox_circuit_sub_object_with_clean_state(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At process start with no failures, the sub-object reports closed."""
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    from app.main import app
+
+    with TestClient(app) as client:
+        resp = client.get("/health")
+
+    body = resp.json()
+    assert "netbox_circuit" in body
+    assert body["netbox_circuit"] == {
+        "enabled": True,
+        "state": "closed",
+        "failure_count": 0,
+        "open_until": None,
+    }
+
+
+def test_health_netbox_circuit_reports_disabled_when_setting_off(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    monkeypatch.setenv("NETBOX_CIRCUIT_ENABLED", "false")
+    from app.main import app
+
+    with TestClient(app) as client:
+        resp = client.get("/health")
+
+    body = resp.json()
+    assert body["netbox_circuit"]["enabled"] is False
+
+
+def test_health_netbox_circuit_open_does_not_make_overall_status_degraded(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8a Task 2 decision 6: netbox_circuit is informational; OPEN does
+    NOT flip overall /health status to degraded. The existing per-downstream
+    netbox check (which bypasses the circuit) is the 503 trigger."""
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    monkeypatch.setenv("NETBOX_CIRCUIT_FAILURE_THRESHOLD", "1")
+    from app.main import app
+    from app.netbox.client import _get_netbox_circuit
+    from app.netbox.errors import NetBoxServerError
+
+    # Force the circuit OPEN directly (no need to actually trip it via HTTP).
+    circuit = _get_netbox_circuit()
+    try:
+        with circuit:
+            raise NetBoxServerError("forced for test")
+    except NetBoxServerError:
+        pass
+    assert circuit.state == "open"
+
+    with TestClient(app) as client:
+        resp = client.get("/health")
+
+    assert resp.status_code == 200  # overall status stays ok
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["netbox_circuit"]["state"] == "open"
+    assert isinstance(body["netbox_circuit"]["open_until"], str)

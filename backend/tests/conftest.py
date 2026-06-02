@@ -26,7 +26,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.auth.jwks import get_jwks_cache
     from app.config import get_settings
     from app.db.session import get_engine, get_sessionmaker
-    from app.netbox.client import get_netbox_client
+    from app.netbox.client import get_netbox_client, reset_netbox_circuit
     from app.services.meta import get_meta_cache
 
     # If a previous test populated the NetBox client singleton, close its httpx pool
@@ -43,3 +43,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     get_jwks_cache.cache_clear()
     get_netbox_client.cache_clear()
     get_meta_cache.cache_clear()
+    # Sprint 8a Task 2: clear the cached NetBox circuit so the next test
+    # starts with a fresh CLOSED circuit + freshly-read settings (no
+    # failure-count leakage across tests).
+    reset_netbox_circuit()

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.session import get_sessionmaker
+from app.netbox.client import get_netbox_circuit_state
 
 _PER_CHECK_TIMEOUT_SECONDS = 2.0
 
@@ -123,7 +124,14 @@ def _auto_end_job_sub_object(request: Request) -> dict[str, object]:
 
 @router.get("/health")
 async def health(request: Request, response: Response) -> dict[str, object]:
-    """Aggregate downstream checks. 200 if all ok; 503 otherwise."""
+    """Aggregate downstream checks. 200 if all ok; 503 otherwise.
+
+    Sprint 8a Task 2: ``netbox_circuit`` sub-object reports the circuit
+    breaker state for operators. Informational only — does NOT flip the
+    overall ``status`` to ``degraded``. The existing ``netbox`` per-
+    downstream check (which uses a fresh ``httpx.AsyncClient``, bypassing
+    the circuit) remains the 503 trigger.
+    """
     db, netbox, keycloak = await asyncio.gather(
         _run_with_timeout(_check_db),
         _run_with_timeout(_check_netbox),
@@ -137,4 +145,5 @@ async def health(request: Request, response: Response) -> dict[str, object]:
         "status": "ok" if all_ok else "degraded",
         "checks": checks,
         "auto_end_job": _auto_end_job_sub_object(request),
+        "netbox_circuit": get_netbox_circuit_state(),
     }

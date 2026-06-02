@@ -14,6 +14,10 @@ dependencies = [
     "structlog>=24.4,<25",
     "pydantic-settings>=2.6,<3",
     "pyyaml>=6.0,<7",
+    # Sprint 8a Task 2: NetBox circuit breaker (Architecture §3.3, deferred
+    # since Sprint 3). Pure-Python, no transitive deps. Pre-approved at
+    # Sprint 8 plan stage (decision E); rationale in Sprint 8a work-log.
+    "circuitbreaker>=2.0,<3",
 ]
 
 [dependency-groups]
@@ -114,6 +118,12 @@ ignore_missing_imports = true
 # PyYAML ships no type stubs; treat as untyped rather than adding `types-PyYAML`
 # as a second dependency (same call as `jose.*` above).
 module = "yaml.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# circuitbreaker ships no type stubs and no PyPI types-* companion package;
+# treat as untyped (same call as `jose.*` / `yaml.*`).
+module = "circuitbreaker.*"
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     shift_auto_end_enabled: bool = True
     shift_auto_end_interval_seconds: int = Field(default=300, ge=1, le=86400)
     shift_auto_end_threshold_hours: int = Field(default=12, ge=1, le=168)
+    netbox_circuit_enabled: bool = True
+    netbox_circuit_failure_threshold: int = Field(default=5, ge=1, le=1000)
+    netbox_circuit_recovery_timeout_seconds: int = Field(default=30, ge=1, le=3600)
 
     model_config = SettingsConfigDict(
         env_file=".env",

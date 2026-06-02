@@ -128,6 +128,56 @@ def test_settings_shift_auto_end_threshold_hours_rejects_zero(
         Settings()
 
 
+def test_settings_netbox_circuit_defaults_applied(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8a Task 2: three knobs control the NetBox circuit breaker."""
+    _set_all_required(monkeypatch)
+    from app.config import Settings
+
+    s = Settings()
+    assert s.netbox_circuit_enabled is True
+    assert s.netbox_circuit_failure_threshold == 5
+    assert s.netbox_circuit_recovery_timeout_seconds == 30
+
+
+def test_settings_netbox_circuit_overrides_via_env(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("NETBOX_CIRCUIT_ENABLED", "false")
+    monkeypatch.setenv("NETBOX_CIRCUIT_FAILURE_THRESHOLD", "10")
+    monkeypatch.setenv("NETBOX_CIRCUIT_RECOVERY_TIMEOUT_SECONDS", "60")
+    from app.config import Settings
+
+    s = Settings()
+    assert s.netbox_circuit_enabled is False
+    assert s.netbox_circuit_failure_threshold == 10
+    assert s.netbox_circuit_recovery_timeout_seconds == 60
+
+
+def test_settings_netbox_circuit_failure_threshold_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("NETBOX_CIRCUIT_FAILURE_THRESHOLD", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_netbox_circuit_recovery_timeout_seconds_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("NETBOX_CIRCUIT_RECOVERY_TIMEOUT_SECONDS", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_settings_database_url_requires_asyncpg_driver(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
