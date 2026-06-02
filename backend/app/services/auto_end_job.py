@@ -32,12 +32,14 @@ continues — the next iteration will pick up whatever is still stale.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import structlog
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.repositories.shift_session import ShiftSessionRepository
@@ -47,6 +49,22 @@ from app.services.shift_session import ShiftSessionNotFound, ShiftSessionService
 logger = structlog.get_logger()
 
 HealthStatus = Literal["healthy", "stale"]
+
+_AUTO_END_JOB_ADVISORY_LOCK_ID = int.from_bytes(
+    hashlib.sha256(b"dcinv:auto_end_job").digest()[:8],
+    "big",
+    signed=True,
+)
+"""Postgres ``pg_try_advisory_lock`` id for multi-replica auto-end-job
+ownership (Sprint 8a Task 1).
+
+Derived from ``sha256(b"dcinv:auto_end_job")`` truncated to a signed
+bigint. Seed string is greppable so a future maintainer can find this
+lock's purpose; the hash gives a stable value that won't collide as the
+advisory-lock namespace grows. The id is a contract: an operator may
+inspect the cluster's current owner via
+``SELECT * FROM pg_locks WHERE locktype='advisory' AND objid=<id>``.
+Changing the value breaks that observability."""
 
 
 @dataclass
@@ -73,13 +91,13 @@ class AutoEndJobStatus:
         return "healthy" if elapsed < 3 * interval_seconds else "stale"
 
 
-async def _run_iteration(
+async def _do_iteration_work(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     threshold_hours: int,
     now: datetime,
 ) -> int:
-    """One auto-end pass. Returns the count of rows successfully ended."""
+    """The find-and-end work inside one iteration (lock held by caller)."""
     older_than = now - timedelta(hours=threshold_hours)
     async with sessionmaker() as session:
         repo = ShiftSessionRepository(session)
@@ -116,6 +134,54 @@ async def _run_iteration(
                     exc_info=True,
                 )
     return ended_count
+
+
+async def _run_iteration(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    threshold_hours: int,
+    now: datetime,
+) -> int:
+    """One auto-end pass. Returns the count of rows successfully ended.
+
+    Sprint 8a Task 1: multi-replica safe via ``pg_try_advisory_lock``. The
+    lock is held on a separate "ceremony" session for the duration of the
+    iteration body; per-row work uses its own sessions (preserves the
+    "one bad row doesn't abort the iteration" property from Sprint 7).
+
+    Returns 0 (without raising) when the lock is held by another replica.
+    The outer ``auto_end_loop`` then naturally treats a lock-skip as a
+    successful tick — lock-loser replicas do not flip to ``"stale"`` on
+    ``/health``. A replica that crashes on the lock acquire itself (DB
+    unreachable) does raise and flip to stale, which is the right signal.
+    """
+    async with sessionmaker() as lock_session:
+        acquired = (
+            await lock_session.execute(
+                text("SELECT pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": _AUTO_END_JOB_ADVISORY_LOCK_ID},
+            )
+        ).scalar_one()
+        if not acquired:
+            logger.info(
+                "auto_end_job_lock_skip",
+                lock_id=_AUTO_END_JOB_ADVISORY_LOCK_ID,
+            )
+            return 0
+        try:
+            return await _do_iteration_work(
+                sessionmaker=sessionmaker,
+                threshold_hours=threshold_hours,
+                now=now,
+            )
+        finally:
+            # Belt-and-suspenders: session-level advisory locks release on
+            # connection close anyway, but explicit unlock keeps the lock
+            # held only for the iteration body.
+            await lock_session.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"),
+                {"lock_id": _AUTO_END_JOB_ADVISORY_LOCK_ID},
+            )
 
 
 async def _wait_or_cancel(cancel_event: asyncio.Event, wait_seconds: float) -> bool:

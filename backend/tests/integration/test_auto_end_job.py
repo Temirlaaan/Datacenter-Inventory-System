@@ -131,3 +131,45 @@ async def test_run_iteration_returns_zero_when_no_stale_rows() -> None:
     )
 
     assert count == 0
+
+
+# ---------- Sprint 8a Task 1: multi-replica advisory-lock ownership ----------
+
+
+async def test_concurrent_run_iterations_only_one_runs_the_work() -> None:
+    """Multi-replica safety: two concurrent _run_iteration calls against the
+    same DB — exactly one acquires the advisory lock and ends the rows, the
+    other skips cleanly and returns 0. No double-fire, no partial state."""
+    import asyncio
+
+    # Seed 3 stale shifts for 3 distinct users (partial unique index allows
+    # only one active shift per user, so distinct users are required).
+    user_c = UUID("44444444-4444-4444-4444-444444444444")
+    stale_a = _active(user=_USER_A, hours_ago=20, tablet_id="t-a")
+    stale_b = _active(user=_USER_B, hours_ago=20, tablet_id="t-b")
+    stale_c = _active(user=user_c, hours_ago=20, tablet_id="t-c")
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        await repo.insert(stale_a)
+        await repo.insert(stale_b)
+        await repo.insert(stale_c)
+        await db.commit()
+
+    # Fire two iterations concurrently.
+    sm = get_sessionmaker()
+    results = await asyncio.gather(
+        _run_iteration(sessionmaker=sm, threshold_hours=12, now=_NOW),
+        _run_iteration(sessionmaker=sm, threshold_hours=12, now=_NOW),
+    )
+
+    # Exactly one ran the work (returned 3); the other was lock-skipped (returned 0).
+    assert sorted(results) == [0, 3]
+
+    # All three shifts ended exactly once with AUTO_TIMEOUT — no partial state.
+    async with get_sessionmaker()() as db:
+        repo = ShiftSessionRepository(db)
+        for shift in (stale_a, stale_b, stale_c):
+            persisted = await repo.get_by_id(shift.id)
+            assert persisted is not None
+            assert persisted.is_active is False
+            assert persisted.end_reason is ShiftEndReason.AUTO_TIMEOUT

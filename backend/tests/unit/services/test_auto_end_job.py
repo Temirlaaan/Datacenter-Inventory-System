@@ -142,14 +142,30 @@ class _FakeTx:
         return False
 
 
+class _FakeAdvisoryLockResult:
+    """Stand-in for the ``execute(...)`` result of pg_try_advisory_lock /
+    pg_advisory_unlock — returns True (lock acquired) so existing tests see
+    the work proceed as before."""
+
+    def scalar_one(self) -> bool:
+        return True
+
+
 class _FakeAsyncSession:
-    """Stand-in for AsyncSession used inside _run_iteration's per-row tx."""
+    """Stand-in for AsyncSession used inside _run_iteration's per-row tx.
+
+    Implements ``execute(...)`` so the Sprint 8a Task 1 advisory-lock
+    SELECT statements parse cleanly; always reports acquired=True so the
+    lock is invisible to tests that focus on the per-row work."""
 
     def in_transaction(self) -> bool:
         return False
 
     def begin(self) -> _FakeTx:
         return _FakeTx()
+
+    async def execute(self, *_args: object, **_kwargs: object) -> _FakeAdvisoryLockResult:
+        return _FakeAdvisoryLockResult()
 
 
 def _fake_sessionmaker(repo: _FakeRepo) -> async_sessionmaker[AsyncSession]:
@@ -516,3 +532,59 @@ async def test_auto_end_loop_uses_injected_clock(
     # Iteration computed older_than using the injected clock.
     assert repo.find_stale_active_calls == [fixed_now - timedelta(hours=12)]
     assert status.last_iteration_at == fixed_now
+
+
+# ---------- Sprint 8a Task 1: advisory-lock skip path ------------------------
+
+
+class _LockHeldByOtherReplicaResult:
+    """``pg_try_advisory_lock`` result that reports the lock was NOT acquired."""
+
+    def scalar_one(self) -> bool:
+        return False
+
+
+class _LockHeldByOtherReplicaSession:
+    """Sessionmaker yields this when we want to simulate the case where
+    another replica already holds the advisory lock."""
+
+    def in_transaction(self) -> bool:
+        return False
+
+    async def execute(self, *_args: object, **_kwargs: object) -> _LockHeldByOtherReplicaResult:
+        return _LockHeldByOtherReplicaResult()
+
+
+def _lock_held_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    @asynccontextmanager
+    async def _cm() -> AsyncIterator[AsyncSession]:
+        yield cast(AsyncSession, _LockHeldByOtherReplicaSession())
+
+    def _factory() -> object:
+        return _cm()
+
+    return cast("async_sessionmaker[AsyncSession]", _factory)
+
+
+async def test_run_iteration_returns_zero_and_skips_work_when_lock_held(
+    patched_repo_and_service: Callable[[_FakeRepo], None],
+) -> None:
+    """Sprint 8a Task 1: when pg_try_advisory_lock returns false, the
+    iteration must return 0 WITHOUT calling find_stale_active or end_by_id —
+    the other replica owns this tick's work."""
+    # Pre-populate the repo with stale shifts that WOULD be ended if the
+    # lock-skip path were broken; we'll assert they were left alone.
+    stale = [_stale_shift(user=_USER_A, hours_ago=20)]
+    repo = _FakeRepo(stale_to_return=stale)
+    patched_repo_and_service(repo)
+
+    count = await _run_iteration(
+        sessionmaker=_lock_held_sessionmaker(),
+        threshold_hours=12,
+        now=_NOW,
+    )
+
+    assert count == 0
+    # The lock-skip path never reaches find_stale_active or end_by_id.
+    assert repo.find_stale_active_calls == []
+    assert repo.end_calls == []

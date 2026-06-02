@@ -167,27 +167,32 @@ operational monitoring. Until then, partial failures are visible only in logs.
 
 ---
 
-## Multi-replica auto-end-job ownership (deferred from Sprint 7 to Sprint 8a)
+## Multi-replica auto-end-job ownership — RESOLVED in Sprint 8a Task 1
 
-Sprint 7 Task 1 ships the auto-end loop as an asyncio task inside the FastAPI
-lifespan. **The backend MUST run as a single replica** until job ownership is
-solved. The partial unique index `shift_sessions_one_active_per_user` + the
-idempotent `end_reason='auto_timeout'` outcome prevent the worst-case
-double-firing harm (cannot create two new actives; concurrent ends collapse
-to last-write-wins), but N replicas would waste N× DB scans on every
-interval.
+Sprint 7 Task 1 shipped the auto-end loop as an asyncio task inside the
+FastAPI lifespan with a documented single-replica caveat. Sprint 8a Task 1
+resolved it by wrapping each iteration's body in a Postgres advisory lock:
 
-**Sprint 8a candidate approaches:**
+- `app/services/auto_end_job.py:_AUTO_END_JOB_ADVISORY_LOCK_ID` — stable
+  bigint derived from `sha256(b"dcinv:auto_end_job")`. The seed string is
+  greppable so future maintainers can find the lock's purpose. Operators
+  can inspect the current owner via
+  `SELECT * FROM pg_locks WHERE locktype='advisory' AND objid=<id>`.
+- `_run_iteration` acquires the lock via `pg_try_advisory_lock`; lock-loser
+  replicas skip the work and return 0 (logged at INFO as
+  `auto_end_job_lock_skip`). The outer loop's "bump `last_iteration_at` if
+  no exception" semantic naturally treats lock-skip as a successful tick,
+  so lock-loser replicas don't flip to `"stale"` on `/health`.
+- `/health`'s `auto_end_job` sub-object shape is unchanged.
 
-- **Postgres advisory lock** around each iteration body
-  (`pg_try_advisory_lock(<auto_end_job_lock_id>)` skip if not acquired). App-
-  owned, no external dependency, but the loop still runs N times per
-  interval and (N-1) of them silently skip.
-- **Kubernetes CronJob** as a separate workload, with the in-process loop
-  disabled via `SHIFT_AUTO_END_ENABLED=false`. External, operationally
-  cleaner, but adds a new deployment surface.
+The choice between advisory lock vs k8s CronJob (the two options flagged
+in Sprint 7) went to advisory lock: simpler, no new deployment surface,
+no external dependency. k8s CronJob remains an option if a future
+deployment scenario calls for it.
 
-The choice is intentionally left open for Sprint 8a; both are viable.
+Locked in by `tests/integration/test_auto_end_job.py::test_concurrent_run_iterations_only_one_runs_the_work`
+(two concurrent `_run_iteration` calls; assert exactly one ends the
+seeded rows and the other returns 0).
 
 ---
 

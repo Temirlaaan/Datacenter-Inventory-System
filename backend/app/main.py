@@ -48,11 +48,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ALWAYS attached to app.state so /health has a consistent shape; the
     # task is only scheduled when SHIFT_AUTO_END_ENABLED is true.
     #
-    # IMPORTANT: this is a single-replica pattern. Running N replicas wastes
-    # Nx the DB scans even though the partial unique index on shift_sessions
-    # + idempotent end_reason='auto_timeout' prevent double-firing harm.
-    # Sprint 8a will introduce a Postgres advisory lock or k8s CronJob for
-    # multi-replica safety.
+    # Multi-replica safe (Sprint 8a Task 1): the loop's per-iteration body
+    # is wrapped in a Postgres advisory lock; only one replica acquires the
+    # lock per interval and runs the work. Lock-loser replicas tick cleanly
+    # without going stale on /health. See
+    # app/services/auto_end_job.py:_AUTO_END_JOB_ADVISORY_LOCK_ID.
     app.state.auto_end_job_status = AutoEndJobStatus(enabled=settings.shift_auto_end_enabled)
     app.state.auto_end_job_cancel = asyncio.Event()
     app.state.auto_end_job_task = None
