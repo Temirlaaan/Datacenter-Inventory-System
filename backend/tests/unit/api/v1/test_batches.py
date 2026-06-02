@@ -152,6 +152,46 @@ async def test_create_batch_endpoint_happy_path_returns_201(
     assert len(resp.json()["codes"]) == 3
 
 
+async def test_create_batch_endpoint_persists_audit_row_with_admin_shift_session_id(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """Sprint 8a Task 0: audit row's session_id is now sourced from the
+    admin's shift_sessions.id (populated by require_role_with_active_shift),
+    NOT hardcoded None. Locks the source swap in place."""
+    from tests.integration.conftest import DEFAULT_SHIFT_SESSION_ID
+
+    as_user("dcinv-admin")
+    resp = await client.post("/api/v1/admin/batches/", json={"count": 2})
+    assert resp.status_code == 201
+
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                text("SELECT session_id, operation FROM audit_log ORDER BY timestamp DESC LIMIT 1")
+            )
+        ).one()
+    assert row.operation == "qr.generate_batch"
+    assert row.session_id == DEFAULT_SHIFT_SESSION_ID
+
+
+async def test_create_batch_endpoint_returns_409_no_active_shift_when_admin_has_no_shift(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """Sprint 8a Task 0: /admin/batches/ now requires an active shift
+    (consistent with the rest of /admin/*). Wipe the conftest's seeded
+    shift, then assert the structured 409."""
+    async with get_sessionmaker()() as session:
+        await session.execute(text("TRUNCATE shift_sessions CASCADE"))
+        await session.commit()
+    as_user("dcinv-admin")
+
+    resp = await client.post("/api/v1/admin/batches/", json={"count": 3})
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "NO_ACTIVE_SHIFT"
+    assert await _count("qr_batches") == 0
+
+
 async def test_create_batch_endpoint_rejects_overlong_idempotency_key_with_422(
     client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
 ) -> None:

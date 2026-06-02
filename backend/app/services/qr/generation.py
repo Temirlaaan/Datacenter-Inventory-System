@@ -145,7 +145,12 @@ class QRGenerationService:
             timestamp=timestamp,
             user_email=user.email or "",
             user_keycloak_id=UUID(user.sub),
-            session_id=None,
+            # Sprint 8a Task 0: source swapped from hardcoded None to the
+            # admin's shift_session_id (populated by
+            # require_role_with_active_shift on the /admin/batches/ endpoint).
+            # Pre-Sprint-8a batch rows retain session_id NULL — consistent
+            # with the Sprint 6 decision D "no historical migration" stance.
+            session_id=user.shift_session_id,
             operation="qr.generate_batch",
             entity_type="batch",
             entity_id=str(batch_id),

@@ -19,11 +19,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.sessions import (
+    AdminSessionStartRequest,
     ForceCloseRequest,
     ShiftSessionListResponse,
     ShiftSessionResponse,
     force_close_session,
     list_sessions,
+    start_admin_session,
 )
 from app.auth.dependencies import AuthUser
 from app.db.repositories.shift_session import ShiftSessionRepository
@@ -357,6 +359,126 @@ async def test_post_force_close_rejects_missing_reason_with_422(
 ) -> None:
     as_user("dcinv-admin")
     resp = await client.post(f"/api/v1/admin/sessions/{uuid4()}/force-close", json={})
+    assert resp.status_code == 422
+
+
+# ---------- start_admin_session (Sprint 8a Task 0) ---------------------------
+
+
+async def test_start_admin_session_returns_started_shift_on_happy_path(
+    session: AsyncSession,
+) -> None:
+    """Direct-await: starts a shift, returns the row, persists to DB."""
+    # Wipe the conftest's pre-seeded shift so the start can actually take.
+    async with get_sessionmaker()() as db:
+        await db.execute(text("TRUNCATE shift_sessions CASCADE"))
+        await db.commit()
+
+    from app.api.v1.admin.sessions import get_shift_session_service
+
+    service = get_shift_session_service(session)
+    result = await start_admin_session(
+        request=AdminSessionStartRequest(workstation_id="admin-ws-01"),
+        user=make_user("dcinv-admin"),
+        service=service,
+    )
+
+    assert isinstance(result, ShiftSessionResponse)
+    assert result.tablet_id == "admin-ws-01"  # column stays 'tablet_id' under the hood
+    assert result.shift_end_at is None
+    assert result.end_reason is None
+
+
+async def test_start_admin_session_returns_409_when_admin_already_has_active_shift(
+    session: AsyncSession,
+) -> None:
+    """Direct-await: the conftest pre-seeded a shift for the default user;
+    starting again returns 409 with the existing-shift payload."""
+    import json
+
+    from fastapi.responses import JSONResponse
+
+    from app.api.v1.admin.sessions import get_shift_session_service
+
+    service = get_shift_session_service(session)
+    result = await start_admin_session(
+        request=AdminSessionStartRequest(workstation_id="admin-ws-01"),
+        user=make_user("dcinv-admin"),
+        service=service,
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 409
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "SESSION_ALREADY_ACTIVE"
+    assert "active" in body["error"]
+    assert body["error"]["active"]["id"]  # the existing shift's id is echoed
+
+
+async def test_post_admin_sessions_start_endpoint_returns_403_without_admin_role(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """Role gate kicks in before any DB lookup."""
+    as_user("dcinv-mobile-user")
+    resp = await client.post("/api/v1/admin/sessions/start", json={"workstation_id": "ws-01"})
+    assert resp.status_code == 403
+
+
+async def test_post_admin_sessions_start_endpoint_does_not_require_active_shift(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """Sprint 8a Task 0 chicken-and-egg: this is the ONE /admin/* route NOT
+    gated by require_role_with_active_shift. Wipe the conftest's seeded
+    shift, then prove the call still succeeds (no 409 NO_ACTIVE_SHIFT)."""
+    async with get_sessionmaker()() as db:
+        await db.execute(text("TRUNCATE shift_sessions CASCADE"))
+        await db.commit()
+    as_user("dcinv-admin")
+
+    resp = await client.post("/api/v1/admin/sessions/start", json={"workstation_id": "admin-ws-01"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["tablet_id"] == "admin-ws-01"
+    # response_model_exclude_none drops the null shift_end_at + end_reason
+    # fields — the absence-from-wire means the shift is active.
+    assert "shift_end_at" not in body
+    assert "end_reason" not in body
+
+
+async def test_post_admin_sessions_start_rejects_missing_workstation_id_with_422(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-admin")
+    resp = await client.post("/api/v1/admin/sessions/start", json={})
+    assert resp.status_code == 422
+
+
+async def test_post_admin_sessions_start_rejects_empty_workstation_id_with_422(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-admin")
+    resp = await client.post("/api/v1/admin/sessions/start", json={"workstation_id": ""})
+    assert resp.status_code == 422
+
+
+async def test_post_admin_sessions_start_rejects_over_length_workstation_id_with_422(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    as_user("dcinv-admin")
+    resp = await client.post("/api/v1/admin/sessions/start", json={"workstation_id": "x" * 256})
+    assert resp.status_code == 422
+
+
+async def test_post_admin_sessions_start_rejects_extra_body_field_with_422(
+    client: httpx.AsyncClient, as_user: Callable[..., AuthUser]
+) -> None:
+    """extra='forbid' on AdminSessionStartRequest catches typos."""
+    as_user("dcinv-admin")
+    resp = await client.post(
+        "/api/v1/admin/sessions/start",
+        json={"workstation_id": "ws-01", "tablet_id": "wrong-field-name"},
+    )
     assert resp.status_code == 422
 
 

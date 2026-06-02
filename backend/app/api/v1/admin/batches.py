@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import AuthUser, require_role
+from app.auth.dependencies import AuthUser, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
@@ -77,7 +77,7 @@ def _batch_created_body(batch: QRBatch, codes: list[QR]) -> dict[str, object]:
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=BatchCreatedResponse)
 async def create_batch(
     payload: GenerateBatchRequest,
-    user: AuthUser = Depends(require_role("dcinv-admin")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     session: AsyncSession = Depends(get_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
 ) -> JSONResponse:
@@ -117,7 +117,7 @@ async def create_batch(
 @router.get("/{batch_id}", response_model=BatchDetailsResponse)
 async def get_batch(
     batch_id: UUID,
-    user: AuthUser = Depends(require_role("dcinv-admin")),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     session: AsyncSession = Depends(get_session),
 ) -> BatchDetailsResponse:
     """Return a batch's metadata and all its QR codes. 404 if the batch is unknown."""

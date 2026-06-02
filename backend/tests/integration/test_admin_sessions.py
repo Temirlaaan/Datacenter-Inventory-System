@@ -240,3 +240,68 @@ async def test_force_close_returns_404_for_unknown_session_id(
             text("SELECT COUNT(*) FROM audit_log" " WHERE operation = 'shift_session.force_close'")
         )
         assert rows.scalar_one() == 0
+
+
+# ---------- Sprint 8a Task 0: admin-shift-open unblocks live admin use -------
+
+
+async def test_admin_can_open_shift_then_use_admin_audit_endpoint(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """End-to-end: without an active shift, /admin/audit returns 409. After
+    /admin/sessions/start succeeds, the same /admin/audit call returns 200.
+    This is the contract that makes Sprint 7's admin endpoints live-usable."""
+    # Wipe the conftest's pre-seeded shift to simulate a fresh admin login.
+    async with get_sessionmaker()() as db:
+        await db.execute(text("TRUNCATE shift_sessions CASCADE"))
+        await db.commit()
+
+    # Step 1 — /admin/audit returns 409 before the shift exists.
+    pre = await admin_client.get("/api/v1/admin/audit")
+    assert pre.status_code == 409
+    assert pre.json()["error"]["code"] == "NO_ACTIVE_SHIFT"
+
+    # Step 2 — open the admin shift.
+    start = await admin_client.post(
+        "/api/v1/admin/sessions/start", json={"workstation_id": "admin-ws-01"}
+    )
+    assert start.status_code == 200, start.text
+
+    # Step 3 — /admin/audit now works.
+    post = await admin_client.get("/api/v1/admin/audit")
+    assert post.status_code == 200
+    body = post.json()
+    assert {"results", "page", "page_size", "has_more"} <= set(body.keys())
+
+
+async def test_admin_can_open_shift_then_create_batch_with_attributed_audit_row(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """End-to-end: after /admin/sessions/start, POST /admin/batches/ produces
+    an audit row whose session_id matches the admin's freshly-opened shift —
+    proving the Sprint 8a Task 0 source swap (QRGenerationService:
+    session_id=None → user.shift_session_id) is wired end-to-end."""
+    async with get_sessionmaker()() as db:
+        await db.execute(text("TRUNCATE shift_sessions CASCADE"))
+        await db.commit()
+
+    start = await admin_client.post(
+        "/api/v1/admin/sessions/start", json={"workstation_id": "admin-ws-01"}
+    )
+    assert start.status_code == 200
+    shift_id = start.json()["id"]
+
+    create = await admin_client.post("/api/v1/admin/batches/", json={"count": 2})
+    assert create.status_code == 201
+
+    # Audit row for qr.generate_batch carries the admin's shift session_id.
+    async with get_sessionmaker()() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT session_id::text, operation FROM audit_log"
+                    " WHERE operation = 'qr.generate_batch'"
+                )
+            )
+        ).one()
+    assert row.session_id == shift_id

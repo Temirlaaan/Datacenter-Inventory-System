@@ -26,10 +26,11 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import AuthUser, require_role_with_active_shift
+from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.shift_session import (
     ShiftSessionQueryFilters,
@@ -39,8 +40,24 @@ from app.db.session import get_session
 from app.domain.audit import AuditLogEntry, AuditResult
 from app.domain.shift_session import ShiftEndReason, ShiftSession
 from app.observability.request_id import current_request_id
+from app.services.shift_session import (
+    SessionAlreadyActive,
+    ShiftSessionService,
+)
 
 router = APIRouter()
+
+
+def get_shift_session_service(
+    session: AsyncSession = Depends(get_session),
+) -> ShiftSessionService:
+    """Build a per-request ``ShiftSessionService``.
+
+    Mirrors ``app.api.v1.sessions.get_shift_session_service`` (Sprint 6) — kept
+    local to this module rather than imported, so the admin and mobile router
+    DI graphs stay independently overridable in tests.
+    """
+    return ShiftSessionService(session=session, repo=ShiftSessionRepository(session))
 
 
 class ShiftSessionResponse(BaseModel):
@@ -72,6 +89,22 @@ class ForceCloseRequest(BaseModel):
     """
 
     reason: str = Field(min_length=1, max_length=500)
+
+
+class AdminSessionStartRequest(BaseModel):
+    """``POST /api/v1/admin/sessions/start`` payload (Sprint 8a Task 0).
+
+    Distinct from mobile's ``SessionStartRequest`` because admins identify
+    their originating device by ``workstation_id`` (hostname / admin-portal
+    session id / freeform asset tag), not ``tablet_id``. The underlying
+    ``shift_sessions.tablet_id`` column is re-used as "originating-device-id";
+    the API layer renames at the schema boundary so the two surfaces stay
+    semantically distinct.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workstation_id: str = Field(min_length=1, max_length=255)
 
 
 def _to_response(shift: ShiftSession) -> ShiftSessionResponse:
@@ -125,6 +158,48 @@ async def list_sessions(
         page_size=page_size,
         has_more=has_more,
     )
+
+
+@router.post(
+    "/start",
+    response_model=ShiftSessionResponse,
+    response_model_exclude_none=True,
+)
+async def start_admin_session(
+    request: AdminSessionStartRequest,
+    user: AuthUser = Depends(require_role("dcinv-admin")),
+    service: ShiftSessionService = Depends(get_shift_session_service),
+) -> ShiftSessionResponse | JSONResponse:
+    """Open a new admin shift (Sprint 8a Task 0).
+
+    Chicken-and-egg: this endpoint is the only ``/admin/*`` route NOT gated by
+    ``require_role_with_active_shift`` — you can't require a shift to open
+    one. After this returns 200, the admin can use ``GET /admin/audit``,
+    ``GET /admin/sessions``, ``POST /admin/sessions/{id}/force-close``, and
+    the gated ``POST/GET /admin/batches/`` paths.
+
+    409 ``SESSION_ALREADY_ACTIVE`` carries the existing shift so the admin
+    UI can render "you already have a shift open since X" — same shape as
+    mobile's ``POST /api/v1/sessions/start``.
+    """
+    try:
+        started = await service.start(
+            user_email=user.email or "",
+            user_keycloak_id=UUID(user.sub),
+            tablet_id=request.workstation_id,
+        )
+    except SessionAlreadyActive as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": {
+                    "code": "SESSION_ALREADY_ACTIVE",
+                    "message": "An admin shift is already active for this user.",
+                    "active": _to_response(exc.active).model_dump(mode="json"),
+                }
+            },
+        )
+    return _to_response(started)
 
 
 @router.post(
