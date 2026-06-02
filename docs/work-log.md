@@ -637,3 +637,135 @@ DATABASE_URL=postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_tes
 - `docs/sprint-6.md` — per-task plans filled in across the sprint (this work-log entry is the close-out artifact)
 - `docs/parking-lot.md` — admin sessions / `admin_force_close` / auto-end job carved out as Sprint 7+ deferrals
 - `CLAUDE.md` — Repository Status updated for Sprint 6 closure
+
+---
+
+## Sprint 7 — Admin Surface + Polish (closed 2026-06-02)
+
+**Status:** Closed. Tasks 0–6 complete.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 0 | **`shift_end_reason` enum rename to ToR §7.2.4 canon.** New Alembic migration `d4e5f6a7b8c9` (`ALTER TYPE shift_end_reason RENAME VALUE 'inactivity_timeout' TO 'auto_timeout'` + `'admin_force_close' TO 'forced'`). Non-destructive under CLAUDE.md §7 — no column/table dropped, no constraint touched; Postgres rewrites the enum label in place. `ShiftEndReason` StrEnum + `Literal[...]` in `SessionEndRequest` swept. The historical Sprint 6 migration `c3d4e5f6a7b8` keeps its original labels so anyone replaying history reaches the Sprint-6 shape before this migration applies. New `test_rename_migration_rewrites_pre_rename_rows_in_place` inserts pre-rename rows via raw SQL casts (since `ShiftSessionRepository.insert` now emits the new labels), applies the rename, and asserts the in-place rewrite. The Sprint 6 retrospective got a one-line addendum under "Discrepancies between ToR / Architecture and what shipped" — RESOLVED in Task 0. |
+| 1 | **Auto-end stale-shifts background job (ToR §4.1.3 fallback).** `app/services/auto_end_job.py` — `AutoEndJobStatus` dataclass + `auto_end_loop` (asyncio loop in `app.main:lifespan` with cancel-via-`asyncio.Event` + 60s startup grace + per-iteration try/except + injectable `clock` for tests) + `_run_iteration` (per-row session/transaction so one bad row doesn't abort the iteration). Three new `Settings` knobs: `SHIFT_AUTO_END_ENABLED=true`, `SHIFT_AUTO_END_INTERVAL_SECONDS=300`, `SHIFT_AUTO_END_THRESHOLD_HOURS=12`. New repository method `ShiftSessionRepository.find_stale_active(*, older_than)` ordered by `shift_start_at ASC` (oldest cleaned up first). New service primitive `ShiftSessionService.end_by_id(*, session_id, reason)` shared with Task 3 force-close; new `ShiftSessionNotFound` for "id not in DB", existing `IllegalShiftTransition` covers "already ended" (both swallowed by the job as expected concurrent-end races). `/health` extended with `auto_end_job: {enabled, last_iteration_at, status}` sub-object — informational only (decision 1 of Task 1 plan): a `"stale"` sub-object does NOT flip overall `/health` status to `"degraded"` or return 503; operators alert on the sub-field. Status object always attached to `app.state` for shape consistency regardless of `SHIFT_AUTO_END_ENABLED`. |
+| 2 | **`GET /api/v1/admin/audit` query endpoint.** Role `dcinv-admin` + active shift (decision I). Eight filters (`user_keycloak_id`, `from`, `to`, `entity_type`, `entity_id`, `operation`, `session_id`, `result`) + 1-indexed offset pagination (`page` ≥ 1, `page_size` 1..100, default 20). New `AuditLogQueryFilters` + `AuditLogRepository.query` returning `(rows, has_more)` via `LIMIT page_size + 1` — one query, no `COUNT(*)` round-trip (at 2-year retention × ~50 ops/day ≈ 36k rows minimum, that matters). Domain `AuditLogEntry.id: int \| None = None` activated (the field Sprint 2 reserved for "when a sprint requires reading back inserted rows"). Audit-of-audits row per ToR §5.4.6 + decision I: `operation="audit.query"`, `entity_type="audit"`, `entity_id="search"` (hard-coded so admin queries are themselves discoverable via `?entity_type=audit&entity_id=search`); `after_json={"filters": <as-passed>, "results_count": N}`; written in the SAME transaction as the user-facing query — read-without-audit is forbidden, so an audit-insert failure rolls back and returns 500. FAILURE path writes its own audit row (without `results_count`) and re-raises. OpenAPI description for the `session_id` filter carries the decision J semantic note (pre-2026-05-30 rows hold JWT sid; post-Sprint-6 hold `shift_sessions.id`) — locked in by a test that introspects `app.openapi()`. |
+| 3 | **`GET /api/v1/admin/sessions` + `POST /api/v1/admin/sessions/{id}/force-close`.** Both role `dcinv-admin` + active shift. List endpoint: filters `user_keycloak_id` / `from` / `to` / `active_only` + the same pagination shape as Task 2. New `ShiftSessionQueryFilters` + `ShiftSessionRepository.query`. **No audit row on GET** (decision 8): shift listing is operational, not §5.4.6 sensitive. Force-close body `{"reason": str}` (required, `min_length=1, max_length=500`), ends with `end_reason='forced'`. Endpoint orchestrates the multi-record write (repo + audit) **directly in a single tx**, NOT via `ShiftSessionService.end_by_id`, because `ShiftSessionService` is deliberately not in the §3.1 apparatus (Task 1's `end_by_id` is for stand-alone callers like the auto-end job). Idempotent on already-ended target: returns 200 with current state + audit row `result=CONFLICT` + `after_json.no_op=true`. 404 on unknown id with NO audit row (admin typo, not a state-change conflict). Audit row's `session_id` is the admin's shift, NOT the target's (records who-did-what). No NetBox journal entry — force-close is a shift event, not a device event (consistent with mobile `/sessions/end`). |
+| 4 | **Decommission `reason` plumbed into NetBox journal comment (Sprint 5 carry-over).** `_format_journal_comment` gains optional `reason: str \| None = None` parameter; renders a `Reason: <text>` line between the attribution block and the `Changes:` diff when provided; absent line (NOT `Reason: None`) when not. Plumbed through `_post_journal_entry` + `patch_with_attribution`. `DeviceDecommissionService.decommission` passes `reason=reason` to `patch_with_attribution`; docstring updated to mark this the implementation, not a future candidate. The audit row's `after_json` is unchanged — `reason` is human-readable journal attribution, not machine-queried forensics; if a future requirement wants `reason` in the audit row, that's a separate decision. **Task 4(a) (`GET /api/v1/meta/device-create-form`) had already shipped in Sprint 5** itself — the Sprint 7 plan's "endpoint was deferred" claim was stale (the endpoint is at `app/api/v1/meta.py:88-98` with tests in `tests/unit/api/v1/test_meta.py`). No code change for 4(a). |
+| 5 | **`NetBoxValidationError → 422 NETBOX_VALIDATION_ERROR` translation extended to all six write endpoints.** Sprint 5 Correction 2 only covered `POST /api/v1/devices/`; Task 5 adds `PATCH /devices/{id}`, `POST /devices/{id}/comments`, `POST /devices/{id}/decommission`, `POST /qr/{id}/bind`, `POST /qr/{id}/retire`. New `app/api/v1/_helpers.py:netbox_validation_error_response(exc, *, fallback_message=...)` is the single shared body shape — `POST /devices/` refactored to use it; existing tests stayed green without modification. Per-endpoint `try/except` rather than a global `@app.exception_handler` (decision 1) — a global handler would also flip NBV from NetBox-side 401/403 on read endpoints (a backend-token issue) to a misleading 422; per-endpoint catches keep the translation explicit. The decommission bound-QR + device-PATCH-fails path is unaffected: compensation converts the NBV to `DeviceDecommissionRolledBackError` (500) before the endpoint sees it; the 422 path applies only to the no-bound-QR atomic-failure case. `result=FAILURE` audit row continues to land via existing `patch_with_attribution` / `post_with_attribution` logic — Task 5 is endpoint-layer only. |
+| 6 | Acceptance + close-out (this entry). |
+
+### Quality bar at close
+
+- **802 tests** (Sprint 6 → 685; Sprint 7 +117 net new), **100% line + branch coverage** across `app/` — `--cov-fail-under=100` gate passes.
+- ruff + black + mypy clean across `app/` and `tests/`.
+- One new migration (`d4e5f6a7b8c9_rename_shift_end_reason_to_tor_canon`); round-trips cleanly; new integration test verifies `ALTER TYPE RENAME VALUE` rewrites pre-rename rows in place.
+
+### Pyproject deviations from baseline
+
+**None.** No new dependencies, no version bumps. Task 1's auto-end loop was deliberately implemented without APScheduler / Celery / aiojobs (Task 1 plan decision A: "no new dependency").
+
+### Architectural decisions worth carrying forward
+
+- **Auto-end job is single-replica until Sprint 8a (Task 1 decision A guardrail #3 — load-bearing for deployment).** Backend MUST run as a single replica until job ownership is solved via Postgres advisory lock OR k8s CronJob. The `shift_sessions_one_active_per_user` partial unique index + the idempotent `end_reason='auto_timeout'` outcome prevent the worst-case double-firing harm (cannot create two new actives; concurrent ends collapse to last-write-wins), but N replicas waste N× the DB scans on every interval. The single-replica caveat is documented both in `docs/sprint-7.md` (decision A) and in a comment on the `asyncio.create_task` line in `app/main.py`. Sprint 8a will revisit; the choice between advisory lock (simpler, app-owned) and k8s CronJob (external, operationally cleaner) is intentionally left open.
+- **`shift_end_reason` enum uses ToR §7.2.4 canon (Task 0).** Values are `manual / auto_timeout / forced` — NOT Sprint 6's descriptive `inactivity_timeout / admin_force_close`. The rename migration is non-destructive under CLAUDE.md §7 (ALTER TYPE RENAME VALUE is in-place); existing Sprint 6 rows are rewritten by Postgres. Sprint 6's retrospective got an addendum under "Discrepancies" noting RESOLVED in Sprint 7 Task 0. **Do not re-introduce descriptive names** — the ToR is the contract.
+- **Endpoint orchestrates the multi-record write directly when the service is NOT in the §3.1 apparatus (Task 3 force-close, decision 1).** `ShiftSessionService` is deliberately session-metadata-only (its docstring says so); force-close needs `shift_sessions.update` + `audit_log.insert` in one transaction. Rather than pollute `ShiftSessionService` with three-record-write responsibility, the endpoint composes the repos directly. Mirrors the audit-of-audits pattern from Task 2's `/admin/audit`. Future shift-write endpoints (admin start, admin end) should follow the same shape.
+- **`LIMIT N+1` pagination, NOT `COUNT(*)` (Tasks 2 + 3).** Both `AuditLogRepository.query` and `ShiftSessionRepository.query` compute `has_more` by fetching `page_size + 1` and slicing the extra row. Cheap (one query, no separate count) and bounded — even a 2-year audit retention at ~50 ops/day = ~36k rows scans cleanly via the existing `audit_log_timestamp_idx`. Established pattern for future paginated read endpoints; do not add `total_count` to envelopes unless a consumer specifically needs it.
+- **`AuditLogEntry.id` is now populated on the read path (Task 2).** Sprint 2's anticipated field (`id: int | None = None`, default None on insert) is active. The insert path is unchanged (BIGSERIAL populates DB-side); the read path through `AuditLogRepository.query` reads the row id back. Any future "read recent audit row by id" consumer can rely on this without further schema work.
+- **Audit row attribution for admin actions: admin's shift_session_id, NOT the target's (Task 3 decision 10).** The `audit_log.session_id` column records WHO performed the action. For force-close, that's the admin (their `shift_session_id` populated by `require_role_with_active_shift`); the target shift's id lives in `entity_id`. Same pattern for the audit-of-audits row in Task 2. Future admin actions on other entities should follow this contract.
+- **Active-shift gate on admin endpoints (decision I of `docs/sprint-7.md`).** `GET /admin/audit`, `GET /admin/sessions`, `POST /admin/sessions/{id}/force-close` all use `require_role_with_active_shift("dcinv-admin")`. Acknowledged trade-off: until an admin sessions surface lands (Sprint 8+), admins can't operate any of these endpoints — they return 409 NO_ACTIVE_SHIFT. The decision is deliberate (consistent audit attribution via `shift_session_id`); Sprint 8+ adds the admin-shift surface that unblocks live admin use. `POST /api/v1/admin/batches/` remains the lone admin endpoint NOT gated (decision F), because it predates the shift apparatus and gating it would brick the only working admin endpoint.
+- **NBV translation is per-endpoint, NOT a global handler (Task 5 decision 1).** A global `@app.exception_handler(NetBoxValidationError)` would translate NBV everywhere — including read endpoints where NBV could surface for 401/403 against NetBox (a backend-token issue, not a user-input issue). Per-endpoint `try/except` + the shared `app/api/v1/_helpers.py:netbox_validation_error_response` helper keeps the translation explicit and intentional. The helper accepts an optional `fallback_message` so each endpoint can specialise the toast text without diverging the wire shape.
+- **`/health` is the operational signal for the auto-end loop, NOT a 503 trigger (Task 1 decision 1).** A `"stale"` value on the `auto_end_job.status` sub-object surfaces in monitoring without changing overall `/health` status. The existing 503 semantic stays narrow (external dependency unreachable); operators alert on the sub-field separately. Write-path correctness is unaffected when the job is stale — only the safety net is.
+- **Force-close on an already-ended target is an idempotent CONFLICT, NOT a 4xx (Task 3 decision 2).** A web admin double-clicking force-close (race or fat-finger) gets the same 200 response with the current shift state, plus an audit row carrying `result=CONFLICT` + `after_json.no_op=true` for forensic visibility. 404 is reserved for "no such id" (admin typo); CONFLICT is reserved for "id exists but already in the desired state."
+
+### Sprint 7 retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all seven tasks. Each task got a detailed plan with decision rationale before any code; the plans accurately predicted what would touch which files. Notably, Task 1's plan correctly anticipated the `find_stale_active` index question (existing partial unique index suffices at target scale, no new index) and Task 3's plan correctly anticipated that the endpoint should orchestrate directly rather than route through `ShiftSessionService.end_by_id`.
+- TDD discipline held on the read endpoints (Tasks 2, 3): pagination, filters, has_more, and the audit-of-audits shape all had explicit tests-first counterparts. Coverage stayed at 100% across every gate check.
+- Reuse paid off: the `LIMIT N+1` pagination shape from Task 2's `AuditLogRepository.query` was carried 1:1 into Task 3's `ShiftSessionRepository.query`; the Task 1 `ShiftSessionService.end_by_id` primitive was reused (without modification) for Task 3's force-close endpoint orchestration; the `_helpers.py` extraction in Task 5 immediately simplified the existing `POST /devices/` callsite as a bonus refactor.
+- The "Task 4(a) is already shipped" discovery was caught at the start of Task 4 by reading the actual code instead of trusting the plan. Saved ~half a day of redundant work and surfaced a small process lesson (sprint-plan claims about "what's deferred" can rot between plan-write and plan-execute when carried across two sprints).
+- The Task 0 enum rename was risky-looking (live enum, used in domain + Pydantic + repo + 5+ tests, between Sprint 6 close and Sprint 7's downstream tasks) but landed cleanly thanks to the two-commit split (migration + tests first, code sweep second) — the intermediate state was acknowledged-and-safe rather than accidentally broken.
+- Working-tree hygiene check at the start of Task 0 caught that Sprint 6 was uncommitted on main (despite the work-log claiming it had closed). Three pre-Task-0 commits (`feat(s6)`, `docs(s6) close-out`, `docs(s7) plan skeleton`) recovered honest history before Sprint 7 work landed on top.
+
+**What slowed us down:**
+- Test setup for the new integration test in Task 1 (`test_auto_end_job.py`) initially failed because it didn't bootstrap the schema — the migration test's module-scoped fixture leaves the DB at `base` between modules, so any new integration test file needs its own `_clean_schema` + `_truncate` setup. Mechanical but cost one cycle; documenting here so future new integration test files start from the right template.
+- Three transient ruff issues across Sprint 7 commits: unicode `×` (multiplication sign) in code comments tripped RUF002/RUF003 twice (Task 1 + Task 2), and the ASYNC109 rule fired once on `_wait_or_cancel(event, timeout=...)` because the param name `timeout` conflicts with `asyncio.wait_for(timeout=...)` semantics. All three were trivial fixes (`x` instead of `×`; `wait_seconds` instead of `timeout`). Pattern to remember: avoid unicode in code, even comments.
+- Black wanted reformatting in 4+ files at most gate runs — line-length collapses from inserting new code into existing modules. Always run `black` before claiming a gate is green.
+- IDE noise (wrong Python interpreter → constant false "module not found" / "attribute not found" diagnostics) continued, same as every prior sprint. Not a real problem.
+
+**Discrepancies between ToR / Architecture and what shipped:**
+- **None new this sprint.** Sprint 6's enum-naming discrepancy was RESOLVED in Task 0; the Sprint 6 retrospective's addendum was committed as part of Task 0 commit #2. Sprint 7's surface (admin endpoints under `/api/v1/admin/`, audit query filters per ToR §8.3, force-close mandatory `reason`) matches ToR §4.4.2 / §5.4.6 / §7.2.4 / §8.3 as written.
+- **Decision I trade-off acknowledged:** admin endpoints (`/admin/audit`, `/admin/sessions`, `/admin/sessions/{id}/force-close`) gate on active shift, but there's no admin-shift-open API yet. Live admin use returns 409 NO_ACTIVE_SHIFT until Sprint 8+. Not a divergence from ToR — `dcinv-admin` is an authorization role; shift-as-attribution is a Sprint 6 architectural choice and Sprint 7 follows it consistently.
+
+**Deliberately deferred (carried into Sprint 8+):**
+- **Admin-shift-open surface.** Without this, decision I's active-shift gate bricks admins in production. Sprint 8 candidate: `POST /api/v1/admin/sessions/start` (web-driven, no `tablet_id` — perhaps `workstation_id` or just the admin's keycloak id) so admins can attribute their own actions to a shift. Once it lands, `POST /api/v1/admin/batches/` can switch from un-gated to gated, completing the consistency story.
+- **Multi-replica auto-end-job ownership.** Postgres advisory lock OR k8s CronJob. Sprint 8a (production hardening) candidate. Single-replica caveat documented.
+- **NetBox circuit breaker** (Architecture §3.3 deferral, carried since Sprint 3). Sprint 8a.
+- **Phase 2 partial-failure alerting** (Architecture §3.1, parking-lot). Sprint 8a.
+- **Performance testing against ToR §5.1 targets** (QR lookup p95 ≤ 800ms, device update p95 ≤ 1500ms). Sprint 8a.
+- **Rate limiting** per ToR §5.4.7. Sprint 8a.
+- **Idempotency-key TTL cleanup job** — carried from Sprints 2-6, no consumer yet.
+- **HTML admin web pages** per ToR §4.4.2 — `/web/`, `/web/batches/`, `/web/qr/search`, `/web/audit/`, `/web/users/`, `/web/sessions/`. Sprint 8b. Sprint 7 shipped the JSON foundations for `/web/audit/` (Task 2) and `/web/sessions/` (Task 3); HTML is a thin presentation layer on top.
+- **PDF batch label generation** (Architecture §6 deliverable; ToR §4.4.2 Download/Print buttons). Sprint 8b.
+- **CSV export for `GET /admin/audit`** (ToR §4.4.2 "Export to CSV"). Sprint 8b. Will be a separate endpoint (`GET /web/audit/export.csv` or similar), NOT content negotiation on the JSON endpoint — keeps the JSON contract pure.
+- **`GET /api/v1/admin/users`** — backs ToR §4.4.2 `/web/users/`. Needs a Keycloak admin client + `KEYCLOAK_ADMIN_CLIENT_*` env vars (Sprint 6 decision J deliberately avoided). Sprint 8+ when the admin surface justifies the new attack surface.
+- **`GET /api/v1/admin/qr/{id}/history`** — backs `/web/qr/search`. Task 2's `entity_id` audit filter partially covers this use case (`?entity_type=qr&entity_id=DCQR-XXX` gives the change history); a dedicated endpoint can land later if the join shape is awkward.
+- **Manual smoke against real Keycloak / NetBox** — skipped (no reachable instances in this environment, same as Sprints 1-6).
+
+### Files added in Sprint 7 (high-level)
+
+- `backend/alembic/versions/d4e5f6a7b8c9_rename_shift_end_reason_to_tor_canon.py` (Task 0) — migration
+- `backend/app/services/auto_end_job.py` (Task 1) — `AutoEndJobStatus`, `auto_end_loop`, `_run_iteration`
+- `backend/app/api/v1/admin/audit.py` (Task 2) — `GET /admin/audit` router + Pydantic envelopes + audit-of-audits orchestration
+- `backend/app/api/v1/admin/sessions.py` (Task 3) — `GET /admin/sessions` + `POST /admin/sessions/{id}/force-close` router
+- `backend/app/api/v1/_helpers.py` (Task 5) — `netbox_validation_error_response` translator
+- `backend/tests/integration/test_auto_end_job.py` (Task 1, 2 tests) — end-to-end stale-row sweep against real DB
+- `backend/tests/integration/test_main_lifespan.py` (Task 1, 3 tests) — lifespan task wiring + shutdown drain
+- `backend/tests/integration/test_audit_log_repository.py` (Task 2, 12 tests) — `query` method filters + pagination + ordering
+- `backend/tests/integration/test_admin_audit.py` (Task 2, 3 tests) — end-to-end pagination + audit-of-audits queryable
+- `backend/tests/integration/test_admin_sessions.py` (Task 3, 5 tests) — list filters + force-close happy/no-op/404 paths
+- `backend/tests/unit/services/test_auto_end_job.py` (Task 1, 18 tests) — status state machine + loop guardrails + `_run_iteration` row-level exception handling
+- `backend/tests/unit/api/v1/test_admin_audit.py` (Task 2, 14 tests) — handler logic + role/active-shift gating + OpenAPI semantic-note check
+- `backend/tests/unit/api/v1/test_admin_sessions.py` (Task 3, 15 tests) — list + force-close handler logic + body validation
+- `backend/tests/unit/api/v1/test_helpers.py` (Task 5, 3 tests) — NBV translator + fallback message contract
+
+### Files modified in Sprint 7
+
+- `backend/alembic/versions/c3d4e5f6a7b8_shift_sessions.py` — **NOT modified** (kept Sprint 6's original labels so historical replay is honest; Task 0's rename is a separate migration on top)
+- `backend/app/domain/shift_session.py` (Task 0) — `ShiftEndReason` members renamed to `MANUAL / AUTO_TIMEOUT / FORCED`
+- `backend/app/domain/audit.py` (Task 2) — `+AuditLogEntry.id: int | None = None` (Sprint 2's reserved field now active for the read path)
+- `backend/app/api/v1/sessions.py` (Task 0) — wire `Literal["manual", "auto_timeout"]` + docstring sweep
+- `backend/app/services/shift_session.py` (Tasks 0 + 1) — docstring sweep (Task 0) + `+ShiftSessionNotFound` + `+end_by_id` (Task 1)
+- `backend/app/db/repositories/shift_session.py` (Tasks 1 + 3) — `+find_stale_active` (Task 1), `+ShiftSessionQueryFilters` + `query` (Task 3)
+- `backend/app/db/repositories/audit_log.py` (Task 2) — `+AuditLogQueryFilters` + `query` returning `(rows, has_more)`
+- `backend/app/api/v1/health.py` (Task 1) — `+auto_end_job` sub-object on `/health` response; new `_auto_end_job_sub_object(request)` helper
+- `backend/app/main.py` (Tasks 1 + 2 + 3) — lifespan extended with the auto-end task scheduling + `app.state.auto_end_job_status` (Task 1); `+admin_audit_router` mount (Task 2); `+admin_sessions_router` mount (Task 3)
+- `backend/app/api/v1/devices.py` (Tasks 4 + 5) — `reason` passed through to `patch_with_attribution` (Task 4); NBV catch added to `update_device`, `add_comment`, `decommission_device`; `POST /devices/` refactored to use the shared helper (Task 5)
+- `backend/app/api/v1/qr.py` (Task 5) — NBV catch added to `bind_qr` and `retire_qr`
+- `backend/app/services/netbox_write.py` (Task 4) — `_format_journal_comment` + `_post_journal_entry` + `patch_with_attribution` gain optional `reason: str | None`
+- `backend/app/services/device_decommission.py` (Task 4) — `reason=reason` passed to `patch_with_attribution`; docstring updated
+- `backend/app/config.py` + `backend/.env.example` (Task 1) — three new `SHIFT_AUTO_END_*` knobs + docs
+- 5 unit test files for endpoint NBV catches (Task 5)
+- 4 integration test files (Tasks 4 + 5) — decommission journal-body assertion (Task 4); end-to-end NetBox 400 → 422 + FAILURE audit row (Task 5, +1 updated existing 502 → 422 contract on add-comment)
+- `backend/tests/unit/test_config.py` (Task 1) — 4 new tests for `SHIFT_AUTO_END_*` defaults + override + zero-rejection
+- `backend/tests/unit/services/test_shift_session.py` (Tasks 0 + 1) — sweep + 5 new `end_by_id` tests + 1 new `ShiftSessionNotFound` exception payload test
+- `backend/tests/unit/services/test_netbox_write.py` (Task 4) — 3 new tests: format-helper reason-present, reason-omitted, end-to-end `patch_with_attribution` reason → journal body
+- `backend/tests/unit/domain/test_shift_session.py` (Task 0) — sweep
+- `backend/tests/unit/domain/test_audit.py` (Task 2) — 2 new `id`-field tests (defaults None, populated on read)
+- `backend/tests/integration/test_shift_sessions_migration.py` (Task 0) — label-list assertion + insert string updated; `test_downgrade_drops_shift_sessions_table_and_enum_type` re-pointed at the explicit pre-shift_sessions revision `b2c3d4e5f6a7`; `+test_rename_migration_rewrites_pre_rename_rows_in_place`
+- `backend/tests/integration/test_shift_session_repository.py` (Tasks 0 + 1 + 3) — sweep (Task 0); 4 new `find_stale_active` tests (Task 1); 8 new `query` tests (Task 3)
+- `docs/sprint-7.md` — per-task plans filled in across the sprint (this work-log entry is the close-out artifact)
+- `docs/parking-lot.md` — admin sessions surface + audit_log.session_id semantic notes marked resolved
+- `CLAUDE.md` — Repository Status updated for Sprint 7 closure
+
+### How to run locally (close-of-sprint snapshot)
+
+Unchanged from Sprint 6 in shape — same `docker-compose.test.yml` for the test DB, same env vars (`DATABASE_URL`, `NETBOX_URL`, `NETBOX_SERVICE_TOKEN`, `KEYCLOAK_BASE_URL`). Sprint 7 adds three optional `SHIFT_AUTO_END_*` knobs; defaults work for local dev (job enabled, 5-minute interval, 12-hour threshold). To disable the auto-end loop in a local one-off run (e.g. inspecting `/health` without the loop scheduled):
+
+```bash
+SHIFT_AUTO_END_ENABLED=false uvicorn app.main:app --reload
+```
+
+The new admin endpoints require an active shift for the calling user. The conftest fixtures handle this in tests via `seed_default_active_shift`; for local manual smoke, call `POST /api/v1/sessions/start` first (any role can technically open a shift; the gate is the role on the downstream admin endpoint).

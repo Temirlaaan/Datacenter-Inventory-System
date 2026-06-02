@@ -133,56 +133,75 @@ operational monitoring. Until then, partial failures are visible only in logs.
 
 ---
 
-## Admin sessions surface (deferred from Sprint 6 to Sprint 7+)
+## Admin sessions surface — partially RESOLVED in Sprint 7, residual carried to Sprint 8+
 
-Sprint 6 shipped mobile-driven shift sessions: `POST /api/v1/sessions/start`,
-`POST /api/v1/sessions/end`, `GET /api/v1/sessions/active`, all role
-`dcinv-mobile-user` (decision I). The `shift_end_reason` Postgres enum already
-includes `admin_force_close`, but it's reserved — Sprint 6's `/end` accepts
-only `manual` and `inactivity_timeout` at the wire layer.
+**Resolved in Sprint 7:**
 
-Sprint 7+ deliverables:
+- **`GET /api/v1/admin/sessions`** — shipped (Task 3) with filters
+  (`user_keycloak_id` / `from` / `to` / `active_only`) + offset pagination.
+- **`POST /api/v1/admin/sessions/{id}/force-close`** — shipped (Task 3) with
+  mandatory `reason: str(1..500)`, idempotent CONFLICT-result no-op on
+  already-ended targets, 404 on unknown id. `shift_end_reason` enum renamed
+  in Task 0 (decision E), so the wire value is `forced` (NOT
+  `admin_force_close`).
+- **Auto-end stale-shifts background job** — shipped (Task 1) as an asyncio
+  loop in the FastAPI lifespan. Three knobs: `SHIFT_AUTO_END_ENABLED`,
+  `SHIFT_AUTO_END_INTERVAL_SECONDS`, `SHIFT_AUTO_END_THRESHOLD_HOURS` (default
+  12h). Ends matching rows with `end_reason='auto_timeout'`. **Single-replica
+  caveat documented** — see the new entry below.
 
-- **`GET /api/v1/admin/sessions`** — list shifts (filter by user / date range /
-  open-or-closed). Needed by ops to answer "who has an open shift right now".
-- **`POST /api/v1/admin/sessions/{id}/force-close`** — admin closes someone
-  else's shift with `end_reason='admin_force_close'`. Used when a tablet is
-  stolen/lost or an engineer leaves without ending their shift.
-- **Auto-end stale-sessions background job** — scans
-  `shift_start_at < NOW() - 12h AND shift_end_at IS NULL` and ends with
-  `end_reason='inactivity_timeout'`. Backend fallback for tablets that
-  crashed without sending the mobile-owned 10-minute idle `/end` call
-  (decision E split). 12h is liberal — mobile catches the 10-min case
-  correctly under normal operation; the job is the safety net for the
-  abnormal case.
-- **Gate `POST /api/v1/admin/batches/` on an active shift** — Sprint 6 left
-  batch generation un-gated because admins can't open a shift via the current
-  API. Once an admin sessions surface exists, batch generation should also
-  require an active shift for consistency, and `QRGenerationService` should
-  switch its audit row's `session_id` from the hardcoded `None` to
-  `user.shift_session_id`.
+**Residual deferred to Sprint 8+:**
 
-These are all non-breaking additions; Sprint 6's mobile flow is unaffected.
+- **Admin-shift-open API** — there is still no way for an admin to open a
+  shift, so Sprint 7's `dcinv-admin`-gated endpoints (`/admin/audit`,
+  `/admin/sessions`, `/admin/sessions/{id}/force-close`) all return 409
+  NO_ACTIVE_SHIFT in production for an admin without a shift. Tests seed an
+  active shift via `seed_default_active_shift`; live admin use awaits this
+  API. Sprint 8 candidate: `POST /api/v1/admin/sessions/start` (web-driven,
+  no `tablet_id` — perhaps `workstation_id` or just the admin's keycloak id).
+- **Gate `POST /api/v1/admin/batches/` on an active shift** — blocked on the
+  above. Once admins can open shifts, batch generation should switch to
+  `require_role_with_active_shift("dcinv-admin")` and `QRGenerationService`
+  should source `session_id` from `user.shift_session_id` instead of the
+  hardcoded `None`.
 
 ---
 
-## `audit_log.session_id` semantic change (Sprint 6 decision D, for any future audit-query work)
+## Multi-replica auto-end-job ownership (deferred from Sprint 7 to Sprint 8a)
 
-Pre-Sprint-6 `audit_log` rows hold a **JWT `sid`** (ephemeral access-token UUID;
-a single shift spans several `sid` values as tokens rotate). Post-Sprint-6 rows
-hold a **`shift_sessions.id`** (one UUID per engineer-shift). Schema is
-unchanged (both are `UUID NOT NULL`); only the meaning of the value flipped.
-No historical migration was performed — rewriting old rows to a synthesised
-shift would invent attribution that didn't exist.
+Sprint 7 Task 1 ships the auto-end loop as an asyncio task inside the FastAPI
+lifespan. **The backend MUST run as a single replica** until job ownership is
+solved. The partial unique index `shift_sessions_one_active_per_user` + the
+idempotent `end_reason='auto_timeout'` outcome prevent the worst-case
+double-firing harm (cannot create two new actives; concurrent ends collapse
+to last-write-wins), but N replicas would waste N× DB scans on every
+interval.
 
-**Consumers of `audit_log.session_id` (now or in the future) must either:**
+**Sprint 8a candidate approaches:**
 
-- handle both interpretations explicitly (e.g. "≤2026-05-30 = JWT sid; later =
-  shift id"), or
-- filter their queries to `audit_log.timestamp > '2026-05-30 ...'` so only
-  shift-id values are in scope.
+- **Postgres advisory lock** around each iteration body
+  (`pg_try_advisory_lock(<auto_end_job_lock_id>)` skip if not acquired). App-
+  owned, no external dependency, but the loop still runs N times per
+  interval and (N-1) of them silently skip.
+- **Kubernetes CronJob** as a separate workload, with the in-process loop
+  disabled via `SHIFT_AUTO_END_ENABLED=false`. External, operationally
+  cleaner, but adds a new deployment surface.
 
-The Sprint 7+ `GET /api/v1/admin/audit` query endpoint should default to the
-shift-id interpretation and refuse to filter older rows by `session_id` (or
-return them with an explicit "JWT sid era" flag) so naive UIs don't conflate
-the two eras.
+The choice is intentionally left open for Sprint 8a; both are viable.
+
+---
+
+## `audit_log.session_id` semantic change — RESOLVED in Sprint 7 Task 2
+
+The Sprint 6 decision D semantic flip (JWT `sid` → `shift_sessions.id`) now
+has a documented consumer: `GET /api/v1/admin/audit`. The endpoint's OpenAPI
+description for the `session_id` filter carries the semantic note that pre-
+2026-05-30 rows hold JWT sids; admins reading the schema (or the API docs UI
+rendered from it) understand the era boundary. Ad-hoc consumers that filter
+by `session_id` on historical rows are now warned via the schema.
+
+The contract is locked in by a test that introspects `app.openapi()` and
+checks the description text — see
+`tests/unit/api/v1/test_admin_audit.py:test_get_audit_includes_session_id_semantic_note_in_openapi`.
+
+No further action required for this concern.
