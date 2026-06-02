@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     netbox_circuit_enabled: bool = True
     netbox_circuit_failure_threshold: int = Field(default=5, ge=1, le=1000)
     netbox_circuit_recovery_timeout_seconds: int = Field(default=30, ge=1, le=3600)
+    rate_limit_enabled: bool = True
+    rate_limit_read_per_minute: int = Field(default=60, ge=1, le=100000)
+    rate_limit_write_per_minute: int = Field(default=20, ge=1, le=100000)
+    rate_limit_admin_per_minute: int = Field(default=30, ge=1, le=100000)
 
     model_config = SettingsConfigDict(
         env_file=".env",

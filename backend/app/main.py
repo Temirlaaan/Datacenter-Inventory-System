@@ -24,6 +24,7 @@ from app.api.v1.sessions import router as sessions_router
 from app.auth.dependencies import NoActiveShiftError
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
+from app.middleware.rate_limit import rate_limit_middleware
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxCircuitOpenError, NetBoxClientError, NetBoxNotFound
 from app.observability.logging import configure_logging
@@ -162,6 +163,13 @@ async def handle_no_active_shift(_request: Request, _exc: NoActiveShiftError) ->
             }
         },
     )
+
+
+# Sprint 8a Task 3: rate limit middleware registered BEFORE request_id
+# middleware in source order so request_id ends up OUTER (Starlette applies
+# user_middleware in reverse-registration order). That way structlog
+# contextvars are already bound when the rate-limit middleware logs a 429.
+app.middleware("http")(rate_limit_middleware)
 
 
 @app.middleware("http")

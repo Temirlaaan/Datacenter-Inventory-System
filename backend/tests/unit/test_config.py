@@ -178,6 +178,70 @@ def test_settings_netbox_circuit_recovery_timeout_seconds_rejects_zero(
         Settings()
 
 
+def test_settings_rate_limit_defaults_applied(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8a Task 3: four knobs control per-user rate limiting."""
+    _set_all_required(monkeypatch)
+    from app.config import Settings
+
+    s = Settings()
+    assert s.rate_limit_enabled is True
+    assert s.rate_limit_read_per_minute == 60
+    assert s.rate_limit_write_per_minute == 20
+    assert s.rate_limit_admin_per_minute == 30
+
+
+def test_settings_rate_limit_overrides_via_env(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("RATE_LIMIT_READ_PER_MINUTE", "120")
+    monkeypatch.setenv("RATE_LIMIT_WRITE_PER_MINUTE", "40")
+    monkeypatch.setenv("RATE_LIMIT_ADMIN_PER_MINUTE", "100")
+    from app.config import Settings
+
+    s = Settings()
+    assert s.rate_limit_enabled is False
+    assert s.rate_limit_read_per_minute == 120
+    assert s.rate_limit_write_per_minute == 40
+    assert s.rate_limit_admin_per_minute == 100
+
+
+def test_settings_rate_limit_read_per_minute_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RATE_LIMIT_READ_PER_MINUTE", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_rate_limit_write_per_minute_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RATE_LIMIT_WRITE_PER_MINUTE", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_rate_limit_admin_per_minute_rejects_zero(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RATE_LIMIT_ADMIN_PER_MINUTE", "0")
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_settings_database_url_requires_asyncpg_driver(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

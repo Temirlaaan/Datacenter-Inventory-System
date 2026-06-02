@@ -26,6 +26,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.auth.jwks import get_jwks_cache
     from app.config import get_settings
     from app.db.session import get_engine, get_sessionmaker
+    from app.middleware.rate_limit import reset_rate_limit_buckets
     from app.netbox.client import get_netbox_client, reset_netbox_circuit
     from app.services.meta import get_meta_cache
 
@@ -47,3 +48,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # starts with a fresh CLOSED circuit + freshly-read settings (no
     # failure-count leakage across tests).
     reset_netbox_circuit()
+    # Sprint 8a Task 3: clear the rate-limit bucket dict so a test that
+    # bursts (e.g. the rate-limit integration tests themselves) doesn't
+    # leak its counts into the next test.
+    reset_rate_limit_buckets()
