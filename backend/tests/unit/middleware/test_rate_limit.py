@@ -18,6 +18,7 @@ from app.middleware.rate_limit import (
     _consume,
     _current_window_index,
     _extract_user_sub,
+    _limit_for_class,
     _seconds_until_next_window,
     reset_rate_limit_buckets,
 )
@@ -217,3 +218,27 @@ def test_seconds_until_next_window_decreases_within_window() -> None:
     aligned = datetime(2026, 6, 2, 12, 0, 0, tzinfo=UTC)
     assert _seconds_until_next_window(aligned + timedelta(seconds=15)) == 45
     assert _seconds_until_next_window(aligned + timedelta(seconds=59)) == 1
+
+
+# ---------- _limit_for_class --------------------------------------------------
+
+
+def test_limit_for_class_returns_sentinel_for_unlimited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The UNLIMITED branch should never be reached in normal flow (the
+    middleware early-returns on UNLIMITED), but the function must remain
+    total over the enum. The sentinel is a large-enough number that an
+    accidental caller won't trip a real budget."""
+    monkeypatch.setenv("NETBOX_URL", "https://netbox.example.com")
+    monkeypatch.setenv("NETBOX_SERVICE_TOKEN", "x")
+    monkeypatch.setenv("KEYCLOAK_BASE_URL", "https://sso.example.com")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test"
+    )
+    monkeypatch.setenv("KEYCLOAK_WEB_CLIENT_SECRET", "test-web-client-secret")
+    monkeypatch.setenv("SESSION_COOKIE_KEY", "VAMsIWGaHXesGIhCmHI6GQsRNdLwMuZA3Aw95EO1JBo=")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    assert _limit_for_class(RateLimitClass.UNLIMITED) >= 1 << 30

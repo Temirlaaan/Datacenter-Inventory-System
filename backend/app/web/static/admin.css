@@ -123,6 +123,45 @@ form button:hover { background: var(--color-accent-hover); }
 
 .shift-needed .hint { font-size: 13px; color: var(--color-muted); font-style: italic; }
 
+/* Dashboard card grid (Sprint 8b Task 1) ---------------------- */
+
+.generated-at {
+    margin: -8px 0 20px;
+    font-size: 13px;
+    color: var(--color-muted);
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.card__label {
+    font-size: 13px;
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.card__value {
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--color-text);
+    line-height: 1.1;
+}
+
 /* Footer ------------------------------------------------------ */
 
 .footer {

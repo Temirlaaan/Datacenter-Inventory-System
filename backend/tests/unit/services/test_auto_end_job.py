@@ -534,6 +534,64 @@ async def test_auto_end_loop_uses_injected_clock(
     assert status.last_iteration_at == fixed_now
 
 
+async def test_auto_end_loop_exits_via_while_check_when_cancel_set_between_ticks(
+    patched_repo_and_service: Callable[[_FakeRepo], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover the ``while not cancel_event.is_set()`` False branch.
+
+    Normally the loop exits via the ``return`` inside ``_wait_or_cancel``
+    detecting the cancel signal. This test patches ``_wait_or_cancel`` to
+    set the event AND return False (timeout) — so the next while-check
+    finds it set and exits via the loop guard rather than the inner return.
+    """
+    repo = _FakeRepo(stale_to_return=[])
+    patched_repo_and_service(repo)
+    sessionmaker = _fake_sessionmaker(repo)
+    status = AutoEndJobStatus(enabled=True)
+    cancel_event = asyncio.Event()
+
+    iteration_done = asyncio.Event()
+    real_find = repo.find_stale_active
+
+    async def _wrapped_find(*, older_than: datetime) -> list[ShiftSession]:
+        result = await real_find(older_than=older_than)
+        iteration_done.set()
+        return result
+
+    repo.find_stale_active = _wrapped_find  # type: ignore[method-assign]
+
+    call_count = {"n": 0}
+
+    async def _fake_wait_or_cancel(event: asyncio.Event, wait_seconds: float) -> bool:
+        _ = wait_seconds
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call is the initial grace — return False so we enter
+            # the iteration loop.
+            return False
+        # Second call is the post-iteration wait — set the event and return
+        # False so the next ``while not cancel_event.is_set()`` exits.
+        event.set()
+        return False
+
+    monkeypatch.setattr("app.services.auto_end_job._wait_or_cancel", _fake_wait_or_cancel)
+
+    await asyncio.wait_for(
+        auto_end_loop(
+            sessionmaker=sessionmaker,
+            status=status,
+            cancel_event=cancel_event,
+            interval_seconds=10.0,
+            threshold_hours=12,
+            initial_grace_seconds=0.0,
+        ),
+        timeout=1.0,
+    )
+    assert iteration_done.is_set()
+    assert cancel_event.is_set()
+
+
 # ---------- Sprint 8a Task 1: advisory-lock skip path ------------------------
 
 

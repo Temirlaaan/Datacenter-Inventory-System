@@ -17,6 +17,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 
 from app.api.v1.admin.audit import router as admin_audit_router
 from app.api.v1.admin.batches import router as admin_batches_router
+from app.api.v1.admin.dashboard import router as admin_dashboard_router
 from app.api.v1.admin.sessions import router as admin_sessions_router
 from app.api.v1.devices import router as devices_router
 from app.api.v1.health import router as health_router
@@ -99,6 +100,9 @@ app = FastAPI(title="DC Inventory Backend", version="0.1.0", lifespan=lifespan)
 app.include_router(health_router)
 app.include_router(admin_batches_router, prefix="/api/v1/admin/batches", tags=["batches"])
 app.include_router(admin_audit_router, prefix="/api/v1/admin/audit", tags=["audit"])
+app.include_router(
+    admin_dashboard_router, prefix="/api/v1/admin/dashboard", tags=["admin-dashboard"]
+)
 app.include_router(admin_sessions_router, prefix="/api/v1/admin/sessions", tags=["admin-sessions"])
 app.include_router(qr_router, prefix="/api/v1/qr", tags=["qr"])
 app.include_router(meta_router, prefix="/api/v1/meta", tags=["meta"])

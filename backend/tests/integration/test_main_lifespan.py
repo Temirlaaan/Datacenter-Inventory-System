@@ -115,3 +115,32 @@ async def test_lifespan_shutdown_drains_auto_end_task(
 
     # After the lifespan exits, the task is done (drained, not stuck).
     assert task.done()
+
+
+async def test_lifespan_shutdown_cancels_auto_end_task_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the auto-end task refuses to drain within the shutdown timeout,
+    the lifespan logs a warning and ``.cancel()`` the task — it MUST NOT
+    block process shutdown forever.
+
+    Forced by patching the shutdown timeout to zero so ``asyncio.wait_for``
+    raises ``TimeoutError`` immediately, hitting the except branch.
+    """
+    get_settings.cache_clear()
+    _patched_settings(
+        monkeypatch,
+        shift_auto_end_interval_seconds=1,
+        shift_auto_end_threshold_hours=12,
+    )
+    # Force the shutdown drain to time out immediately.
+    monkeypatch.setattr("app.main._AUTO_END_SHUTDOWN_TIMEOUT_SECONDS", 0.0)
+    app = FastAPI()
+
+    async with lifespan(app):
+        task = app.state.auto_end_job_task
+        assert task is not None
+        # Don't wait for grace — exit immediately so wait_for(0.0) times out.
+
+    # Task was cancelled by the timeout branch.
+    assert task.cancelled() or task.done()

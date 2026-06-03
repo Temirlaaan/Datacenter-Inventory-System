@@ -16,6 +16,7 @@ Three OIDC flow endpoints + the dashboard placeholder.
 from __future__ import annotations
 
 import secrets
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -25,8 +26,11 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db.repositories.dashboard import DashboardRepository
+from app.db.session import get_session
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
     SESSION_COOKIE_NAME,
@@ -250,18 +254,26 @@ def _render_admin_shift_needed(request: Request, user: WebAdminUser) -> HTMLResp
     )
 
 
-# ---------- /web/ placeholder dashboard --------------------------------------
+# ---------- /web/ dashboard --------------------------------------------------
 
 
 @router.get("/", response_class=HTMLResponse)
-async def dashboard_placeholder(
-    request: Request, user: WebAdminUser = Depends(require_web_admin)
+async def dashboard(
+    request: Request,
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
-    """Sprint 8b Task 0 placeholder. Task 1 replaces with the real
-    counters dashboard. Proves the auth flow round-trips end-to-end before
-    any page-specific code lands."""
+    """Render the admin dashboard with the six counters from
+    :class:`DashboardRepository`. Same data source as
+    ``GET /api/v1/admin/dashboard`` — the page consumes the repo directly
+    via dep injection rather than self-HTTP-calling the JSON endpoint
+    (decision I)."""
+    snap = await DashboardRepository(session).snapshot(now=datetime.now(UTC))
     return templates.TemplateResponse(
         request,
-        "_dashboard_placeholder.html",
-        {"user_email": user.email},
+        "dashboard.html",
+        {
+            "user_email": user.email,
+            "snapshot": snap,
+        },
     )

@@ -1,0 +1,35 @@
+{% extends "_base.html" %}
+{% block title %}Dashboard &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Dashboard</h1>
+    <p class="generated-at">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
+
+    <div class="card-grid">
+        <div class="card">
+            <div class="card__label">Free QRs</div>
+            <div class="card__value">{{ snapshot.qr_free_count }}</div>
+        </div>
+        <div class="card">
+            <div class="card__label">Bound QRs</div>
+            <div class="card__value">{{ snapshot.qr_bound_count }}</div>
+        </div>
+        <div class="card">
+            <div class="card__label">Retired QRs</div>
+            <div class="card__value">{{ snapshot.qr_retired_count }}</div>
+        </div>
+        <div class="card">
+            <div class="card__label">Batches (last 30 days)</div>
+            <div class="card__value">{{ snapshot.batches_last_30_days }}</div>
+        </div>
+        <div class="card">
+            <div class="card__label">Active shifts</div>
+            <div class="card__value">{{ snapshot.active_shifts_count }}</div>
+        </div>
+        <div class="card">
+            <div class="card__label">Audit rows (last 24h)</div>
+            <div class="card__value">{{ snapshot.audit_rows_last_24h }}</div>
+        </div>
+    </div>
+</section>
+{% endblock %}
