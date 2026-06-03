@@ -1,0 +1,19 @@
+{% extends "_base.html" %}
+{% block title %}Open an admin shift &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content shift-needed">
+    <h1>Open an admin shift to continue</h1>
+    <p>Hello, {{ user_email }}. Every <code>/web/*</code> page requires an
+    active admin shift for audit attribution (Sprint 7 decision I). Open
+    one to proceed.</p>
+
+    <form method="post" action="/api/v1/admin/sessions/start" enctype="application/json">
+        <label for="workstation_id">Workstation id</label>
+        <input id="workstation_id" name="workstation_id" type="text" required
+               minlength="1" maxlength="255" placeholder="admin-laptop-01">
+        <button type="submit">Start shift</button>
+    </form>
+
+    <p class="hint">After your shift starts, navigate back to the page you wanted.</p>
+</section>
+{% endblock %}

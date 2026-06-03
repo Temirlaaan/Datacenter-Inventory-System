@@ -7,10 +7,12 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.api.v1.admin.audit import router as admin_audit_router
@@ -29,6 +31,9 @@ from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxCircuitOpenError, NetBoxClientError, NetBoxNotFound
 from app.observability.logging import configure_logging
 from app.services.auto_end_job import AutoEndJobStatus, auto_end_loop
+from app.web.auth import AdminShiftNeeded, WebAdminAuthRequired
+from app.web.router import _redirect_to_login, _render_admin_shift_needed
+from app.web.router import router as web_router
 
 logger = structlog.get_logger()
 
@@ -99,6 +104,16 @@ app.include_router(qr_router, prefix="/api/v1/qr", tags=["qr"])
 app.include_router(meta_router, prefix="/api/v1/meta", tags=["meta"])
 app.include_router(devices_router, prefix="/api/v1/devices", tags=["devices"])
 app.include_router(sessions_router, prefix="/api/v1/sessions", tags=["sessions"])
+# Sprint 8b Task 0: web admin surface (HTML, cookie auth, OIDC redirect flow).
+app.include_router(web_router, prefix="/web", tags=["web"])
+# Static assets mounted at top level (not under /web/) so the browser caches
+# CSS without sending the session cookie on every request, and the rate-limit
+# middleware's UNLIMITED bypass for /static/ has a stable prefix.
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).parent / "web" / "static")),
+    name="static",
+)
 
 
 @app.exception_handler(NetBoxNotFound)
@@ -146,6 +161,21 @@ async def handle_netbox_error(_request: Request, exc: NetBoxClientError) -> JSON
     return JSONResponse(
         status_code=status.HTTP_502_BAD_GATEWAY, content={"detail": "NetBox upstream error"}
     )
+
+
+@app.exception_handler(WebAdminAuthRequired)
+async def handle_web_admin_auth_required(request: Request, _exc: WebAdminAuthRequired) -> Response:
+    """Sprint 8b Task 0: missing/invalid session cookie → 302 to /web/login.
+    Web flows use redirects, not status codes — the browser follows."""
+    return _redirect_to_login(request)
+
+
+@app.exception_handler(AdminShiftNeeded)
+async def handle_admin_shift_needed(request: Request, exc: AdminShiftNeeded) -> Response:
+    """Sprint 8b Task 0: authenticated admin without an active shift → render
+    the intermediate "open shift" page (decision C). Carries the user so the
+    page can greet them by email."""
+    return _render_admin_shift_needed(request, exc.user)
 
 
 @app.exception_handler(NoActiveShiftError)

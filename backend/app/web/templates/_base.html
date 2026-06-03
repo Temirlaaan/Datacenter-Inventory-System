@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}DC Inventory admin{% endblock %}</title>
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<header class="topnav">
+    <a class="brand" href="/web/">DC Inventory admin</a>
+    <nav>
+        <a href="/web/">Dashboard</a>
+        <a href="/web/batches/">Batches</a>
+        <a href="/web/audit/">Audit</a>
+        <a href="/web/sessions/">Sessions</a>
+    </nav>
+    <div class="userbox">
+        {% if user_email %}<span>{{ user_email }}</span>{% endif %}
+        <a class="logout" href="/web/logout">Log out</a>
+    </div>
+</header>
+
+{% if flash %}
+<div class="flash flash-{{ flash_kind|default('info') }}">{{ flash }}</div>
+{% endif %}
+
+<main>
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+    <small>DC Inventory backend &middot; <a href="/health">/health</a> &middot; <a href="/docs">/docs</a></small>
+</footer>
+</body>
+</html>

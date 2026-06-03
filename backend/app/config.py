@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     rate_limit_read_per_minute: int = Field(default=60, ge=1, le=100000)
     rate_limit_write_per_minute: int = Field(default=20, ge=1, le=100000)
     rate_limit_admin_per_minute: int = Field(default=30, ge=1, le=100000)
+    keycloak_web_client_id: str = "dcinv-web"
+    keycloak_web_client_secret: SecretStr
+    session_cookie_key: SecretStr
 
     model_config = SettingsConfigDict(
         env_file=".env",

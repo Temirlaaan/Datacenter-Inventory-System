@@ -11,6 +11,15 @@ def _set_all_required(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NETBOX_SERVICE_TOKEN", "test-token-xyz")
     monkeypatch.setenv("KEYCLOAK_BASE_URL", "https://sso.example.com")
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    # Sprint 8b Task 0: web admin OIDC + cookie crypto require these.
+    monkeypatch.setenv("KEYCLOAK_WEB_CLIENT_SECRET", "test-web-client-secret")
+    monkeypatch.setenv(
+        "SESSION_COOKIE_KEY",
+        # A valid Fernet key (44 url-safe base64 chars → 32-byte secret).
+        # Generated once for the test suite via Fernet.generate_key(); not
+        # security-sensitive (this is a test-only secret).
+        "VAMsIWGaHXesGIhCmHI6GQsRNdLwMuZA3Aw95EO1JBo=",
+    )
 
 
 def test_settings_load_with_all_required_succeeds(
@@ -317,3 +326,66 @@ def test_settings_realm_with_whitespace_raises(
     with pytest.raises(ValidationError) as exc:
         Settings()
     assert "realm" in str(exc.value).lower()
+
+
+def test_settings_web_admin_defaults_applied(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8b Task 0: web admin OIDC + cookie crypto."""
+    _set_all_required(monkeypatch)
+    from app.config import Settings
+
+    s = Settings()
+    assert s.keycloak_web_client_id == "dcinv-web"
+    # SecretStr — value not exposed in plain repr, but accessible explicitly.
+    assert s.keycloak_web_client_secret.get_secret_value() == "test-web-client-secret"
+    assert s.session_cookie_key.get_secret_value()  # non-empty Fernet key
+
+
+def test_settings_missing_keycloak_web_client_secret_raises(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8b Task 0: confidential client secret has no default — fail-fast."""
+    monkeypatch.setenv("NETBOX_URL", "https://netbox.example.com")
+    monkeypatch.setenv("NETBOX_SERVICE_TOKEN", "x")
+    monkeypatch.setenv("KEYCLOAK_BASE_URL", "https://sso.example.com")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("SESSION_COOKIE_KEY", "dGVzdC1mZXJuZXQta2V5LWZvci10ZXN0LXN1aXRlLW9ubHkx")
+    # Sprint 8b Task 0: KEYCLOAK_WEB_CLIENT_SECRET isn't in the clean_env
+    # wipe list (most tests need it set); delete it explicitly here to
+    # prove the Settings validator rejects its absence.
+    monkeypatch.delenv("KEYCLOAK_WEB_CLIENT_SECRET", raising=False)
+    from app.config import Settings
+
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "keycloak_web_client_secret" in str(exc.value).lower()
+
+
+def test_settings_missing_session_cookie_key_raises(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sprint 8b Task 0: Fernet key has no default — fail-fast at startup."""
+    monkeypatch.setenv("NETBOX_URL", "https://netbox.example.com")
+    monkeypatch.setenv("NETBOX_SERVICE_TOKEN", "x")
+    monkeypatch.setenv("KEYCLOAK_BASE_URL", "https://sso.example.com")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("KEYCLOAK_WEB_CLIENT_SECRET", "x")
+    # Same call as the test above for SESSION_COOKIE_KEY.
+    monkeypatch.delenv("SESSION_COOKIE_KEY", raising=False)
+    from app.config import Settings
+
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "session_cookie_key" in str(exc.value).lower()
+
+
+def test_settings_web_admin_overrides_via_env(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("KEYCLOAK_WEB_CLIENT_ID", "dcinv-web-staging")
+    from app.config import Settings
+
+    s = Settings()
+    assert s.keycloak_web_client_id == "dcinv-web-staging"

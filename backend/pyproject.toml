@@ -18,6 +18,10 @@ dependencies = [
     # since Sprint 3). Pure-Python, no transitive deps. Pre-approved at
     # Sprint 8 plan stage (decision E); rationale in Sprint 8a work-log.
     "circuitbreaker>=2.0,<3",
+    # Sprint 8b Task 0: Jinja2 templates for /web/* admin pages. FastAPI's
+    # documented standard for HTML rendering. Pre-approved at Sprint 8b
+    # plan stage (decision J); reportlab will join in Task 2 (decision F).
+    "jinja2>=3.1,<4",
 ]
 
 [dependency-groups]

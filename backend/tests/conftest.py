@@ -15,6 +15,12 @@ _APP_ENV_KEYS = (
     "JWKS_CACHE_TTL_SECONDS",
     "DCINV_SECRETS_DIR",
 )
+# Sprint 8b Task 0: the new web-admin env vars (KEYCLOAK_WEB_CLIENT_ID,
+# KEYCLOAK_WEB_CLIENT_SECRET, SESSION_COOKIE_KEY) are deliberately NOT in
+# the wipe list. They're required Settings fields and almost every test
+# needs them set; wiping them per-test would force every test to re-set
+# them. The two failure-path tests in test_config.py that PROVE the
+# Settings validation rejects missing values do their own monkeypatch.delenv.
 
 
 @pytest.fixture

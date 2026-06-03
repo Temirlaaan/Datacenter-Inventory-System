@@ -47,6 +47,12 @@ logger = structlog.get_logger()
 
 _WINDOW_SECONDS = 60
 _UNLIMITED_PATHS: frozenset[str] = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+_UNLIMITED_PREFIXES: tuple[str, ...] = ("/web/", "/static/")
+"""Sprint 8b Task 0 decision I: ``/web/*`` pages go through ``require_web_admin``
+which calls admin JSON endpoints internally via FastAPI dep injection (not
+HTTP), so admin-bucket rate limits don't double-fire. ``/static/*`` is browser-
+cached CSS — bypassing the rate limit means a hard reload doesn't consume
+budget."""
 
 
 class RateLimitClass(StrEnum):
@@ -67,9 +73,13 @@ def reset_rate_limit_buckets() -> None:
 
 
 def _classify_request(method: str, path: str) -> RateLimitClass:
-    """Map (method, path) to a rate-limit class (Sprint 8a decision 2)."""
+    """Map (method, path) to a rate-limit class (Sprint 8a decision 2; Sprint
+    8b Task 0 decision I added the /web/ + /static/ prefix bypass)."""
     if path in _UNLIMITED_PATHS:
         return RateLimitClass.UNLIMITED
+    for prefix in _UNLIMITED_PREFIXES:
+        if path.startswith(prefix):
+            return RateLimitClass.UNLIMITED
     if path.startswith("/api/v1/admin/"):
         return RateLimitClass.ADMIN
     if method in {"GET", "HEAD", "OPTIONS"}:

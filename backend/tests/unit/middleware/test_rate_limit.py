@@ -59,6 +59,13 @@ from app.middleware.rate_limit import (
         ("GET", "/docs", RateLimitClass.UNLIMITED),
         ("GET", "/openapi.json", RateLimitClass.UNLIMITED),
         ("GET", "/redoc", RateLimitClass.UNLIMITED),
+        # Sprint 8b Task 0 decision I: /web/* + /static/* bypass rate limiting.
+        ("GET", "/web/", RateLimitClass.UNLIMITED),
+        ("GET", "/web/login", RateLimitClass.UNLIMITED),
+        ("GET", "/web/oidc/callback", RateLimitClass.UNLIMITED),
+        ("GET", "/web/batches/", RateLimitClass.UNLIMITED),
+        ("POST", "/web/sessions/123/force-close", RateLimitClass.UNLIMITED),
+        ("GET", "/static/admin.css", RateLimitClass.UNLIMITED),
     ],
 )
 def test_classify_request_routes_to_correct_class(
