@@ -769,3 +769,143 @@ SHIFT_AUTO_END_ENABLED=false uvicorn app.main:app --reload
 ```
 
 The new admin endpoints require an active shift for the calling user. The conftest fixtures handle this in tests via `seed_default_active_shift`; for local manual smoke, call `POST /api/v1/sessions/start` first (any role can technically open a shift; the gate is the role on the downstream admin endpoint).
+
+---
+
+## Sprint 8a — Production Hardening (closed 2026-06-03)
+
+**Status:** Closed. Tasks 0–4 complete.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 0 | **Admin-shift-open API + `POST /admin/batches/` gating + `QRGenerationService` audit-row session_id source swap.** New `POST /api/v1/admin/sessions/start` (role `dcinv-admin` only — chicken-and-egg: can't require a shift to open one) with body `{workstation_id: str(1..255)}`. Distinct `AdminSessionStartRequest` Pydantic model from mobile's `SessionStartRequest` even though both write to `shift_sessions.tablet_id`; the API layer renames at the schema boundary so admin (`workstation_id`) and mobile (`tablet_id`) surfaces stay semantically distinct. `POST /admin/batches/` + `GET /admin/batches/{id}` switched from `require_role` to `require_role_with_active_shift("dcinv-admin")` — all of `/api/v1/admin/*` now gate consistently per Sprint 7 decision I. `QRGenerationService` audit row's `session_id` source swapped from hardcoded `None` → `user.shift_session_id`. Pre-Sprint-8a batch rows retain `session_id NULL` (consistent with Sprint 6 decision D "no historical migration"); NEW rows carry the admin's shift id. Unblocks live use of every Sprint 7 admin endpoint (`/admin/audit`, `/admin/sessions`, `/admin/sessions/{id}/force-close`). |
+| 1 | **Multi-replica auto-end-job ownership via Postgres advisory lock.** `_run_iteration` body wrapped in `pg_try_advisory_lock(<id>)` on a separate "ceremony" session. Lock-skip returns 0 without raising → outer `auto_end_loop`'s "bump `last_iteration_at` if no exception" semantic naturally treats lock-skip as a successful tick; lock-loser replicas do NOT flip to `"stale"` on `/health`. Lock id is `int.from_bytes(sha256(b"dcinv:auto_end_job").digest()[:8], "big", signed=True)` — stable, greppable, operator-inspectable via `SELECT * FROM pg_locks WHERE locktype='advisory' AND objid=<id>`. Sprint 7's single-replica caveat removed from `app/main.py` code comment + `docs/parking-lot.md` entry marked RESOLVED. Per-iteration try/except + per-row session/tx semantics from Sprint 7 unchanged. |
+| 2 | **NetBox circuit breaker (Architecture §3.3, deferred since Sprint 3).** Module-level lazy-initialised `CircuitBreaker(expected_exception=(NetBoxServerError, NetBoxTimeout), name="netbox")` from the `circuitbreaker` PyPI package. `NetBoxNotFound` (404) and `NetBoxValidationError` (4xx) are NOT counted — they mean "NetBox said your request is wrong," not "NetBox is broken." `_send` split into public open-check + delegation + new `_send_impl` (original retry loop). New typed `NetBoxCircuitOpenError(NetBoxClientError)` carrying `recovery_timeout_seconds`. `main.py` exception handler returns 503 + `Retry-After: N` header + `{"error":{"code":"NETBOX_CIRCUIT_OPEN","retry_after_seconds":N}}`. Distinguished from the existing 502 `NetBoxClientError` handler: 502 = "I asked NetBox and got a bad response"; 503 = "I'm refusing to call NetBox because it's been failing." Handler registered BEFORE the broader `NetBoxClientError` handler so FastAPI's most-specific dispatch routes correctly. `/health` extended with `netbox_circuit:{enabled,state,failure_count,open_until}` sub-object — **informational only**; the existing `_check_netbox` probe (uses a fresh `httpx.AsyncClient`, bypasses the circuit) remains the 503 trigger. Three new `Settings` knobs (`NETBOX_CIRCUIT_ENABLED`/`_FAILURE_THRESHOLD`/`_RECOVERY_TIMEOUT_SECONDS`); module-level `reset_netbox_circuit()` helper for tests added to the `clean_env` fixture. |
+| 3 | **Per-user rate limiting (ToR §5.4.7).** FastAPI middleware enforces fixed-window budgets across three endpoint classes — READ (60/min default), WRITE (20/min), ADMIN (30/min) — plus UNLIMITED bypass for `/health`, `/docs`, `/openapi.json`, `/redoc`. Classification: `/api/v1/admin/*` → ADMIN regardless of method; GET/HEAD/OPTIONS → READ; POST/PATCH/PUT/DELETE → WRITE. Module-level `_buckets: dict[(sub, class, window_index), int]`. **Per-replica state**, NOT cluster-wide (decision F) — Sprint 9+ adds Redis-backed cross-replica counters. User identity extracted via `jwt.get_unverified_claims()` — rate-limit keying does NOT need full signature verification (that happens later in `require_role`); saves a JWKS lookup per request. Unauthenticated requests bypass rate limiting and 401 at auth. 429 response: `Retry-After: <seconds>` header + `{"error":{"code":"RATE_LIMIT_EXCEEDED","retry_after_seconds":N}}` body (shape mirrors Task 2's 503). Middleware registered BEFORE `request_id_middleware` in source order so request_id ends up OUTER (Starlette applies user_middleware in reverse-registration order) and structlog contextvars are bound when the rate-limit middleware logs a 429. Four new `Settings` knobs; `reset_rate_limit_buckets()` test helper added to `clean_env`. |
+| 4 | Acceptance + close-out + performance baselines (this entry). |
+
+### Quality bar at close
+
+- **881 tests** (Sprint 7 → 802; Sprint 8a +79 net new), **100% line + branch coverage** across `app/` — `--cov-fail-under=100` gate passes.
+- ruff + black + mypy clean across `app/` and `tests/`.
+- One new pyproject dependency (`circuitbreaker>=2.0,<3`); `uv.lock` regenerated.
+- One new module package (`app/middleware/`) + one new module (`app/services/auto_end_job.py` already existed; Task 1 modified it).
+
+### Pyproject deviations from baseline
+
+**`circuitbreaker>=2.0,<3` added under `[project.dependencies]`** (Sprint 8a Task 2 — first pyproject deviation since Sprint 1). Pure-Python, no transitive deps. Pre-approved at Sprint 8 plan stage (decision E). Justification: rolling our own circuit breaker would be ~150 lines of state-machine code with subtle timing concerns around the OPEN → HALF_OPEN transition under concurrency; the PyPI package is ~200 LOC, well-tested, and integrates as a one-line decorator. The "no new deps" Sprint 1 stance was about avoiding heavy frameworks (APScheduler, Celery); a small focused package for a specific resilience pattern is the kind of dep that pays for itself. Mypy override added for the (untyped) module next to the existing `jose` / `yaml` overrides.
+
+### Architectural decisions worth carrying forward
+
+- **Backend is now multi-replica safe for the auto-end job (Task 1).** `pg_try_advisory_lock` on `_AUTO_END_JOB_ADVISORY_LOCK_ID` (sha256 of `b"dcinv:auto_end_job"` truncated to bigint) ensures only one replica runs the work per interval. Lock-loser replicas tick cleanly. Sprint 7's single-replica caveat is REMOVED.
+- **Admin actions now have shift attribution (Task 0).** Every `/api/v1/admin/*` endpoint requires an active shift (decision I held from Sprint 7); admins open shifts via `POST /api/v1/admin/sessions/start`. All future admin endpoints should follow this pattern. `POST /api/v1/admin/batches/` is no longer the lone un-gated outlier — Sprint 7 decision F is RESOLVED.
+- **NetBox circuit breaker is the resilience boundary (Task 2).** Service-layer code can rely on the client to fast-fail when NetBox is hosed; no need for per-service retry exhaustion logic. The new `NetBoxCircuitOpenError → 503` semantic distinguishes "upstream's broken (I refuse to escalate)" from `NetBoxClientError → 502` ("upstream answered badly"). Future write endpoints get this behavior for free — they already let `NetBoxClientError` propagate to `main.py`'s handler.
+- **Per-user rate limiting at the middleware layer (Task 3).** Classification by path + method (no per-endpoint decorators); state is in-process and per-replica. For cluster-wide rate limits in Sprint 9+, the natural extension is replacing `_buckets` with a Redis / Postgres backend behind the same `_consume` interface — the middleware itself doesn't need to change.
+- **`circuitbreaker` PyPI dep precedent.** First dep added since Sprint 1. The bar to clear: small + focused + well-tested + no transitive deps. Future sprints can add similar single-purpose deps without re-establishing the precedent, but heavy frameworks (APScheduler, Celery, Redis client libraries) still need explicit plan-stage approval.
+- **`/health` sub-objects are informational, NOT 503 triggers.** Both Task 1's `auto_end_job` and Task 2's `netbox_circuit` follow Sprint 7's pattern: surface state for operators to scrape, but keep the existing 503 trigger logic (db / netbox / keycloak reachability) narrow.
+- **JWT `sub` extraction without verification at the middleware layer (Task 3 decision 4).** Rate-limit keying doesn't need full signature verification — that's `require_role`'s job. Saves a JWKS lookup per request. A forged `sub` lets an attacker mess with their own bucket; real auth still rejects them downstream. Useful pattern for any future middleware that needs user identity for bookkeeping but not security.
+- **Test conftest fixture composition.** `clean_env` now resets four things across two sprints: settings + engine + sessionmaker + NetBox client (Sprint 7) → adds NetBox circuit + rate-limit buckets (Sprint 8a). Future module-level state should follow the same `reset_*()` helper + clean_env-injection pattern.
+
+### Sprint 8a retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all 5 tasks. Each task had a detailed plan with decision rationale before any code; plans accurately predicted what would touch which files. Task 0's "rename Pydantic field at API boundary, keep DB column as-is" call paid off for backwards compat. Task 1's "lock on ceremony session, work on per-row sessions" preserved Sprint 7's per-row-isolation invariant cleanly. Task 2's `expected_exception=(NetBoxServerError, NetBoxTimeout)` decision (NetBoxNotFound + Validation NOT counted) was the most non-obvious circuit-breaker design choice and was caught at plan time.
+- Reuse paid off: Task 0 reused `ShiftSessionService.start` 1:1 (just a different wire shape); Task 3's `_buckets` dict + `clean_env` reset hook mirrors Task 2's `reset_netbox_circuit()` from earlier in the sprint, which itself mirrors Sprint 7's pattern. The `/health` sub-object shape is now consistent across `auto_end_job` and `netbox_circuit`.
+- TDD discipline held. Coverage stayed at 100% through every gate check. The dep-injection patterns from Sprint 7 (FastAPI `dependency_overrides`, `clean_env` cache-clearing) carried over without modification.
+- The `circuitbreaker` API discovery was done up-front (`uv run python -c "..."` to inspect public methods) before drafting Task 2's implementation steps. Saved a probable second-pass refactor when the package's actual API didn't match initial assumptions about `call_async` vs decorator semantics.
+- The Task 4 perf baseline measure-and-document approach (decision I) hit both targets comfortably — QR lookup p95 = 8.4ms vs 800ms target; PATCH device p95 = 14.3ms vs 1500ms target. The development-loop conditions (test Postgres + respx-mocked NetBox + single asyncio loop, no concurrent load) make these "well under floor" numbers, not "production acceptance" claims; documented clearly.
+
+**What slowed us down:**
+- Task 3's integration tests initially failed in pytest's default-order run because (a) the cached NetBox client leaks event-loop binding across tests (same Sprint 6 friction), and (b) the `/health` endpoint reads `app.state.auto_end_job_status` which only exists if the FastAPI lifespan has run — and `AsyncClient` + `ASGITransport` does NOT trigger lifespan. Dropped the dedicated `/health bypass` integration test and rely on the UNLIMITED-classification parametrize for the contract; documented the trade-off in commit `df36ce8`.
+- IDE noise (wrong Python interpreter path → constant false "module not found" / "attribute not found" diagnostics) continued, same as every prior sprint. Not a real problem.
+- Two ruff RUF002/RUF003 hits on `×` (multiplication sign) and one ASYNC109 on a `timeout` parameter name. Pattern carried forward from Sprint 7 — avoid unicode `×` in docstrings + don't name parameters `timeout` if they wrap `asyncio.wait_for(timeout=...)`. Cost was minutes-per-fix.
+- Mypy unhappiness with `circuitbreaker` (no type stubs) and `jose.jwt.encode` (returns Any). Fixed by adding a mypy override for the package (mirrors `jose` / `yaml`) + explicit `cast()` on the `call_async` return + local `str` annotation on `jwt.encode` calls in tests.
+
+**Discrepancies between ToR / Architecture and what shipped:**
+- **None new this sprint.** Sprint 8a delivered exactly what the plan called for; no ToR §5.1 / §5.4.7 / Architecture §3.3 divergence. The rate-limit storage being per-replica (not cluster-wide) is a deliberate choice documented as Sprint 9+ work, not a divergence from ToR.
+
+**Deliberately deferred (carried into Sprint 8b / Sprint 9+):**
+- **Cluster-wide rate-limit state** (Sprint 9+). In-process per-replica state is sufficient at single-replica deployment scale; Redis or Postgres-backed counters land when the deployment goes multi-replica.
+- **Phase 2 partial-failure alerting** (Architecture §3.1, parking-lot, deferred since Sprint 3). Depends on operational monitoring infra (Prometheus / Loki / etc.) not yet in place; backend-side, `/health`'s `netbox_circuit` + `auto_end_job` sub-objects provide enough state for an external scraper.
+- **Manual smoke against real Keycloak / NetBox** — skipped (same as every prior sprint; environment-blocked).
+- **HTML admin web pages + dashboard counters + PDF labels + CSV export + `GET /admin/qr/{id}/history`** — Sprint 8b. Sprint 7 + Sprint 8a together ship the complete JSON foundation; the HTML layer can be a thin presentation layer on top.
+- **`GET /api/v1/admin/users`** — Sprint 8b or later; needs a Keycloak admin client + `KEYCLOAK_ADMIN_CLIENT_*` env vars (Sprint 6 decision J deliberately avoided).
+- **Idempotency-key TTL cleanup job** — pre-existing carry-over from Sprints 2-7, no consumer yet.
+
+### Performance baselines
+
+Measure-and-document one-shot, NOT CI-wired (decision I). Conditions: in-process ASGI client + test Postgres (Docker, port 5433) + respx-mocked NetBox + single asyncio loop + N=100 iterations + rate limiting / circuit breaker / auto-end loop all disabled via env. Run on the developer workstation, not production-like infra.
+
+| Endpoint | ToR §5.1 p95 target | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| `GET /api/v1/qr/{qr_id}` | ≤ 800ms | 6.1ms | 8.4ms | 13.8ms | 14.5ms |
+| `PATCH /api/v1/devices/{id}` | ≤ 1500ms | 10.8ms | 14.3ms | 16.6ms | 26.3ms |
+
+Both endpoints come in **well under** ToR §5.1 targets in development-loop conditions — QR lookup at ~1% of budget, device update at ~1% of budget. These are floor numbers; production-like infra (real NetBox latency, network hops, concurrent load) will be substantially higher. Operators should re-run against production-like infra for acceptance.
+
+Re-run via `cd backend && uv run python scripts/perf_baseline.py` (env vars per the script's docstring).
+
+### Files added in Sprint 8a (high-level)
+
+- `backend/app/middleware/__init__.py` + `backend/app/middleware/rate_limit.py` (Task 3) — middleware package + per-user rate limiter
+- `backend/app/netbox/errors.py` is modified (not added), but `NetBoxCircuitOpenError` is new
+- `backend/tests/unit/middleware/__init__.py` + `backend/tests/unit/middleware/test_rate_limit.py` (Task 3, 39 tests)
+- `backend/tests/integration/test_circuit_breaker.py` (Task 2, 1 end-to-end test)
+- `backend/tests/integration/test_rate_limit.py` (Task 3, 5 end-to-end tests)
+- `backend/scripts/perf_baseline.py` (Task 4) — operator-runnable, not CI-wired
+
+### Files modified in Sprint 8a
+
+- `backend/pyproject.toml` (Task 2) — `+circuitbreaker>=2.0,<3` dep + mypy override
+- `backend/uv.lock` (Task 2) — regenerated
+- `backend/.env.example` (Tasks 2 + 3) — 3 `NETBOX_CIRCUIT_*` + 4 `RATE_LIMIT_*` knobs documented
+- `backend/app/config.py` (Tasks 2 + 3) — 7 new Settings fields
+- `backend/app/main.py` (Tasks 1 + 2 + 3) — single-replica caveat removed (Task 1); `NetBoxCircuitOpenError → 503` handler added before the broader `NetBoxClientError` handler (Task 2); rate-limit middleware registered BEFORE `request_id_middleware` in source order (Task 3)
+- `backend/app/api/v1/health.py` (Task 2) — `netbox_circuit` sub-object on `/health`
+- `backend/app/api/v1/admin/sessions.py` (Task 0) — `+AdminSessionStartRequest`, `+POST "/start"` handler, `+get_shift_session_service` DI factory
+- `backend/app/api/v1/admin/batches.py` (Task 0) — `require_role` → `require_role_with_active_shift("dcinv-admin")` on both endpoints
+- `backend/app/services/auto_end_job.py` (Task 1) — `+_AUTO_END_JOB_ADVISORY_LOCK_ID`, `+_do_iteration_work` (extracted), `_run_iteration` wraps with `pg_try_advisory_lock` + `_send_impl`/`_send` split parallels Task 2's pattern
+- `backend/app/netbox/client.py` (Task 2) — module-level circuit + `_send_impl`/`_send` split + lazy init via `_get_netbox_circuit()` + `reset_netbox_circuit()` + `get_netbox_circuit_state()`
+- `backend/app/netbox/errors.py` (Task 2) — `+NetBoxCircuitOpenError(NetBoxClientError)`
+- `backend/app/services/qr/generation.py` (Task 0) — audit row `session_id=None` → `session_id=user.shift_session_id`
+- `backend/tests/conftest.py` (Tasks 2 + 3) — `clean_env` calls `reset_netbox_circuit()` + `reset_rate_limit_buckets()`
+- `backend/tests/unit/test_config.py` (Tasks 2 + 3) — 9 new tests (4 NETBOX_CIRCUIT_*, 5 RATE_LIMIT_*)
+- `backend/tests/unit/services/test_auto_end_job.py` (Task 1) — `_FakeAsyncSession` learned `.execute()` for the advisory-lock SELECTs; new lock-held-elsewhere test
+- `backend/tests/unit/netbox/test_client.py` (Task 2) — 8 new circuit-breaker tests
+- `backend/tests/unit/api/v1/test_health.py` (Task 2) — 3 new tests for `netbox_circuit` sub-object
+- `backend/tests/unit/api/v1/test_admin_sessions.py` (Task 0) — 8 new tests for `POST /admin/sessions/start`
+- `backend/tests/unit/api/v1/test_batches.py` (Task 0) — 2 new tests (audit row shift_session_id; 409 NO_ACTIVE_SHIFT path)
+- `backend/tests/integration/test_admin_sessions.py` (Task 0) — 2 new end-to-end tests (admin opens shift → uses /admin/audit + creates batch with attributed audit row)
+- `backend/tests/integration/test_auto_end_job.py` (Task 1) — new concurrent-call test (two `_run_iteration`s; exactly one ends rows)
+- `docs/sprint-8.md` — per-task detail filled in inline as we executed each task; this work-log entry is the close-out artifact
+- `docs/parking-lot.md` — "Multi-replica auto-end-job ownership" marked RESOLVED in Task 1
+- `CLAUDE.md` — Repository Status updated for Sprint 8a closure
+
+### How to run locally (close-of-sprint snapshot)
+
+Same shape as Sprint 7. Sprint 8a adds 7 new optional env knobs (3 `NETBOX_CIRCUIT_*` + 4 `RATE_LIMIT_*`); defaults work for local dev. To run the app with all the new safety nets disabled (e.g. for one-off perf measurement):
+
+```bash
+RATE_LIMIT_ENABLED=false NETBOX_CIRCUIT_ENABLED=false SHIFT_AUTO_END_ENABLED=false \
+  uvicorn app.main:app --reload
+```
+
+Admins need to open a shift before using `/api/v1/admin/*` endpoints (including `/admin/batches/`):
+
+```bash
+curl -X POST -H "Authorization: Bearer <admin-jwt>" -H "Content-Type: application/json" \
+  -d '{"workstation_id":"admin-ws-01"}' http://localhost:8000/api/v1/admin/sessions/start
+```
+
+To re-run the performance baseline:
+
+```bash
+cd backend
+DATABASE_URL='postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_test' \
+  NETBOX_URL='https://netbox.example.com' \
+  NETBOX_SERVICE_TOKEN='test-token' \
+  KEYCLOAK_BASE_URL='https://sso.example.com' \
+  uv run python scripts/perf_baseline.py
+```

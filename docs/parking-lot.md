@@ -133,37 +133,30 @@ operational monitoring. Until then, partial failures are visible only in logs.
 
 ---
 
-## Admin sessions surface — partially RESOLVED in Sprint 7, residual carried to Sprint 8+
+## Admin sessions surface — fully RESOLVED across Sprints 7 + 8a
 
-**Resolved in Sprint 7:**
+**Sprint 7:**
 
-- **`GET /api/v1/admin/sessions`** — shipped (Task 3) with filters
-  (`user_keycloak_id` / `from` / `to` / `active_only`) + offset pagination.
-- **`POST /api/v1/admin/sessions/{id}/force-close`** — shipped (Task 3) with
-  mandatory `reason: str(1..500)`, idempotent CONFLICT-result no-op on
-  already-ended targets, 404 on unknown id. `shift_end_reason` enum renamed
-  in Task 0 (decision E), so the wire value is `forced` (NOT
-  `admin_force_close`).
-- **Auto-end stale-shifts background job** — shipped (Task 1) as an asyncio
-  loop in the FastAPI lifespan. Three knobs: `SHIFT_AUTO_END_ENABLED`,
-  `SHIFT_AUTO_END_INTERVAL_SECONDS`, `SHIFT_AUTO_END_THRESHOLD_HOURS` (default
-  12h). Ends matching rows with `end_reason='auto_timeout'`. **Single-replica
-  caveat documented** — see the new entry below.
+- **`GET /api/v1/admin/sessions`** — shipped (Task 3).
+- **`POST /api/v1/admin/sessions/{id}/force-close`** — shipped (Task 3).
+- **Auto-end stale-shifts background job** — shipped (Task 1).
 
-**Residual deferred to Sprint 8+:**
+**Sprint 8a:**
 
-- **Admin-shift-open API** — there is still no way for an admin to open a
-  shift, so Sprint 7's `dcinv-admin`-gated endpoints (`/admin/audit`,
-  `/admin/sessions`, `/admin/sessions/{id}/force-close`) all return 409
-  NO_ACTIVE_SHIFT in production for an admin without a shift. Tests seed an
-  active shift via `seed_default_active_shift`; live admin use awaits this
-  API. Sprint 8 candidate: `POST /api/v1/admin/sessions/start` (web-driven,
-  no `tablet_id` — perhaps `workstation_id` or just the admin's keycloak id).
-- **Gate `POST /api/v1/admin/batches/` on an active shift** — blocked on the
-  above. Once admins can open shifts, batch generation should switch to
-  `require_role_with_active_shift("dcinv-admin")` and `QRGenerationService`
-  should source `session_id` from `user.shift_session_id` instead of the
-  hardcoded `None`.
+- **`POST /api/v1/admin/sessions/start`** — shipped (Task 0) with body
+  `{workstation_id: str(1..255)}`. Role `dcinv-admin` only (chicken-and-egg:
+  can't require an active shift to open one). Distinct
+  `AdminSessionStartRequest` Pydantic model from mobile's `SessionStartRequest`
+  — the API layer renames `workstation_id` at the schema boundary while the
+  DB column stays `tablet_id`. Unblocks live use of every Sprint 7 admin
+  endpoint.
+- **`POST /admin/batches/` + `GET /admin/batches/{id}` now gate on active
+  shift** (Sprint 8a Task 0). `QRGenerationService` audit row's `session_id`
+  now sources from `user.shift_session_id` instead of hardcoded `None` —
+  Sprint 6 decision F is RESOLVED. Pre-Sprint-8a batch rows retain `NULL`
+  per the "no historical migration" stance.
+
+No residual; the admin sessions surface is complete.
 
 ---
 
@@ -204,6 +197,74 @@ description for the `session_id` filter carries the semantic note that pre-
 2026-05-30 rows hold JWT sids; admins reading the schema (or the API docs UI
 rendered from it) understand the era boundary. Ad-hoc consumers that filter
 by `session_id` on historical rows are now warned via the schema.
+
+---
+
+## NetBox circuit breaker — RESOLVED in Sprint 8a Task 2
+
+Architecture §3.3 deferral, carried since Sprint 3. Sprint 8a Task 2 shipped
+it via the `circuitbreaker>=2.0,<3` PyPI dep (first pyproject deviation since
+Sprint 1; pre-approved at Sprint 8 plan stage):
+
+- Module-level `CircuitBreaker(expected_exception=(NetBoxServerError,
+  NetBoxTimeout), name="netbox")` lazy-initialised in
+  `app/netbox/client.py`. **`NetBoxNotFound` (404) and
+  `NetBoxValidationError` (4xx) do NOT count** — they're "NetBox said your
+  request is wrong," not "NetBox is broken." A flood of 404s won't open the
+  circuit; that's a rate-limiting concern (now solved in Task 3).
+- `_send` split into the public open-check wrapper + `_send_impl` (original
+  retry loop). When OPEN, raises new `NetBoxCircuitOpenError(NetBoxClientError)`
+  with `recovery_timeout_seconds` for the 503 body.
+- `main.py` exception handler returns **503 + `Retry-After: N` header +
+  structured `{"error":{"code":"NETBOX_CIRCUIT_OPEN","retry_after_seconds":N}}`**
+  body. Distinct from the existing 502 `NetBoxClientError` path: 502 = "I
+  asked NetBox and got a bad response"; 503 = "I'm refusing to call NetBox
+  because it's been failing."
+- `/health` extended with **informational** `netbox_circuit:{enabled,state,
+  failure_count,open_until}` sub-object. Does NOT flip overall `/health`
+  status; the existing `_check_netbox` probe (uses a fresh
+  `httpx.AsyncClient`, bypasses the circuit) remains the 503 trigger.
+- Three new `Settings` knobs: `NETBOX_CIRCUIT_ENABLED` (true),
+  `NETBOX_CIRCUIT_FAILURE_THRESHOLD` (5),
+  `NETBOX_CIRCUIT_RECOVERY_TIMEOUT_SECONDS` (30).
+- `reset_netbox_circuit()` test helper added to `tests/conftest.py:clean_env`
+  so each test starts CLOSED.
+
+Locked in by `tests/integration/test_circuit_breaker.py` (end-to-end NetBox
+503 trips circuit → next call returns 503 NETBOX_CIRCUIT_OPEN with
+`Retry-After: 30`).
+
+---
+
+## Rate limiting — RESOLVED in Sprint 8a Task 3
+
+ToR §5.4.7 requirement. Sprint 8a Task 3 shipped per-user fixed-window
+rate limiting at the FastAPI middleware layer:
+
+- `app/middleware/rate_limit.py` with three classes (READ 60/min default,
+  WRITE 20/min, ADMIN 30/min) + UNLIMITED bypass (`/health`, `/docs`,
+  `/openapi.json`, `/redoc`).
+- Classification by path + method: `/api/v1/admin/*` → ADMIN regardless of
+  method; GET/HEAD/OPTIONS → READ; POST/PATCH/PUT/DELETE → WRITE.
+- User identity extracted via `jwt.get_unverified_claims()` —
+  rate-limit keying does NOT need full signature verification (that
+  happens later in `require_role`). A forged `sub` lets an attacker mess
+  with their own bucket; real auth still rejects them.
+- 429 + `Retry-After: <seconds>` header + structured body
+  `{"error":{"code":"RATE_LIMIT_EXCEEDED","retry_after_seconds":N}}` (shape
+  mirrors Task 2's 503).
+- Middleware registered BEFORE `request_id_middleware` in source order so
+  request_id ends up OUTER (Starlette: reverse-registration = outer) and
+  structlog contextvars are bound for the 429 log.
+- Four new `Settings` knobs (`RATE_LIMIT_ENABLED` + three per-class budgets).
+
+**Residual deferred to Sprint 9+ (cluster-wide rate-limit state):** the
+current implementation uses an in-process `dict[(sub, class,
+window_index), int]` — per-replica enforcement, so cluster-wide total rate
+is N × per-replica budget. Acceptable today (single-replica deployment);
+the first multi-replica deployment will need to replace `_buckets` with
+Redis or Postgres-backed counters behind the same `_consume(...)`
+interface. The middleware itself won't need to change.
 
 The contract is locked in by a test that introspects `app.openapi()` and
 checks the description text — see
