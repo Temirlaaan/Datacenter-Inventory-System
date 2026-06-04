@@ -35,6 +35,8 @@ from app.web.router import (
     _OIDC_NONCE_COOKIE,
     _OIDC_STATE_COOKIE,
     _redirect_to_login,
+    audit_detail,
+    audit_list,
     batches_detail,
     batches_list,
     dashboard,
@@ -407,6 +409,140 @@ async def test_batches_detail_handler_returns_html_response_for_existing_batch(
     assert b"detail-canned" in body
     assert b"DCQR-CANNED01" in body
     assert b"Free: 1" in body
+
+
+# ---------- audit list + detail handlers: direct-await returns -------------
+
+
+async def test_audit_list_handler_returns_html_response_with_seeded_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct-await covers the post-await ``return templates.TemplateResponse``
+    line in ``audit_list`` (ASGI stack hides it from coverage tracing)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+
+    canned_entry = AuditLogEntry(
+        id=42,
+        request_id=uuid4(),
+        timestamp=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        session_id=None,
+        operation="qr.bind",
+        entity_type="qr",
+        entity_id="DCQR-UNIT001",
+        before_json={},
+        after_json={},
+        result=AuditResult.SUCCESS,
+    )
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(
+            self, *, filters: object, page: int, page_size: int
+        ) -> tuple[list[AuditLogEntry], bool]:
+            _ = filters, page, page_size
+            return [canned_entry], False
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/audit/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    response = await audit_list(
+        request=request,
+        page=1,
+        user_keycloak_id=None,
+        from_=None,
+        to=None,
+        entity_type=None,
+        entity_id=None,
+        operation=None,
+        session_id=None,
+        result=None,
+        user=user,
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"DCQR-UNIT001" in body
+    assert b"alice@example.com" in body
+
+
+async def test_audit_detail_handler_returns_html_response_for_existing_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the happy-path return in ``audit_detail`` (post-await)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+
+    canned_entry = AuditLogEntry(
+        id=99,
+        request_id=uuid4(),
+        timestamp=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        session_id=None,
+        operation="qr.retire",
+        entity_type="qr",
+        entity_id="DCQR-DET999",
+        before_json={"old": 1},
+        after_json={"new": 2},
+        result=AuditResult.SUCCESS,
+    )
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _id: int) -> AuditLogEntry | None:
+            return canned_entry
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/audit/99",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    response = await audit_detail(
+        request=request, audit_id=99, user=user, session=object()  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"DCQR-DET999" in body
+    assert b"qr.retire" in body
 
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.

@@ -293,6 +293,84 @@ form button:hover { background: var(--color-accent-hover); }
     padding: 16px 0;
 }
 
+/* Audit filter form + JSON pretty-print (Sprint 8b Task 3) -- */
+
+.filter-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    max-width: none;
+    margin: 16px 0 24px;
+    padding: 16px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.filter-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--color-muted);
+}
+
+.filter-form input,
+.filter-form select {
+    font-size: 13px;
+    padding: 6px 8px;
+}
+
+.filter-form__actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.filter-form__actions button {
+    width: auto;
+}
+
+.json-block {
+    background: #1f2933;
+    color: #f7f8fa;
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    margin: 8px 0 24px;
+}
+
+/* Result badges (Sprint 8b Task 3) --------------------------- */
+
+.result-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+    line-height: 1.6;
+}
+
+.result-badge--success {
+    background: #dcfce7;
+    color: #14532d;
+}
+
+.result-badge--failure {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.result-badge--conflict {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 /* Footer ------------------------------------------------------ */
 
 .footer {

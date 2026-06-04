@@ -1,0 +1,85 @@
+{% extends "_base.html" %}
+{% block title %}Audit log &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Audit log</h1>
+    <p>Filter, page through results, or export the current query as CSV.</p>
+
+    <form class="filter-form" method="get" action="/web/audit/">
+        <label>User Keycloak ID
+            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID">
+        </label>
+        <label>From
+            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}">
+        </label>
+        <label>To
+            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}">
+        </label>
+        <label>Entity type
+            <input name="entity_type" value="{{ filters.entity_type }}" placeholder="qr / device / shift_session / audit">
+        </label>
+        <label>Entity ID
+            <input name="entity_id" value="{{ filters.entity_id }}">
+        </label>
+        <label>Operation
+            <input name="operation" value="{{ filters.operation }}" placeholder="qr.bind / device.update / …">
+        </label>
+        <label>Session ID
+            <input name="session_id" value="{{ filters.session_id }}" placeholder="UUID">
+        </label>
+        <label>Result
+            <select name="result">
+                <option value=""></option>
+                {% for r in result_choices %}
+                <option value="{{ r }}" {% if filters.result == r %}selected{% endif %}>{{ r }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="filter-form__actions">
+            <button type="submit">Apply filters</button>
+            <a class="download-btn" href="/api/v1/admin/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">
+                Download CSV
+            </a>
+        </div>
+    </form>
+
+    {% if rows %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>When</th>
+                <th>User</th>
+                <th>Operation</th>
+                <th>Entity</th>
+                <th>Result</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td>{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                <td>{{ r.user_email }}</td>
+                <td><code>{{ r.operation }}</code></td>
+                <td>{{ r.entity_type }} / <code>{{ r.entity_id }}</code></td>
+                <td><span class="result-badge result-badge--{{ r.result.value }}">{{ r.result.value }}</span></td>
+                <td><a href="/web/audit/{{ r.id }}">Details</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No audit rows match these filters.</p>
+    {% endif %}
+
+    <nav class="pagination">
+        {% if has_prev %}
+        <a class="pagination__link" href="/web/audit/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
+        {% endif %}
+        <span class="pagination__current">Page {{ page }}</span>
+        {% if has_more %}
+        <a class="pagination__link" href="/web/audit/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+</section>
+{% endblock %}

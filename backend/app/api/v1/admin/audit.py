@@ -21,11 +21,16 @@ Audit-of-audits row per decision I:
 
 from __future__ import annotations
 
+import csv
+import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from io import StringIO
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +41,30 @@ from app.domain.audit import AuditLogEntry, AuditResult
 from app.observability.request_id import current_request_id
 
 router = APIRouter()
+
+_CSV_PAGE_SIZE_MAX = 10000
+"""Sprint 8b Task 3 decision 2: cap a single CSV export at 10k rows.
+
+Decision 10: at ~500 bytes per row this is ~5 MB peak in RAM — acceptable
+for an admin tool. Genuine server-side cursor streaming via SQLAlchemy
+``yield_per`` would be needed past ~100k rows; deferred until a real
+consumer needs it.
+"""
+
+_CSV_COLUMNS: tuple[str, ...] = (
+    "id",
+    "request_id",
+    "timestamp",
+    "user_email",
+    "user_keycloak_id",
+    "session_id",
+    "operation",
+    "entity_type",
+    "entity_id",
+    "result",
+    "before_json",
+    "after_json",
+)
 
 
 class AuditLogEntryResponse(BaseModel):
@@ -205,4 +234,146 @@ async def query_audit_log(
         page=page,
         page_size=page_size,
         has_more=has_more,
+    )
+
+
+# ---------- Sprint 8b Task 3: CSV export -------------------------------------
+
+
+def _row_to_csv(row: AuditLogEntry) -> list[str]:
+    """Project one ``AuditLogEntry`` to the fixed ``_CSV_COLUMNS`` order.
+
+    JSONB columns are re-serialised with compact separators so the CSV cell
+    stays a single token. Datetimes use ISO-8601 (round-trips with
+    ``datetime.fromisoformat``).
+    """
+    return [
+        str(row.id) if row.id is not None else "",
+        str(row.request_id),
+        row.timestamp.isoformat(),
+        row.user_email,
+        str(row.user_keycloak_id),
+        str(row.session_id) if row.session_id is not None else "",
+        row.operation,
+        row.entity_type,
+        row.entity_id,
+        row.result.value,
+        json.dumps(row.before_json, separators=(",", ":")),
+        json.dumps(row.after_json, separators=(",", ":")),
+    ]
+
+
+async def _csv_iter(rows: list[AuditLogEntry]) -> AsyncIterator[bytes]:
+    """Yield the CSV header then one encoded line per row.
+
+    The StringIO buffer is reused per row so peak memory stays per-line, not
+    per-export. Decision 10: at 10k rows the full response is ~5 MB; bounded
+    in-memory generation is fine without a server-side DB cursor.
+    """
+    buf = StringIO()
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(_CSV_COLUMNS)
+    yield buf.getvalue().encode("utf-8")
+    buf.seek(0)
+    buf.truncate()
+    for row in rows:
+        writer.writerow(_row_to_csv(row))
+        yield buf.getvalue().encode("utf-8")
+        buf.seek(0)
+        buf.truncate()
+
+
+@router.get(
+    "/csv",
+    description=(
+        "CSV export of audit_log rows matching the same 8 filters as the JSON"
+        " endpoint. Capped at 10000 rows per request (vs 100 for the JSON"
+        " endpoint). Writes its own audit-of-audits row with"
+        " ``operation='audit.export_csv'`` per ToR §5.4.6 (CSV exports are a"
+        " sensitive read)."
+    ),
+)
+async def query_audit_log_csv(
+    user_keycloak_id: UUID | None = Query(default=None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    operation: str | None = Query(default=None),
+    session_id: UUID | None = Query(default=None),
+    result: AuditResult | None = Query(default=None),
+    page_size: int = Query(default=1000, ge=1, le=_CSV_PAGE_SIZE_MAX),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    """Stream the matched rows as a CSV download.
+
+    Decision 11: a failed query still writes a ``result=FAILURE`` audit-of-
+    audits row before the exception propagates, matching the JSON endpoint's
+    pattern. The body of the StreamingResponse is produced AFTER the audit
+    insert commits so the audit reflects what the admin requested even if
+    the network drops mid-download.
+    """
+    repo = AuditLogRepository(session)
+    filters = AuditLogQueryFilters(
+        user_keycloak_id=user_keycloak_id,
+        from_=from_,
+        to=to,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        operation=operation,
+        session_id=session_id,
+        result=result,
+    )
+    request_uuid = UUID(current_request_id())
+    now = datetime.now(UTC)
+
+    try:
+        rows, _has_more = await repo.query(filters=filters, page=1, page_size=page_size)
+    except Exception:
+        await repo.insert(
+            AuditLogEntry(
+                request_id=request_uuid,
+                timestamp=now,
+                user_email=user.email or "",
+                user_keycloak_id=UUID(user.sub),
+                session_id=user.shift_session_id,
+                operation="audit.export_csv",
+                entity_type="audit",
+                entity_id="export",
+                before_json={},
+                after_json={
+                    "filters": _filters_as_dict(filters, page=1, page_size=page_size),
+                },
+                result=AuditResult.FAILURE,
+            )
+        )
+        await session.commit()
+        raise
+
+    await repo.insert(
+        AuditLogEntry(
+            request_id=request_uuid,
+            timestamp=now,
+            user_email=user.email or "",
+            user_keycloak_id=UUID(user.sub),
+            session_id=user.shift_session_id,
+            operation="audit.export_csv",
+            entity_type="audit",
+            entity_id="export",
+            before_json={},
+            after_json={
+                "filters": _filters_as_dict(filters, page=1, page_size=page_size),
+                "rows_exported": len(rows),
+            },
+            result=AuditResult.SUCCESS,
+        )
+    )
+    await session.commit()
+
+    filename = f"audit-{now.strftime('%Y%m%dT%H%M%SZ')}.csv"
+    return StreamingResponse(
+        _csv_iter(rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

@@ -1,0 +1,24 @@
+{% extends "_base.html" %}
+{% block title %}Audit row {{ entry.id }} &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Audit row {{ entry.id }}</h1>
+    <p><a href="/web/audit/">&laquo; Back to audit log</a></p>
+
+    <dl class="kv">
+        <dt>Timestamp</dt><dd>{{ entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</dd>
+        <dt>Request ID</dt><dd><code>{{ entry.request_id }}</code></dd>
+        <dt>User</dt><dd>{{ entry.user_email }} (<code>{{ entry.user_keycloak_id }}</code>)</dd>
+        <dt>Shift session ID</dt><dd>{% if entry.session_id %}<code>{{ entry.session_id }}</code>{% else %}—{% endif %}</dd>
+        <dt>Operation</dt><dd><code>{{ entry.operation }}</code></dd>
+        <dt>Entity</dt><dd>{{ entry.entity_type }} / <code>{{ entry.entity_id }}</code></dd>
+        <dt>Result</dt><dd><span class="result-badge result-badge--{{ entry.result.value }}">{{ entry.result.value }}</span></dd>
+    </dl>
+
+    <h2>Before</h2>
+    <pre class="json-block">{{ entry.before_json | tojson(indent=2) }}</pre>
+
+    <h2>After</h2>
+    <pre class="json-block">{{ entry.after_json | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

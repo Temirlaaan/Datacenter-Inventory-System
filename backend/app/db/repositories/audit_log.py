@@ -63,6 +63,17 @@ class AuditLogRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def get_by_id(self, audit_id: int) -> AuditLogEntry | None:
+        """Fetch a single audit_log row by primary key.
+
+        Used by the Sprint 8b Task 3 ``/web/audit/{id}`` detail page; not
+        called by the JSON API (the JSON contract is "search by filter, not
+        by id"). Returns ``None`` if the id doesn't exist — the web handler
+        renders the custom 404 page in that case.
+        """
+        model = await self.session.get(AuditLogModel, audit_id)
+        return _to_domain(model) if model is not None else None
+
     async def insert(self, entry: AuditLogEntry) -> None:
         stmt = insert(AuditLogModel).values(
             request_id=entry.request_id,

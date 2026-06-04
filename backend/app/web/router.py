@@ -30,10 +30,12 @@ from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db.repositories.audit_log import AuditLogQueryFilters, AuditLogRepository
 from app.db.repositories.dashboard import DashboardRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session
+from app.domain.audit import AuditResult
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
     SESSION_COOKIE_NAME,
@@ -344,4 +346,139 @@ async def batches_detail(
             "codes": codes,
             "status_counts": status_counts,
         },
+    )
+
+
+# ---------- /web/audit/ list + detail (Sprint 8b Task 3) ---------------------
+
+
+_WEB_AUDIT_PAGE_SIZE = 20
+
+
+def _audit_filter_query_string(
+    *,
+    user_keycloak_id: str | None,
+    from_: str | None,
+    to: str | None,
+    entity_type: str | None,
+    entity_id: str | None,
+    operation: str | None,
+    session_id: str | None,
+    result: str | None,
+) -> str:
+    """Re-encode the eight audit filters as a URL-encoded query string.
+
+    Used by the list template's pagination + "Download CSV" links so the
+    operator's filter context survives page navigation. Empty / None
+    values are dropped so the URL stays clean.
+    """
+    params = {
+        "user_keycloak_id": user_keycloak_id,
+        "from": from_,
+        "to": to,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "operation": operation,
+        "session_id": session_id,
+        "result": result,
+    }
+    return urlencode({k: v for k, v in params.items() if v})
+
+
+@router.get("/audit/", response_class=HTMLResponse)
+async def audit_list(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    user_keycloak_id: UUID | None = Query(default=None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    operation: str | None = Query(default=None),
+    session_id: UUID | None = Query(default=None),
+    result: AuditResult | None = Query(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Filtered, paginated audit log page.
+
+    Reuses ``AuditLogRepository.query`` directly (decision I — no HTTP
+    self-call). The page itself is NOT audited; only the JSON endpoint and
+    the CSV export write audit-of-audits rows (Sprint 7 Task 2 + Sprint 8b
+    Task 3 decision 6). The web page consuming the same data is just a
+    re-render of the same query result, not a separate read.
+    """
+    filters = AuditLogQueryFilters(
+        user_keycloak_id=user_keycloak_id,
+        from_=from_,
+        to=to,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        operation=operation,
+        session_id=session_id,
+        result=result,
+    )
+    rows, has_more = await AuditLogRepository(session).query(
+        filters=filters, page=page, page_size=_WEB_AUDIT_PAGE_SIZE
+    )
+    # Re-encode the user-submitted filters for pagination + CSV-download links.
+    filter_qs = _audit_filter_query_string(
+        user_keycloak_id=str(user_keycloak_id) if user_keycloak_id else None,
+        from_=from_.isoformat() if from_ else None,
+        to=to.isoformat() if to else None,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        operation=operation,
+        session_id=str(session_id) if session_id else None,
+        result=result.value if result else None,
+    )
+    return templates.TemplateResponse(
+        request,
+        "audit/list.html",
+        {
+            "user_email": user.email,
+            "rows": rows,
+            "page": page,
+            "has_more": has_more,
+            "has_prev": page > 1,
+            "filter_qs": filter_qs,
+            "filters": {
+                "user_keycloak_id": str(user_keycloak_id) if user_keycloak_id else "",
+                "from": from_.isoformat() if from_ else "",
+                "to": to.isoformat() if to else "",
+                "entity_type": entity_type or "",
+                "entity_id": entity_id or "",
+                "operation": operation or "",
+                "session_id": str(session_id) if session_id else "",
+                "result": result.value if result else "",
+            },
+            "result_choices": [r.value for r in AuditResult],
+        },
+    )
+
+
+@router.get("/audit/{audit_id}", response_class=HTMLResponse)
+async def audit_detail(
+    request: Request,
+    audit_id: int,
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Single audit_log row: all 12 columns + pretty-printed JSON blobs.
+
+    Unknown id → custom HTML 404 page via ``_not_found.html`` (decision 9,
+    reused from Task 2).
+    """
+    entry = await AuditLogRepository(session).get_by_id(audit_id)
+    if entry is None:
+        return templates.TemplateResponse(
+            request,
+            "_not_found.html",
+            {"user_email": user.email, "resource": f"audit row {audit_id}"},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    return templates.TemplateResponse(
+        request,
+        "audit/detail.html",
+        {"user_email": user.email, "entry": entry},
     )

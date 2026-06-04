@@ -277,3 +277,24 @@ async def test_query_populates_id_field_on_read() -> None:
         )
     assert len(rows) == 1
     assert rows[0].id is not None and rows[0].id > 0
+
+
+# === Sprint 8b Task 3: get_by_id ============================================
+
+
+async def test_get_by_id_returns_row_when_present() -> None:
+    await _insert_all([_entry(timestamp=_NOW - timedelta(minutes=1))])
+    async with get_sessionmaker()() as db:
+        rows, _ = await AuditLogRepository(db).query(
+            filters=AuditLogQueryFilters(), page=1, page_size=20
+        )
+        seeded_id = rows[0].id
+        assert seeded_id is not None
+        fetched = await AuditLogRepository(db).get_by_id(seeded_id)
+    assert fetched is not None
+    assert fetched.id == seeded_id
+
+
+async def test_get_by_id_returns_none_for_unknown_id() -> None:
+    async with get_sessionmaker()() as db:
+        assert await AuditLogRepository(db).get_by_id(999_999_999) is None
