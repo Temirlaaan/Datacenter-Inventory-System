@@ -99,7 +99,9 @@ class QRCodeRepository:
             .group_by(QRCodeModel.status)
         )
         result = await self.session.execute(stmt)
-        counts = dict.fromkeys(QRStatus, 0)
+        # Explicit annotation: dict.fromkeys' inferred value type is Optional[int]
+        # under strict-mode tightening, but every value is a non-None int here.
+        counts: dict[QRStatus, int] = dict.fromkeys(QRStatus, 0)
         for status_value, count in result.all():
             counts[status_value] = count
         return counts

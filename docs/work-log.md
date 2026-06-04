@@ -909,3 +909,145 @@ DATABASE_URL='postgresql+asyncpg://dcinv_test:dcinv_test@localhost:5433/dcinv_te
   KEYCLOAK_BASE_URL='https://sso.example.com' \
   uv run python scripts/perf_baseline.py
 ```
+
+---
+
+## Sprint 8b — User-Facing Deliverables (closed 2026-06-04)
+
+**Status:** Closed. Tasks 0–4 complete; Task 5 (this entry) closes the sprint.
+
+### What shipped
+
+| Task | Deliverable |
+|---|---|
+| 0 | **Web auth foundation + template scaffolding.** Keycloak OIDC authorization-code redirect flow at `GET /web/{login,oidc/callback,logout}` against a confidential client (`KEYCLOAK_WEB_CLIENT_ID`/`_SECRET`); identity stored in a Fernet-encrypted `dcinv_admin_session` cookie (`SESSION_COOKIE_KEY` is a Fernet key — fail-fast if missing at startup); cookie payload is identity-only (`sub`, `email`, `roles`, `exp`) with an 8-hour lifetime. New `app/web/auth.py` with `WebAdminUser` frozen-slots dataclass + `WebAdminAuthRequired` / `AdminShiftNeeded(user)` typed exceptions; `require_web_admin` FastAPI dep mirrors Sprint 7's `require_role_with_active_shift("dcinv-admin")` but on the cookie path. Non-admin users get the same response as no-cookie (redirect to login; no information leak between "wrong cookie" and "wrong role"). Authenticated admin with no active shift → renders an intermediate `_admin_shift_needed.html` page with a "Start admin shift" form posting to Sprint 8a's `POST /api/v1/admin/sessions/start`. New Jinja2 `_base.html` (nav + flash slot), hand-written `static/admin.css` (~150 lines, no preprocessor, no framework). Rate-limit middleware (`app/middleware/rate_limit.py`) extended with `_UNLIMITED_PREFIXES = ("/web/", "/static/")` so the admin browser doesn't double-fire against the per-user ADMIN bucket when a web page calls the same data path internally. Three new `Settings` fields. |
+| 1 | **`/web/` dashboard + counters endpoint.** New `app/domain/dashboard.py` (`DashboardSnapshot` frozen dataclass — six counters + `generated_at`) + `app/db/repositories/dashboard.py` (`DashboardRepository.snapshot(*, now)` issues one SELECT with six scalar subqueries — verified via SQLAlchemy `after_cursor_execute` listener in the integration suite). New `GET /api/v1/admin/dashboard` JSON endpoint gated on `dcinv-admin` + active shift; **no audit row** (operational read parallels Sprint 7 decision 8 for `/admin/sessions`). The `/web/` placeholder from Task 0 replaced with the real dashboard.html template rendering a card grid + "As of {{ generated_at }} UTC" freshness line. Web handler consumes the repo directly via dep injection (decision I); no HTTP self-call. Task 1 also retroactively closed a 99.39% → 100% coverage gap left by Task 0's close-out (OIDC failure branches were untested; backfilled via direct-await unit tests). |
+| 2 | **`/web/batches/` list + detail + PDF batch labels.** New `app/services/pdf_labels.py::render_batch_labels_pdf` is a pure function (bytes in → bytes out) rendering A4 landscape, 8×4 = 32 labels per page via `reportlab.graphics.barcode.qr.QrCodeWidget` (no separate `qrcode`/`pillow` dependency path). `pageCompression=0` keeps caption text greppable in the raw PDF byte stream so unit tests assert page count + caption rendering without a PDF-parser dep. Repository extensions: `QRBatchRepository.query` (newest-first pagination with `LIMIT page_size + 1` `has_more` — same shape as `AuditLogRepository.query`) and `QRCodeRepository.count_by_status_for_batch` (single GROUP BY for the detail page's status chips). New endpoints: `GET /api/v1/admin/batches/` (list, no audit row); `GET /api/v1/admin/batches/{id}/labels.pdf` (PDF via `Response(content=..., media_type="application/pdf")` with `Content-Disposition: attachment` header; **no audit row** — same data as the JSON detail endpoint, not a §5.4.6 sensitive read). The synchronous reportlab call runs via `asyncio.to_thread(...)` so the event loop stays responsive. New templates `batches/list.html`, `batches/detail.html`, and a shared `_not_found.html` (custom HTML 404 page reused across web detail handlers — web flows render HTML, not JSON detail bodies). |
+| 3 | **`/web/audit/` list + detail + CSV export.** New `GET /api/v1/admin/audit/csv` returns `StreamingResponse(_csv_iter(rows), media_type="text/csv")` — DECISION D1 DEVIATION FROM PLAN SKELETON: endpoint is at `/api/v1/admin/audit/csv` (under the existing router prefix) rather than the plan's `/api/v1/admin/audit.csv`. Cleaner FastAPI routing without colliding with the `{audit_id}` matcher; explicitly registered before `{audit_id}` so it wins precedence. CSV uses the same 8 filters as Sprint 7's `/admin/audit` JSON endpoint; `page_size` default 1000, cap 10000 (vs JSON's 100). JSONB columns serialised compact via `json.dumps(..., separators=(",", ":"))`; datetimes use `isoformat()`. **Audit-of-audits row written** with `operation="audit.export_csv"`, `entity_type="audit"`, `entity_id="export"`, and `after_json["rows_exported"]` count — CSV export IS a sensitive read per ToR §5.4.6. Failure-path audit row (`result=FAILURE`) preserved before the exception propagates, matching Sprint 7's `/admin/audit` pattern. Web pages: `GET /web/audit/` (filter form with 8 fields + paginated table + Download CSV button; filter query string preserved into both pagination links and the CSV download link), `GET /web/audit/{audit_id}` (`<pre>{{ before_json \| tojson(indent=2) }}</pre>` pretty-printed JSON, custom 404 via the shared `_not_found.html`). Repo addition: `AuditLogRepository.get_by_id` for the detail page. |
+| 4 | **`/web/sessions/` + inline force-close form.** New `GET /web/sessions/` paginated list (filter form mirrors the 4-filter JSON endpoint; active-shift rows highlighted) with **per-row inline `<form method="post">`** containing the `reason` textarea + Force-close button. Ended rows show an end-reason badge instead. New `POST /web/sessions/{id}/force-close` handler delegates to Sprint 7's existing JSON `force_close_session` via direct Python call (NOT HTTP self-call) so the three-record-write apparatus + 404 / idempotent-already-ended semantics stay in one place. 303-redirects back to the list with `?flash=Shift+force-closed&flash_kind=info` on success or `?flash=Shift+not+found&flash_kind=error` on 404; non-404 `HTTPException`s re-raise. Audit attribution: the web handler looks up the admin's own active shift in a FRESH session (via `get_sessionmaker()()`) before delegating, so the audit row credits the right shift — the existing session can't be used for the lookup because `force_close_session` opens its own `session.begin()` and SQLAlchemy 2.0 errors with "A transaction is already begun" if the injected session already auto-started one. Filter context (`user_keycloak_id`/`from`/`to`/`active_only`) is echoed via hidden inputs into the form body so the redirect carries the operator's filter context. New `sessions/list.html` template; CSS additions: `.end-reason-badge--{manual,auto_timeout,forced}` chips, `.inline-form` compact textarea, `.session-row--active` highlight. |
+| 5 | Acceptance + close-out (this entry). |
+
+### Quality bar at close
+
+- **1018 tests** (Sprint 8a → 881; Sprint 8b +137 net new), **100% line + branch coverage** across `app/` — `--cov-fail-under=100` gate passes.
+- ruff + black + mypy clean across `app/` and `tests/`.
+- Three new pyproject dependencies (`jinja2`, `reportlab`, `python-multipart`); `uv.lock` regenerated three times.
+- Three new module/template directories (`app/web/templates/{batches,audit,sessions}/`), one new module (`app/services/pdf_labels.py`), two new domain modules (`app/domain/dashboard.py` only; the rest reused existing).
+
+### Pyproject deviations from baseline
+
+Three new dependencies added under `[project.dependencies]` this sprint:
+
+1. **`jinja2>=3.1,<4`** (Task 0). FastAPI's documented standard for HTML templating. Pre-approved at Sprint 8b plan stage (decision J). Explicit pin avoids transitive surprises if FastAPI ever drops the transitive dep.
+2. **`reportlab>=4.0,<5`** (Task 2). Pure-Python PDF generation, no system deps; `reportlab.graphics.barcode.qr.QrCodeWidget` renders QR codes natively so no separate `qrcode` dependency is needed. Pre-approved at Sprint 8b plan stage (decision F). Pulled transitive `pillow` + `charset-normalizer` (both required by reportlab; no alternative short of replacing reportlab with `qrcode` + `pillow` independently). Mypy override `module = "reportlab.*"` added next to existing `jose` / `yaml` / `circuitbreaker` overrides.
+3. **`python-multipart>=0.0.20,<0.1`** (Task 4). FastAPI's documented standard for parsing `application/x-www-form-urlencoded` request bodies; required by the `Form(...)` parser used by `POST /web/sessions/{id}/force-close`. Pure-Python, ~5 KB, MIT. **NOT pre-approved at plan stage** — surfaced as a runtime error mid-Task 4 when the first integration test ran (`RuntimeError: Form data requires "python-multipart" to be installed`). Execution-time approval recorded in the Task 4 commit body and here. Lesson: future sprints touching HTML forms should audit FastAPI's documented helper deps at plan stage.
+
+### Architectural decisions worth carrying forward
+
+- **Web auth = OIDC cookie, separate from mobile JWT bearer.** `WebAdminUser` is a distinct dataclass from `AuthUser` because the cookie carries identity only — no JWT context, no `sid`, no `realm_access` re-validation per request. The JWT bearer path (`app/auth/`) does full JWKS verification for inbound mobile API calls; the cookie path trusts its own freshly-completed OIDC handshake.
+- **Cookie is Fernet-encrypted, not signed-only** (CLAUDE.md mandate). `cryptography.fernet.Fernet` provides authenticated encryption. `SESSION_COOKIE_KEY` is a required Settings field (fail-fast at startup if missing) — operators generate via `Fernet.generate_key()` once at deploy and persist. The lazy-singleton `_fernet()` cached at module level is cleared by `reset_web_auth_cache()` in tests, mirroring Sprint 8a's `reset_netbox_circuit()` / `reset_rate_limit_buckets()` pattern.
+- **Web pages consume repos DIRECTLY via dep injection** (decision I, locked in across all four web pages this sprint). Pages do NOT self-HTTP-call the JSON endpoints. Two consequences: (a) the per-user ADMIN rate-limit bucket fires once per browser page-view (not twice), (b) the dep graph stays Pythonic — refactors don't cross HTTP boundaries. `/web/*` and `/static/*` are UNLIMITED in the rate-limit middleware to make the design explicit.
+- **HTML 404 pages, not JSON `{detail: "..."}` bodies.** The shared `_not_found.html` template is reused across `/web/batches/{unknown}` and `/web/audit/{unknown}` so the operator gets a navigable page, not a stack-trace-shaped JSON body. Web flows redirect or render HTML; they never surface JSON to the browser.
+- **Audit-row policy on the web layer:** the four web pages (dashboard, batches list/detail, audit list/detail, sessions list) write NO audit rows themselves. The JSON endpoints they consume already audit per ToR §5.4.6 (when applicable — `/admin/audit/csv` is the one new write path this sprint that DOES audit). Re-rendering the same query result is not a separate read.
+- **Sync libraries via `asyncio.to_thread`.** reportlab's `Canvas.save()` is synchronous; wrapping the call in `asyncio.to_thread(...)` keeps the event loop responsive even on large batches. Any future sync-only library (pillow imaging, e.g.) follows the same pattern.
+- **`pageCompression=0` for testability.** reportlab compresses content streams by default; disabling compression keeps the QR-id caption text greppable in raw bytes, so unit tests can assert page count + caption rendering without pulling a PDF-parser dep. The size cost (~10–15 KB per 32-label batch) is negligible at admin-tool scale.
+- **Web handler delegates to JSON handler** (Task 4 D1). `web_force_close_session` calls `app.api.v1.admin.sessions.force_close_session` via Python (not HTTP) so Sprint 7's three-record-write apparatus + idempotency contract live in one place. The web handler only adds the HTML-friendly UX shell: form parsing, flash redirects, filter-context preservation. **Pattern for any future web write path:** the JSON handler does the work, the web handler is a thin transport shim.
+- **Fresh-session lookup for audit attribution** (Task 4). When delegating to a JSON handler that opens its own `session.begin()`, the web handler must use a NEW session for any preliminary lookups — SQLAlchemy 2.0 errors with "A transaction is already begun on this Session" if the injected session was already auto-started by a prior call. Recorded as a gotcha; the inline comment in `web_force_close_session` documents it.
+- **Direct-await coverage tracing remains the load-bearing testing pattern.** Sprint 7's `feedback_endpoint_test_direct_await.md` lesson held this sprint: every web handler's post-await `return templates.TemplateResponse(...)` line needs a direct-await unit test to register in coverage. Integration tests via `httpx.AsyncClient` + `ASGITransport` exercise the routing + dep gates but don't trace the return through the ASGI stack.
+
+### Sprint 8b retrospective
+
+**What went well:**
+- Plan-then-confirm rhythm held across all 5 tasks. Each task's plan accurately predicted the file footprint, decision tree, and test count.
+- The "delegate to existing JSON handler via Python" pattern in Task 4 saved re-implementing the Sprint 7 three-record-write apparatus. It also surfaced the `transaction already begun` gotcha cleanly, with a one-line fix (fresh session for the lookup).
+- The Task 2 local code review caught the `dict.fromkeys` type-annotation tightening (M2) and the PDF-audit parking-lot question (M3) — both applied as part of this close-out commit. Catching them at code-review time meant they didn't ferment into Sprint 9+ technical debt.
+- TDD discipline held end-to-end. Coverage stayed at 100% through every task's final gate. The `reportlab` `pageCompression=0` lever for testability was a nice find — it eliminated the need for a PDF-parser test dep.
+- The flash-via-query-string pattern in Task 4 (`?flash=Shift+force-closed&flash_kind=info`) avoided introducing session-flash cookie state. Survives one redirect by design; the existing `_base.html` flash slot picked it up with zero template changes.
+
+**What slowed us down:**
+- **Task 0's close-out reported 100% coverage but actually shipped at 99.39%.** Task 1 spent ~30 minutes retroactively backfilling: the OIDC callback handler's four token-exchange failure branches (HTTPError, non-200 response, missing id_token, claim-parse failure) plus `_redirect_to_login`'s query-string branch plus the dashboard-handler post-await return were untested. Going forward: always trust the literal `--cov-fail-under=100` exit code; never paraphrase the coverage outcome from memory when writing a close-out summary.
+- **`python-multipart` wasn't flagged at Task 4 plan stage.** Plan decision D10 said "FastAPI's `Form(...)` parses it" without auditing the dep chain. Surfaced as a runtime error on the first integration test run; required pausing for user approval (`AskUserQuestion`). **Lesson: any future sprint touching HTML form-handling endpoints needs an explicit dep audit at plan stage, paralleling how `circuitbreaker` / `jinja2` / `reportlab` were each flagged.**
+- **Pre-existing Sprint 8a NetBox-timeout flake** in `tests/integration/test_rate_limit.py::test_429_after_exhausting_read_budget` recurred across every task's final full-suite run. The test pings `/api/v1/meta/sites` (which calls NetBox at the fake URL `netbox.example.com`); DNS-resolution timing makes the per-call latency vary, and three of those calls can push past whatever budget remained from the prior test's bucket. Passed on rerun every single time. Carry-forward as a Sprint 9+ stabilisation item.
+- Coverage backfill in Task 1 had to also paper over `app/main.py:89-91` (lifespan shutdown TimeoutError), `app/middleware/rate_limit.py:163` (UNLIMITED sentinel), and `app/services/auto_end_job.py:222->exit` (the while-check exit branch) — none of those were Task 1 regressions; they were latent gaps inherited from Sprint 7 / 8a that Task 0's 99.39% measurement had masked. Cleared as a side-effect of fixing the rule violation; called out in the Task 1 commit body.
+- IDE noise (wrong Python interpreter → constant false "module not found" / "attribute not found" / "Unexpected keyword argument" diagnostics) continued across every Task. Not a real problem; ignored every time and moved on.
+
+**Discrepancies between ToR / Architecture and what shipped:**
+- **`/web/qr/search` deferred** — ToR §4.4.2 lists it; Sprint 7 Task 2's `entity_type=qr&entity_id=...` audit filter partially covers the use case via `/web/audit/`. Dedicated `/web/qr/search` page can land in a future sprint when a real consumer asks for it. Recorded in the Sprint 8b plan's "Out of scope" section.
+- **`/web/users/` deferred** — needs a Keycloak admin client + `KEYCLOAK_ADMIN_CLIENT_*` env vars (Sprint 6 decision J deliberately avoided to limit attack surface). Significant new dep surface; deserves its own sprint.
+- **CSV endpoint path deviation** (Task 3 D1) — plan skeleton said `/api/v1/admin/audit.csv`; shipped as `/api/v1/admin/audit/csv` under the existing router prefix. Cleaner FastAPI routing without breaking the `{audit_id}` matcher. Documented in the Task 3 commit body + this entry.
+
+**Deliberately deferred (Sprint 9+):**
+- **PDF download audit row** — Task 2 decision 6 chose no audit row on `/api/v1/admin/batches/{id}/labels.pdf` (data is same as the audited JSON detail). For inventory traceability ("who printed labels for batch X at time Y"), this may matter. New parking-lot entry.
+- **CSRF token for `/web/*` form POSTs** — Task 4 decision 12 chose no token, relying on `SameSite=Lax` cookie + admin-shift gate + VPN-only deploy. If a future security review requires it, add a per-session CSRF token. New parking-lot entry.
+- **Cluster-wide rate-limit state** — carried from Sprint 8a; still in-process per-replica. Replace `_buckets` with Redis/Postgres when deployment goes multi-replica.
+- **Phase 2 partial-failure alerting** — carried from Sprint 3; depends on operational monitoring infra not yet in place.
+- **Idempotency-key TTL cleanup job** — pre-existing carry-over from Sprints 2–7, no consumer yet.
+- **`/web/qr/search` and `/web/users/`** — see Discrepancies above.
+
+### Files added in Sprint 8b (high-level)
+
+- `backend/app/web/auth.py` (Task 0) — `WebAdminUser` + cookie encode/decode + `require_web_admin` dep + typed exceptions
+- `backend/app/web/router.py` (Task 0; modified Tasks 1–4) — OIDC redirect flow + four `/web/*` page handlers + force-close shim
+- `backend/app/web/templates/{_base,_dashboard_placeholder,_admin_shift_needed,_not_found,dashboard}.html` (Task 0 + Task 1; `_dashboard_placeholder.html` deleted in Task 1; `_not_found.html` added in Task 2)
+- `backend/app/web/templates/{batches,audit,sessions}/{list,detail}.html` (Tasks 2, 3, 4)
+- `backend/app/web/static/admin.css` (Task 0; appended Tasks 1, 2, 3, 4)
+- `backend/app/domain/dashboard.py` (Task 1) — `DashboardSnapshot` frozen dataclass
+- `backend/app/db/repositories/dashboard.py` (Task 1) — `DashboardRepository.snapshot`
+- `backend/app/api/v1/admin/dashboard.py` (Task 1) — `GET /api/v1/admin/dashboard`
+- `backend/app/services/pdf_labels.py` (Task 2) — pure-function PDF renderer
+- `backend/tests/integration/web/test_oidc_flow.py` (Task 0)
+- `backend/tests/integration/web/test_dashboard_page.py` (Task 1)
+- `backend/tests/integration/web/test_batches_pages.py` (Task 2)
+- `backend/tests/integration/web/test_audit_pages.py` (Task 3)
+- `backend/tests/integration/web/test_sessions_pages.py` (Task 4)
+- `backend/tests/integration/test_dashboard_repository.py` (Task 1)
+- `backend/tests/unit/web/{__init__,test_auth,test_router}.py` (Task 0; `test_router.py` extended Tasks 1, 2, 3, 4)
+- `backend/tests/unit/api/v1/test_admin_dashboard.py` (Task 1)
+- `backend/tests/unit/api/v1/test_admin_batches_list_and_pdf.py` (Task 2)
+- `backend/tests/unit/api/v1/test_admin_audit_csv.py` (Task 3)
+- `backend/tests/unit/services/test_pdf_labels.py` (Task 2)
+
+### Files modified in Sprint 8b
+
+- `backend/pyproject.toml` — three new deps + mypy override for `reportlab.*`
+- `backend/uv.lock` — regenerated three times
+- `backend/.env.example` (Task 0) — three new `KEYCLOAK_WEB_CLIENT_*` + `SESSION_COOKIE_KEY` env vars documented
+- `backend/app/config.py` (Task 0) — three new Settings fields
+- `backend/app/main.py` (Task 0) — `/web/*` router mounted; `/static/*` `StaticFiles` mounted; `WebAdminAuthRequired` + `AdminShiftNeeded` exception handlers added
+- `backend/app/middleware/rate_limit.py` (Task 0) — `_UNLIMITED_PREFIXES = ("/web/", "/static/")` + classification check
+- `backend/app/api/v1/admin/batches.py` (Task 2) — `GET /api/v1/admin/batches/` list endpoint + `GET /api/v1/admin/batches/{id}/labels.pdf` PDF endpoint
+- `backend/app/api/v1/admin/audit.py` (Task 3) — `GET /api/v1/admin/audit/csv` streaming endpoint + audit-of-audits row write
+- `backend/app/db/repositories/qr_batch.py` (Task 2) — `query` paginated method
+- `backend/app/db/repositories/qr_code.py` (Task 2; M2 annotation in Task 5) — `count_by_status_for_batch` GROUP BY method + explicit `dict[QRStatus, int]` annotation
+- `backend/app/db/repositories/audit_log.py` (Task 3) — `get_by_id` method for the detail page
+- `backend/tests/conftest.py` — unchanged (Task 0 deliberately did NOT add the three new web env vars to `_APP_ENV_KEYS` wipe list; the two failure-path tests in `test_config.py` use their own `monkeypatch.delenv`)
+- `backend/tests/unit/test_config.py` (Task 0) — four new tests (defaults applied, missing client secret raises, missing cookie key raises, env override)
+- `backend/tests/unit/middleware/test_rate_limit.py` (Task 0 + Task 1) — six new parametrize cases for `/web/*` + `/static/*` UNLIMITED + `_limit_for_class` UNLIMITED-sentinel test
+- `backend/tests/unit/services/test_auto_end_job.py` (Task 1) — while-check-exit branch test
+- `backend/tests/integration/test_main_lifespan.py` (Task 1) — shutdown TimeoutError test
+- `backend/tests/integration/test_repositories.py` (Task 2) — new tests for `QRBatchRepository.query` + `QRCodeRepository.count_by_status_for_batch`
+- `backend/tests/integration/test_audit_log_repository.py` (Task 3) — new tests for `AuditLogRepository.get_by_id`
+- `docs/sprint-8b.md` — per-task detail not filled in inline this sprint (skeleton-only at plan stage); this work-log entry is the close-out artifact
+- `docs/parking-lot.md` — two new entries: PDF download audit row, CSRF token for `/web/*` forms
+- `CLAUDE.md` — Repository Status updated for Sprint 8b closure; `docs/sprint-8b.md` line flipped from "TBD" → "(delivered)"
+
+### How to run locally (close-of-sprint snapshot)
+
+Same shape as Sprint 8a. Sprint 8b adds three new required env vars (one with a default):
+
+```bash
+export KEYCLOAK_WEB_CLIENT_ID=dcinv-web          # optional, defaults to dcinv-web
+export KEYCLOAK_WEB_CLIENT_SECRET=<from-Keycloak>
+export SESSION_COOKIE_KEY=$(uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+```
+
+`SESSION_COOKIE_KEY` is a Fernet key (44-byte url-safe base64). Generate once per deployment and persist; rotating it invalidates all outstanding admin session cookies (users re-login on next request).
+
+To smoke-test the full admin web surface against a running stack:
+
+1. Open `http://localhost:8000/web/` in a browser. You'll be 302'd to Keycloak. Authenticate as an admin (role `dcinv-admin`).
+2. Land on `/web/` — if you have an active admin shift, you see the dashboard. Otherwise you see the "Open an admin shift" intermediate page; click Start.
+3. Navigate via the top nav: Dashboard, Batches, Audit, Sessions.
+4. Create a batch via `POST /api/v1/admin/batches/` (curl or the existing mobile path), then go to `/web/batches/` → click the row → "Download labels (PDF)".
+5. Go to `/web/audit/`, filter on `entity_type=qr`, click "Download CSV" to download a filtered export.
+6. Go to `/web/sessions/`, type a reason into another shift's force-close form, submit. See the green flash + the row's state change.

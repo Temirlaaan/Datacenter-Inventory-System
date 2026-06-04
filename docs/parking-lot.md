@@ -271,3 +271,71 @@ checks the description text — see
 `tests/unit/api/v1/test_admin_audit.py:test_get_audit_includes_session_id_semantic_note_in_openapi`.
 
 No further action required for this concern.
+
+---
+
+## PDF batch-label download — no audit row (Sprint 8b Task 2 decision 6, may revisit)
+
+`GET /api/v1/admin/batches/{id}/labels.pdf` (Sprint 8b Task 2) deliberately
+writes **no** `audit_log` row. Decision rationale at the time: the PDF
+contents are the same QR codes already exposed by the audited
+`GET /api/v1/admin/batches/{id}` JSON detail endpoint, and ToR §5.4.6
+covers sensitive reads — batch contents aren't in that class. The local
+code review of commit `3eb5a58` flagged it as a future-revisit candidate.
+
+**Why this might matter post-rollout:**
+
+- For physical-label inventory traceability ("who printed labels for
+  batch X at time Y"), an audit row would answer the question; without
+  one, only the upstream JSON detail call (if any) is traceable.
+- Regulatory or compliance reviews may require a per-download trail
+  even for data the admin already saw.
+
+**How to fix if revisited:** add an audit-of-audits row inside
+`get_batch_labels_pdf` in `app/api/v1/admin/batches.py` with
+`operation="batch.labels_pdf"`, `entity_type="batch"`, `entity_id=str(batch_id)`,
+`after_json={"label_count": len(codes)}`, `result=AuditResult.SUCCESS`. One
+focused commit; no schema change. Sprint 7 Task 2's `/admin/audit`
+endpoint will surface it via `entity_type=batch` filter.
+
+**Owner:** Sprint 9+ (pending operator feedback / compliance review).
+**Not a blocker for:** any current functionality; the PDF endpoint
+ships as-is.
+
+---
+
+## CSRF token for `/web/*` form POSTs (Sprint 8b Task 4 decision 12, deferred)
+
+`POST /web/sessions/{id}/force-close` (Sprint 8b Task 4) is the only
+state-changing HTML form endpoint shipped this sprint. **It carries no
+CSRF token.** Current defenses:
+
+- Session cookie is set with `samesite=lax` (Sprint 8b Task 0), which
+  blocks the cookie from being sent on third-party form submissions
+  to the backend.
+- The cookie-auth dep (`require_web_admin`) checks role + active shift;
+  a foreign-origin form post would arrive without the cookie and 302
+  to login.
+- Deployment is **VPN-only** (CLAUDE.md "What the System Is"); the
+  attack surface for cross-origin requests is bounded.
+
+**Why this might matter post-rollout:** if a future security review
+requires defense-in-depth beyond `SameSite=Lax`, or if the deploy
+posture loosens (e.g. browser-extension access, internal proxy that
+strips cookies), a per-session CSRF token becomes load-bearing.
+
+**How to fix if required:**
+
+- Mint a CSRF token at OIDC-callback time, store it in the encrypted
+  cookie payload alongside `sub`/`email`/`roles`/`exp`.
+- Render it as a hidden `<input type="hidden" name="_csrf_token">` in
+  every `<form method="post">` on the web admin surface (currently:
+  one form on `/web/sessions/`).
+- Validate it in the web POST handler before delegating to the JSON
+  handler. Mismatch → 403 + redirect to login.
+- Add `_csrf_token: str` to `WebAdminUser` (this is one of the few
+  fields that legitimately belongs in the cookie, since it's
+  cookie-scoped per session).
+
+**Owner:** Sprint 9+ (pending security review).
+**Not a blocker for:** Sprint 8b's force-close UX shipping.
