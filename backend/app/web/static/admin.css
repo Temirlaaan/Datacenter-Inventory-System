@@ -371,6 +371,74 @@ form button:hover { background: var(--color-accent-hover); }
     color: #92400e;
 }
 
+/* End-reason badges + inline force-close (Sprint 8b Task 4) -- */
+
+.end-reason-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: lowercase;
+    line-height: 1.6;
+}
+
+.end-reason-badge--manual {
+    background: #e0e7ff;
+    color: #3730a3;
+}
+
+.end-reason-badge--auto_timeout {
+    background: #f3f4f6;
+    color: #4b5563;
+}
+
+.end-reason-badge--forced {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.session-row--active {
+    background: rgba(34, 197, 94, 0.04);
+}
+
+.inline-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 320px;
+    margin: 0;
+}
+
+.inline-form textarea {
+    padding: 6px 8px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-family: inherit;
+    font-size: 12px;
+    resize: vertical;
+    min-height: 40px;
+}
+
+.inline-form button {
+    padding: 4px 10px;
+    font-size: 12px;
+    width: fit-content;
+}
+
+.filter-form__check {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--color-muted);
+}
+
+.filter-form__check input {
+    width: auto;
+}
+
 /* Footer ------------------------------------------------------ */
 
 .footer {

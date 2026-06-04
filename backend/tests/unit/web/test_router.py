@@ -35,12 +35,15 @@ from app.web.router import (
     _OIDC_NONCE_COOKIE,
     _OIDC_STATE_COOKIE,
     _redirect_to_login,
+    _sessions_filter_query_string,
     audit_detail,
     audit_list,
     batches_detail,
     batches_list,
     dashboard,
     oidc_callback,
+    sessions_list,
+    web_force_close_session,
 )
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
@@ -543,6 +546,324 @@ async def test_audit_detail_handler_returns_html_response_for_existing_row(
     body = bytes(response.body)
     assert b"DCQR-DET999" in body
     assert b"qr.retire" in body
+
+
+# ---------- _sessions_filter_query_string -----------------------------------
+
+
+def test_sessions_filter_query_string_includes_non_empty_from_and_to_values() -> None:
+    """Cover the True branches for ``from_`` and ``to`` in the
+    ``_sessions_filter_query_string`` helper. The integration tests pass
+    empty hidden form values so the True branches don't trigger there."""
+    qs = _sessions_filter_query_string(
+        user_keycloak_id=None,
+        from_="2026-06-01T00:00:00+00:00",
+        to="2026-06-30T23:59:59+00:00",
+        active_only=False,
+    )
+    assert "from=" in qs
+    assert "to=" in qs
+
+
+def test_sessions_filter_query_string_drops_all_empty_fields() -> None:
+    assert (
+        _sessions_filter_query_string(user_keycloak_id=None, from_=None, to=None, active_only=False)
+        == ""
+    )
+
+
+# ---------- sessions_list + web_force_close handlers: direct-await ----------
+
+
+async def test_sessions_list_handler_returns_html_response_with_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct-await covers the post-await ``return templates.TemplateResponse``
+    line in ``sessions_list`` (ASGI stack hides it from coverage tracing)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftSession
+
+    canned_shift = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        shift_start_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="canned-tablet",
+        end_reason=None,
+    )
+
+    class _FakeShiftRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(
+            self, *, filters: object, page: int, page_size: int
+        ) -> tuple[list[ShiftSession], bool]:
+            _ = filters, page, page_size
+            return [canned_shift], False
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeShiftRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/sessions/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    response = await sessions_list(
+        request=request,
+        page=1,
+        user_keycloak_id=None,
+        from_=datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC),
+        to=datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC),
+        active_only=False,
+        flash=None,
+        flash_kind=None,
+        user=user,
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"canned-tablet" in body
+    assert b"alice@example.com" in body
+
+
+async def test_web_force_close_session_returns_303_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct-await covers the post-await success-return line in
+    ``web_force_close_session`` (line 662 in router.py)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftEndReason, ShiftSession
+
+    admin_shift = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        shift_start_at=datetime(2026, 6, 1, 9, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="admin-tablet",
+        end_reason=None,
+    )
+
+    class _FakeShiftRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_active_for_user(self, _user_id: UUID) -> ShiftSession:
+            return admin_shift
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeShiftRepo)
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
+
+    async def _fake_force_close(**_kwargs: object) -> object:
+        return None  # success path: JSON handler returned without raising
+
+    monkeypatch.setattr("app.web.router.force_close_session", _fake_force_close)
+
+    # ShiftEndReason imported so the underlying handler's type contracts stay
+    # exercised in user-visible code; not directly used here.
+    _ = ShiftEndReason
+
+    target_id = uuid4()
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/web/sessions/{target_id}/force-close",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    response = await web_force_close_session(
+        request=request,
+        session_id=target_id,
+        reason="direct-await success path",
+        user_keycloak_id=None,
+        from_=None,
+        to=None,
+        active_only_value=None,
+        user=user,
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash=Shift+force-closed" in response.headers["location"]
+
+
+async def test_web_force_close_session_returns_303_with_error_flash_on_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the 404 branch + flash-error redirect (lines 656-660)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftSession
+
+    admin_shift = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        shift_start_at=datetime(2026, 6, 1, 9, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="admin-tablet",
+        end_reason=None,
+    )
+
+    class _FakeShiftRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_active_for_user(self, _user_id: UUID) -> ShiftSession:
+            return admin_shift
+
+    from contextlib import asynccontextmanager
+
+    from fastapi import HTTPException, status
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeShiftRepo)
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
+
+    async def _fake_force_close(**_kwargs: object) -> object:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    monkeypatch.setattr("app.web.router.force_close_session", _fake_force_close)
+
+    target_id = uuid4()
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/web/sessions/{target_id}/force-close",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    response = await web_force_close_session(
+        request=request,
+        session_id=target_id,
+        reason="targeting unknown shift",
+        user_keycloak_id=None,
+        from_=None,
+        to=None,
+        active_only_value=None,
+        user=user,
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash=Shift+not+found" in response.headers["location"]
+    assert "flash_kind=error" in response.headers["location"]
+
+
+async def test_web_force_close_session_reraises_non_404_http_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the ``raise`` branch when the JSON handler returns any
+    non-404 HTTPException (e.g. 500). The web layer must surface it
+    instead of swallowing into a generic flash."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftSession
+
+    admin_shift = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        shift_start_at=datetime(2026, 6, 1, 9, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="admin-tablet",
+        end_reason=None,
+    )
+
+    class _FakeShiftRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_active_for_user(self, _user_id: UUID) -> ShiftSession:
+            return admin_shift
+
+    from contextlib import asynccontextmanager
+
+    from fastapi import HTTPException
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeShiftRepo)
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
+
+    async def _fake_force_close(**_kwargs: object) -> object:
+        raise HTTPException(status_code=500, detail="boom")
+
+    monkeypatch.setattr("app.web.router.force_close_session", _fake_force_close)
+
+    target_id = uuid4()
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/web/sessions/{target_id}/force-close",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    with pytest.raises(HTTPException) as exc:
+        await web_force_close_session(
+            request=request,
+            session_id=target_id,
+            reason="will surface as 500",
+            user_keycloak_id=None,
+            from_=None,
+            to=None,
+            active_only_value=None,
+            user=user,
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 500
 
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.

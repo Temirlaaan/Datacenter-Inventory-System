@@ -1,0 +1,84 @@
+{% extends "_base.html" %}
+{% block title %}Sessions &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Shift sessions</h1>
+    <p>Active and historical shifts. Force-close ends an active shift with the operator's reason recorded for audit.</p>
+
+    <form class="filter-form" method="get" action="/web/sessions/">
+        <label>User Keycloak ID
+            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID">
+        </label>
+        <label>From
+            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}">
+        </label>
+        <label>To
+            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}">
+        </label>
+        <label class="filter-form__check">
+            <input type="checkbox" name="active_only" value="true" {% if filters.active_only %}checked{% endif %}>
+            Active only
+        </label>
+        <div class="filter-form__actions">
+            <button type="submit">Apply filters</button>
+        </div>
+    </form>
+
+    {% if rows %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>User</th>
+                <th>Tablet / workstation</th>
+                <th>State</th>
+                <th>Force-close</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in rows %}
+            <tr class="{% if s.is_active %}session-row--active{% endif %}">
+                <td>{{ s.shift_start_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                <td>{{ s.user_email }}<br><code>{{ s.user_keycloak_id }}</code></td>
+                <td><code>{{ s.tablet_id }}</code></td>
+                <td>
+                    {% if s.is_active %}
+                    <span class="result-badge result-badge--success">active</span>
+                    {% else %}
+                    <span class="end-reason-badge end-reason-badge--{{ s.end_reason.value }}">{{ s.end_reason.value }}</span>
+                    <br><small>{{ s.shift_end_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</small>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if s.is_active %}
+                    <form class="inline-form" method="post" action="/web/sessions/{{ s.id }}/force-close">
+                        <textarea name="reason" rows="2" maxlength="500" required placeholder="Reason for force-closing this shift…"></textarea>
+                        <input type="hidden" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}">
+                        <input type="hidden" name="from" value="{{ filters['from'] }}">
+                        <input type="hidden" name="to" value="{{ filters.to }}">
+                        {% if filters.active_only %}<input type="hidden" name="active_only" value="true">{% endif %}
+                        <button type="submit">Force-close</button>
+                    </form>
+                    {% else %}
+                    <span class="empty-state">—</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No shift sessions match these filters.</p>
+    {% endif %}
+
+    <nav class="pagination">
+        {% if has_prev %}
+        <a class="pagination__link" href="/web/sessions/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
+        {% endif %}
+        <span class="pagination__current">Page {{ page }}</span>
+        {% if has_more %}
+        <a class="pagination__link" href="/web/sessions/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+</section>
+{% endblock %}

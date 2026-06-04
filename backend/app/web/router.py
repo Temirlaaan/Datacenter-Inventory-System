@@ -23,19 +23,26 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin.sessions import ForceCloseRequest, force_close_session
+from app.auth.dependencies import AuthUser
 from app.config import get_settings
 from app.db.repositories.audit_log import AuditLogQueryFilters, AuditLogRepository
 from app.db.repositories.dashboard import DashboardRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
-from app.db.session import get_session
+from app.db.repositories.shift_session import (
+    ShiftSessionQueryFilters,
+    ShiftSessionRepository,
+)
+from app.db.session import get_session, get_sessionmaker
 from app.domain.audit import AuditResult
+from app.domain.shift_session import ShiftEndReason
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
     SESSION_COOKIE_NAME,
@@ -481,4 +488,177 @@ async def audit_detail(
         request,
         "audit/detail.html",
         {"user_email": user.email, "entry": entry},
+    )
+
+
+# ---------- /web/sessions/ list + inline force-close (Sprint 8b Task 4) -----
+
+
+_WEB_SESSIONS_PAGE_SIZE = 20
+
+
+def _sessions_filter_query_string(
+    *,
+    user_keycloak_id: str | None,
+    from_: str | None,
+    to: str | None,
+    active_only: bool,
+) -> str:
+    """Re-encode the four shift filters as a URL-encoded query string.
+
+    Pagination links + the post-force-close redirect carry the operator's
+    filter context so the page they land on isn't a silent widening of
+    scope. ``active_only`` is only included when True so the URL stays
+    clean for the default case.
+    """
+    params: dict[str, str] = {}
+    if user_keycloak_id:
+        params["user_keycloak_id"] = user_keycloak_id
+    if from_:
+        params["from"] = from_
+    if to:
+        params["to"] = to
+    if active_only:
+        params["active_only"] = "true"
+    return urlencode(params)
+
+
+@router.get("/sessions/", response_class=HTMLResponse)
+async def sessions_list(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    user_keycloak_id: UUID | None = Query(default=None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    active_only: bool = Query(default=False),
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Render the shift-sessions list with per-row force-close form.
+
+    Reuses ``ShiftSessionRepository.query`` directly (decision I — no HTTP
+    self-call). Decision 9: no audit row (operational read, mirrors
+    Sprint 7 decision 8 for ``GET /admin/sessions``). ``flash`` /
+    ``flash_kind`` query params are surfaced to the template so the
+    post-force-close redirect can show a confirmation banner.
+    """
+    filters = ShiftSessionQueryFilters(
+        user_keycloak_id=user_keycloak_id,
+        from_=from_,
+        to=to,
+        active_only=active_only,
+    )
+    rows, has_more = await ShiftSessionRepository(session).query(
+        filters=filters, page=page, page_size=_WEB_SESSIONS_PAGE_SIZE
+    )
+    filter_qs = _sessions_filter_query_string(
+        user_keycloak_id=str(user_keycloak_id) if user_keycloak_id else None,
+        from_=from_.isoformat() if from_ else None,
+        to=to.isoformat() if to else None,
+        active_only=active_only,
+    )
+    return templates.TemplateResponse(
+        request,
+        "sessions/list.html",
+        {
+            "user_email": user.email,
+            "rows": rows,
+            "page": page,
+            "has_more": has_more,
+            "has_prev": page > 1,
+            "filter_qs": filter_qs,
+            "filters": {
+                "user_keycloak_id": str(user_keycloak_id) if user_keycloak_id else "",
+                "from": from_.isoformat() if from_ else "",
+                "to": to.isoformat() if to else "",
+                "active_only": active_only,
+            },
+            "end_reason_values": [r.value for r in ShiftEndReason],
+            "flash": flash,
+            "flash_kind": flash_kind,
+        },
+    )
+
+
+def _sessions_flash_redirect(*, flash: str, flash_kind: str, filter_qs: str) -> RedirectResponse:
+    """302 back to ``/web/sessions/`` carrying a flash message + the filter
+    QS so the operator stays in their filtered view after a force-close."""
+    params = {"flash": flash, "flash_kind": flash_kind}
+    qs = urlencode(params)
+    target = f"/web/sessions/?{qs}"
+    if filter_qs:
+        target = f"{target}&{filter_qs}"
+    return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/sessions/{session_id}/force-close")
+async def web_force_close_session(
+    request: Request,
+    session_id: UUID,
+    reason: str = Form(min_length=1, max_length=500),
+    user_keycloak_id: str | None = Form(default=None),
+    from_: str | None = Form(default=None, alias="from"),
+    to: str | None = Form(default=None),
+    active_only_value: str | None = Form(default=None, alias="active_only"),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """End the target shift via the existing JSON handler, redirect to the
+    list with a flash banner.
+
+    Delegates to ``app.api.v1.admin.sessions.force_close_session`` so the
+    three-record-write apparatus stays in one place (decision 1). On
+    ``HTTPException(404)`` the user sees an error flash; idempotent
+    already-ended targets surface as the success flash (the JSON handler
+    returns 200 with a CONFLICT-result audit row for them).
+
+    Filter form fields are echoed back via hidden inputs so the redirect
+    can preserve the operator's filter context (decision 3).
+    """
+    # The underlying JSON handler audits with the caller's shift_session_id —
+    # look up the web admin's own active shift so the audit row attributes
+    # correctly. ``require_web_admin`` already guarantees an active shift
+    # exists (else AdminShiftNeeded was raised); this is just a second
+    # round-trip to grab its id (revised D2 — not stored on WebAdminUser).
+    #
+    # The lookup runs in a FRESH session so the FastAPI-injected ``session``
+    # stays in its no-transaction-active state — ``force_close_session``
+    # opens its own ``async with session.begin()`` and would error if we
+    # already auto-started a transaction by using ``session`` for the
+    # lookup ("A transaction is already begun on this Session").
+    _ = request  # FastAPI binds; unused inside this handler
+    async with get_sessionmaker()() as lookup_session:
+        active = await ShiftSessionRepository(lookup_session).get_active_for_user(user.sub)
+    # Class invariant from require_web_admin: active is not None here.
+    assert active is not None, "require_web_admin must have raised AdminShiftNeeded"
+    auth_user = AuthUser(
+        sub=str(user.sub),
+        email=user.email,
+        roles=tuple(user.roles),
+        session_id=None,
+        shift_session_id=active.id,
+    )
+    filter_qs = _sessions_filter_query_string(
+        user_keycloak_id=user_keycloak_id or None,
+        from_=from_ or None,
+        to=to or None,
+        active_only=bool(active_only_value),
+    )
+    try:
+        await force_close_session(
+            session_id=session_id,
+            body=ForceCloseRequest(reason=reason),
+            user=auth_user,
+            session=session,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            return _sessions_flash_redirect(
+                flash="Shift not found", flash_kind="error", filter_qs=filter_qs
+            )
+        raise
+    return _sessions_flash_redirect(
+        flash="Shift force-closed", flash_kind="info", filter_qs=filter_qs
     )

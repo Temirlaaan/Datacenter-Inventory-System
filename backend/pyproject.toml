@@ -27,6 +27,13 @@ dependencies = [
     # QR codes so no separate qrcode dependency is needed. Pre-approved
     # at Sprint 8b plan stage (decision F).
     "reportlab>=4.0,<5",
+    # Sprint 8b Task 4: FastAPI's documented standard for parsing
+    # ``application/x-www-form-urlencoded`` + ``multipart/form-data``
+    # request bodies — required by the ``Form(...)`` parser used by the
+    # ``/web/sessions/{id}/force-close`` HTML form handler. Pure-Python,
+    # ~5 KB, MIT. Approved at Sprint 8b Task 4 execution time (not
+    # flagged at plan stage — recorded in docs/work-log.md deviations).
+    "python-multipart>=0.0.20,<0.1",
 ]
 
 [dependency-groups]
