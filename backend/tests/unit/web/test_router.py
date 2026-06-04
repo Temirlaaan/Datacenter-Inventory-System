@@ -35,6 +35,8 @@ from app.web.router import (
     _OIDC_NONCE_COOKIE,
     _OIDC_STATE_COOKIE,
     _redirect_to_login,
+    batches_detail,
+    batches_list,
     dashboard,
     oidc_callback,
 )
@@ -267,6 +269,144 @@ async def test_dashboard_handler_returns_html_response_with_snapshot(
     assert b">22<" in body
     assert b">66<" in body
     assert b"alice@example.com" in body
+
+
+# ---------- batches list + detail handlers: direct-await returns ------------
+
+
+async def test_batches_list_handler_returns_html_response_with_seeded_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct-await covers the post-await ``return templates.TemplateResponse``
+    line in ``batches_list`` (ASGI stack hides it from coverage tracing,
+    same as Sprint 8b Task 1's dashboard handler)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QRBatch
+
+    canned_batch = QRBatch(
+        id=uuid4(),
+        created_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=42,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment="canned-batch",
+    )
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, *, page: int, page_size: int) -> tuple[list[QRBatch], bool]:
+            _ = page, page_size
+            return [canned_batch], False
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/batches/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    response = await batches_list(
+        request=request, page=1, user=user, session=object()  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"canned-batch" in body
+    assert b"alice@example.com" in body
+
+
+async def test_batches_detail_handler_returns_html_response_for_existing_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the happy-path return in ``batches_detail`` (post-await)."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    canned_batch = QRBatch(
+        id=batch_id,
+        created_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=1,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment="detail-canned",
+    )
+    canned_code = QR(
+        id="DCQR-CANNED01",
+        batch_id=batch_id,
+        status=QRStatus.FREE,
+        bound_to_device_id=None,
+        bound_at=None,
+        bound_by_email=None,
+        retired_at=None,
+        retired_reason=None,
+    )
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _id: object) -> QRBatch | None:
+            return canned_batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def find_by_batch_id(self, _id: object) -> list[QR]:
+            return [canned_code]
+
+        async def count_by_status_for_batch(self, _id: object) -> dict[QRStatus, int]:
+            return {QRStatus.FREE: 1, QRStatus.BOUND: 0, QRStatus.RETIRED: 0}
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": f"/web/batches/{batch_id}",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    response = await batches_detail(
+        request=request, batch_id=batch_id, user=user, session=object()  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"detail-canned" in body
+    assert b"DCQR-CANNED01" in body
+    assert b"Free: 1" in body
 
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.

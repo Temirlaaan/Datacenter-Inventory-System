@@ -20,8 +20,13 @@ dependencies = [
     "circuitbreaker>=2.0,<3",
     # Sprint 8b Task 0: Jinja2 templates for /web/* admin pages. FastAPI's
     # documented standard for HTML rendering. Pre-approved at Sprint 8b
-    # plan stage (decision J); reportlab will join in Task 2 (decision F).
+    # plan stage (decision J).
     "jinja2>=3.1,<4",
+    # Sprint 8b Task 2: PDF batch-label generation (Architecture §6).
+    # Pure-Python, no system deps; reportlab.graphics.barcode.qr renders
+    # QR codes so no separate qrcode dependency is needed. Pre-approved
+    # at Sprint 8b plan stage (decision F).
+    "reportlab>=4.0,<5",
 ]
 
 [dependency-groups]
@@ -128,6 +133,13 @@ ignore_missing_imports = true
 # circuitbreaker ships no type stubs and no PyPI types-* companion package;
 # treat as untyped (same call as `jose.*` / `yaml.*`).
 module = "circuitbreaker.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# reportlab ships no type stubs; the third-party `types-reportlab` is
+# incomplete. Treat the module as untyped rather than adding a brittle
+# stub dep (same call as `jose.*` / `yaml.*` / `circuitbreaker.*`).
+module = "reportlab.*"
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

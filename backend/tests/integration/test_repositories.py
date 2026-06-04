@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -152,6 +152,67 @@ async def test_qr_batch_repository_insert_with_duplicate_id_raises_repository_er
             await repo.insert(batch)
 
 
+async def test_qr_batch_repository_query_returns_empty_on_empty_table() -> None:
+    async with get_sessionmaker()() as session:
+        rows, has_more = await QRBatchRepository(session).query(page=1, page_size=20)
+    assert rows == []
+    assert has_more is False
+
+
+async def test_qr_batch_repository_query_orders_newest_first() -> None:
+    older = _batch()
+    newer = _batch()
+    older_ts = datetime(2026, 5, 1, 0, 0, 0, tzinfo=UTC)
+    newer_ts = datetime(2026, 5, 10, 0, 0, 0, tzinfo=UTC)
+    async with get_sessionmaker()() as session:
+        repo = QRBatchRepository(session)
+        # Insert in reverse-chronological insertion order so the test catches
+        # any implicit "ORDER BY inserted-position" assumption.
+        await repo.insert(_batch(batch_id=newer.id))
+        await repo.insert(_batch(batch_id=older.id))
+        await session.execute(
+            text("UPDATE qr_batches SET created_at = :ts WHERE id = :id"),
+            [
+                {"ts": newer_ts, "id": newer.id},
+                {"ts": older_ts, "id": older.id},
+            ],
+        )
+        await session.commit()
+
+        rows, _has_more = await repo.query(page=1, page_size=20)
+    assert [r.id for r in rows] == [newer.id, older.id]
+
+
+async def test_qr_batch_repository_query_paginates_with_has_more() -> None:
+    """5 rows, page_size=2 → page 1 (2, has_more=True), page 2 (2, has_more=True),
+    page 3 (1, has_more=False). Same ``LIMIT page_size + 1`` shape as the audit
+    repo's query method."""
+    batches = [_batch() for _ in range(5)]
+    base_ts = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    async with get_sessionmaker()() as session:
+        repo = QRBatchRepository(session)
+        for b in batches:
+            await repo.insert(b)
+        # Distinct timestamps so the newest-first ordering is deterministic.
+        for i, b in enumerate(batches):
+            await session.execute(
+                text("UPDATE qr_batches SET created_at = :ts WHERE id = :id"),
+                {"ts": base_ts + timedelta(minutes=i), "id": b.id},
+            )
+        await session.commit()
+
+        page1_rows, page1_more = await repo.query(page=1, page_size=2)
+        page2_rows, page2_more = await repo.query(page=2, page_size=2)
+        page3_rows, page3_more = await repo.query(page=3, page_size=2)
+
+    assert len(page1_rows) == 2 and page1_more is True
+    assert len(page2_rows) == 2 and page2_more is True
+    assert len(page3_rows) == 1 and page3_more is False
+    # Across the three pages, every row appears exactly once.
+    seen = {r.id for r in page1_rows + page2_rows + page3_rows}
+    assert seen == {b.id for b in batches}
+
+
 # === QRCodeRepository =========================================================
 
 
@@ -215,6 +276,73 @@ async def test_qr_code_repository_exists_returns_true_for_known_id() -> None:
 async def test_qr_code_repository_exists_returns_false_for_unknown_id() -> None:
     async with get_sessionmaker()() as session:
         assert await QRCodeRepository(session).exists("DCQR-ZZZZZZZZ") is False
+
+
+async def test_qr_code_repository_count_by_status_for_batch_returns_per_status_counts() -> None:
+    """Mixed batch: 3 free + 2 bound + 1 retired → counts split correctly.
+    Bound codes need distinct ``bound_to_device_id`` values because of the
+    ``qr_one_per_device`` partial unique index."""
+    batch = _batch()
+    codes: list[QR] = [_free_qr(f"DCQR-F{i:07d}", batch.id) for i in range(3)]
+    for i in range(2):
+        codes.append(
+            QR(
+                id=f"DCQR-B{i:07d}",
+                batch_id=batch.id,
+                status=QRStatus.BOUND,
+                bound_to_device_id=2000 + i,
+                bound_at=_NOW,
+                bound_by_email="alice@example.com",
+                retired_at=None,
+                retired_reason=None,
+            )
+        )
+    codes.append(
+        QR(
+            id="DCQR-R0000000",
+            batch_id=batch.id,
+            status=QRStatus.RETIRED,
+            bound_to_device_id=None,
+            bound_at=None,
+            bound_by_email=None,
+            retired_at=_NOW,
+            retired_reason="lost",
+        )
+    )
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert(codes)
+        await session.commit()
+
+        counts = await QRCodeRepository(session).count_by_status_for_batch(batch.id)
+    assert counts == {QRStatus.FREE: 3, QRStatus.BOUND: 2, QRStatus.RETIRED: 1}
+
+
+async def test_qr_code_repository_count_by_status_for_batch_returns_zeros_for_unknown_batch() -> (
+    None
+):
+    """Unknown batch id → all three statuses present with zero counts (no
+    exception, no 404). Caller decides whether the batch exists."""
+    async with get_sessionmaker()() as session:
+        counts = await QRCodeRepository(session).count_by_status_for_batch(uuid4())
+    assert counts == {QRStatus.FREE: 0, QRStatus.BOUND: 0, QRStatus.RETIRED: 0}
+
+
+async def test_qr_code_repository_count_by_status_for_batch_ignores_other_batches() -> None:
+    """Codes in another batch must NOT leak into this batch's counts."""
+    batch_a = _batch()
+    batch_b = _batch()
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch_a)
+        await QRBatchRepository(session).insert(batch_b)
+        await QRCodeRepository(session).bulk_insert(
+            [_free_qr(f"DCQR-A{i:07d}", batch_a.id) for i in range(3)]
+            + [_free_qr(f"DCQR-B{i:07d}", batch_b.id) for i in range(7)]
+        )
+        await session.commit()
+
+        counts_a = await QRCodeRepository(session).count_by_status_for_batch(batch_a.id)
+    assert counts_a[QRStatus.FREE] == 3
 
 
 async def test_qr_code_repository_bulk_insert_empty_list_is_noop() -> None:

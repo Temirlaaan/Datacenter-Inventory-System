@@ -1,0 +1,9 @@
+{% extends "_base.html" %}
+{% block title %}Not found &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Not found</h1>
+    <p>The requested resource was not found: <code>{{ resource }}</code>.</p>
+    <p><a href="/web/">Back to dashboard</a></p>
+</section>
+{% endblock %}

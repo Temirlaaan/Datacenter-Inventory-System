@@ -11,10 +11,11 @@ returns the original response without generating a second batch.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,7 @@ from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session
 from app.domain.qr import QR, QRBatch, QRStatus
 from app.services.idempotency import IdempotencyKeyConflict, with_idempotency
+from app.services.pdf_labels import render_batch_labels_pdf
 from app.services.qr.generation import GenerateBatchRequest, QRGenerationService
 
 router = APIRouter()
@@ -64,6 +66,37 @@ class BatchDetailsResponse(BaseModel):
     intended_rack_id: int | None
     comment: str | None
     codes: list[QRCodeDetail]
+
+
+class BatchSummary(BaseModel):
+    """A single row of ``GET /api/v1/admin/batches/`` — metadata only,
+    without the per-batch QR list. The detail endpoint returns the full
+    list when the admin clicks through."""
+
+    batch_id: UUID
+    created_at: datetime
+    created_by_email: str
+    count: int
+    comment: str | None = None
+
+
+class BatchListResponse(BaseModel):
+    """Envelope returned by ``GET /api/v1/admin/batches/``."""
+
+    results: list[BatchSummary]
+    page: int
+    page_size: int
+    has_more: bool
+
+
+def _summary(batch: QRBatch) -> BatchSummary:
+    return BatchSummary(
+        batch_id=batch.id,
+        created_at=batch.created_at,
+        created_by_email=batch.created_by_email,
+        count=batch.count,
+        comment=batch.comment,
+    )
 
 
 def _batch_created_body(batch: QRBatch, codes: list[QR]) -> dict[str, object]:
@@ -112,6 +145,56 @@ async def create_batch(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Idempotency-Key reused with a different request payload",
         ) from exc
+
+
+@router.get("/", response_model=BatchListResponse)
+async def list_batches(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
+    session: AsyncSession = Depends(get_session),
+) -> BatchListResponse:
+    """Page through ``qr_batches`` newest-first. No audit row (operational
+    read, parallels ``/admin/sessions`` — Sprint 7 decision 8)."""
+    _ = user  # gate side-effect only
+    rows, has_more = await QRBatchRepository(session).query(page=page, page_size=page_size)
+    return BatchListResponse(
+        results=[_summary(b) for b in rows],
+        page=page,
+        page_size=page_size,
+        has_more=has_more,
+    )
+
+
+@router.get(
+    "/{batch_id}/labels.pdf",
+    responses={200: {"content": {"application/pdf": {}}, "description": "PDF batch labels"}},
+)
+async def get_batch_labels_pdf(
+    batch_id: UUID,
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """A4-landscape PDF with the batch's QR codes laid out 32 per page.
+
+    No audit row: the contents are the same as the JSON detail endpoint
+    (admin already saw the codes), and ToR §5.4.6 covers sensitive reads
+    only — batch contents aren't in that class.
+
+    reportlab is synchronous; the render runs in a worker thread via
+    ``asyncio.to_thread`` so the event loop stays responsive on large
+    batches (decision 11)."""
+    _ = user
+    batch = await QRBatchRepository(session).get_by_id(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="batch not found")
+    codes = await QRCodeRepository(session).find_by_batch_id(batch_id)
+    pdf_bytes = await asyncio.to_thread(render_batch_labels_pdf, batch=batch, codes=codes)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="batch-{batch_id}.pdf"'},
+    )
 
 
 @router.get("/{batch_id}", response_model=BatchDetailsResponse)

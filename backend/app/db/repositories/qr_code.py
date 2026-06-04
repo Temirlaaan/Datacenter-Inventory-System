@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,6 +83,26 @@ class QRCodeRepository:
         )
         model = (await self.session.execute(stmt)).scalar_one_or_none()
         return _to_domain(model) if model is not None else None
+
+    async def count_by_status_for_batch(self, batch_id: UUID) -> dict[QRStatus, int]:
+        """Return a ``{QRStatus -> count}`` dict for one batch via a single
+        GROUP BY query.
+
+        Missing statuses are filled with zero so the caller can render all
+        three buckets uniformly without per-status branching. Unknown
+        ``batch_id`` returns all-zeros (no exception, no 404 — caller
+        decides whether the batch even exists).
+        """
+        stmt = (
+            select(QRCodeModel.status, func.count())
+            .where(QRCodeModel.batch_id == batch_id)
+            .group_by(QRCodeModel.status)
+        )
+        result = await self.session.execute(stmt)
+        counts = dict.fromkeys(QRStatus, 0)
+        for status_value, count in result.all():
+            counts[status_value] = count
+        return counts
 
     async def exists(self, qr_id: str) -> bool:
         stmt = select(QRCodeModel.id).where(QRCodeModel.id == qr_id).limit(1)

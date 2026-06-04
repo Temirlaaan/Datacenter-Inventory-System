@@ -1,0 +1,57 @@
+{% extends "_base.html" %}
+{% block title %}Batch {{ batch.id }} &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Batch {{ batch.id }}</h1>
+
+    <dl class="kv">
+        <dt>Created at</dt><dd>{{ batch.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</dd>
+        <dt>Created by</dt><dd>{{ batch.created_by_email }}</dd>
+        <dt>Count</dt><dd>{{ batch.count }}</dd>
+        <dt>Intended site / location / rack</dt>
+        <dd>{{ batch.intended_site_id or "—" }} / {{ batch.intended_location_id or "—" }} / {{ batch.intended_rack_id or "—" }}</dd>
+        {% if batch.comment %}
+        <dt>Comment</dt><dd>{{ batch.comment }}</dd>
+        {% endif %}
+    </dl>
+
+    <div class="status-summary">
+        <span class="status-badge status-badge--free">Free: {{ status_counts.free }}</span>
+        <span class="status-badge status-badge--bound">Bound: {{ status_counts.bound }}</span>
+        <span class="status-badge status-badge--retired">Retired: {{ status_counts.retired }}</span>
+    </div>
+
+    <p>
+        <a class="download-btn" href="/api/v1/admin/batches/{{ batch.id }}/labels.pdf">
+            Download labels (PDF)
+        </a>
+    </p>
+
+    {% if codes %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>QR id</th>
+                <th>Status</th>
+                <th>Bound device</th>
+                <th>Bound at</th>
+                <th>Retired at</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in codes %}
+            <tr>
+                <td><code>{{ c.id }}</code></td>
+                <td><span class="status-badge status-badge--{{ c.status.value }}">{{ c.status.value }}</span></td>
+                <td>{{ c.bound_to_device_id or "" }}</td>
+                <td>{{ c.bound_at.strftime("%Y-%m-%d %H:%M") if c.bound_at else "" }}</td>
+                <td>{{ c.retired_at.strftime("%Y-%m-%d %H:%M") if c.retired_at else "" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">This batch has no codes.</p>
+    {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "_base.html" %}
+{% block title %}Batches &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Batches</h1>
+    <p>Newest first. Click a row to see its codes + download printable labels.</p>
+
+    {% if batches %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Created at</th>
+                <th>Count</th>
+                <th>Created by</th>
+                <th>Comment</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for b in batches %}
+            <tr>
+                <td><a href="/web/batches/{{ b.id }}">{{ b.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</a></td>
+                <td>{{ b.count }}</td>
+                <td>{{ b.created_by_email }}</td>
+                <td>{{ b.comment or "" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No batches yet.</p>
+    {% endif %}
+
+    <nav class="pagination">
+        {% if has_prev %}
+        <a class="pagination__link" href="/web/batches/?page={{ page - 1 }}">&laquo; Prev</a>
+        {% endif %}
+        <span class="pagination__current">Page {{ page }}</span>
+        {% if has_more %}
+        <a class="pagination__link" href="/web/batches/?page={{ page + 1 }}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+</section>
+{% endblock %}

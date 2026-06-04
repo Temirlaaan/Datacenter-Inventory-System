@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +42,25 @@ class QRBatchRepository:
     async def get_by_id(self, batch_id: UUID) -> QRBatch | None:
         model = await self.session.get(QRBatchModel, batch_id)
         return _to_domain(model) if model is not None else None
+
+    async def query(self, *, page: int, page_size: int) -> tuple[list[QRBatch], bool]:
+        """Page through ``qr_batches`` newest-first.
+
+        Returns ``(rows, has_more)``. ``has_more`` is computed via
+        ``LIMIT page_size + 1`` so there's no COUNT(*) round-trip — same
+        shape as ``AuditLogRepository.query`` / ``ShiftSessionRepository.query``.
+        """
+        offset = (page - 1) * page_size
+        stmt = (
+            select(QRBatchModel)
+            .order_by(QRBatchModel.created_at.desc(), QRBatchModel.id)
+            .offset(offset)
+            .limit(page_size + 1)
+        )
+        result = await self.session.execute(stmt)
+        models = list(result.scalars())
+        has_more = len(models) > page_size
+        return [_to_domain(m) for m in models[:page_size]], has_more
 
     async def insert(self, batch: QRBatch) -> None:
         model = QRBatchModel(

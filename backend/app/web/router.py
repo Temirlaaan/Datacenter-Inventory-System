@@ -19,10 +19,11 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
@@ -30,6 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.repositories.dashboard import DashboardRepository
+from app.db.repositories.qr_batch import QRBatchRepository
+from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
@@ -275,5 +278,70 @@ async def dashboard(
         {
             "user_email": user.email,
             "snapshot": snap,
+        },
+    )
+
+
+# ---------- /web/batches/ list + detail (Sprint 8b Task 2) --------------------
+
+
+_WEB_BATCHES_PAGE_SIZE = 20
+
+
+@router.get("/batches/", response_class=HTMLResponse)
+async def batches_list(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Render the paginated batch list. Calls ``QRBatchRepository.query``
+    directly (decision I — no HTTP self-call). Newest-first."""
+    rows, has_more = await QRBatchRepository(session).query(
+        page=page, page_size=_WEB_BATCHES_PAGE_SIZE
+    )
+    return templates.TemplateResponse(
+        request,
+        "batches/list.html",
+        {
+            "user_email": user.email,
+            "batches": rows,
+            "page": page,
+            "has_more": has_more,
+            "has_prev": page > 1,
+        },
+    )
+
+
+@router.get("/batches/{batch_id}", response_class=HTMLResponse)
+async def batches_detail(
+    request: Request,
+    batch_id: UUID,
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Render one batch's detail page: metadata + status counts + QR table +
+    Download Labels link. Unknown ``batch_id`` → 404 + custom HTML page
+    (decision 9 — web flows render HTML, not JSON)."""
+    batch_repo = QRBatchRepository(session)
+    code_repo = QRCodeRepository(session)
+    batch = await batch_repo.get_by_id(batch_id)
+    if batch is None:
+        return templates.TemplateResponse(
+            request,
+            "_not_found.html",
+            {"user_email": user.email, "resource": f"batch {batch_id}"},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    codes = await code_repo.find_by_batch_id(batch_id)
+    status_counts = await code_repo.count_by_status_for_batch(batch_id)
+    return templates.TemplateResponse(
+        request,
+        "batches/detail.html",
+        {
+            "user_email": user.email,
+            "batch": batch,
+            "codes": codes,
+            "status_counts": status_counts,
         },
     )
