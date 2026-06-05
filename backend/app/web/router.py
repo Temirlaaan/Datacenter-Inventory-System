@@ -145,7 +145,8 @@ async def oidc_callback(
             "web_oidc_callback_state_mismatch",
             has_code=bool(code),
             has_state=bool(state),
-            state_match=state == expected_state if expected_state else False,
+            has_expected_state=expected_state is not None,
+            state_match=(expected_state is not None and state == expected_state),
         )
         return HTMLResponse(
             "OIDC callback rejected: state mismatch (likely CSRF or expired login).",
