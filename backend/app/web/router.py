@@ -141,11 +141,25 @@ async def oidc_callback(
     expected_nonce = request.cookies.get(_OIDC_NONCE_COOKIE)
     next_path = request.cookies.get(_OIDC_NEXT_COOKIE, "/web/")
     if not code or not state or expected_state is None or state != expected_state:
+        # Diagnostic fields split out so production logs distinguish:
+        #  - has_state_query=False → Keycloak didn't echo state back (rare)
+        #  - has_state_cookie=False → /web/login Set-Cookie never reached the
+        #    browser OR browser dropped it OR it wasn't sent on the callback
+        #    (Secure flag w/ http upstream, Path mismatch, expired flow, etc.)
+        #  - state_match=False with both present → cross-tab race or stale
+        #    callback URL.
+        # ``is_https`` confirms uvicorn's --proxy-headers picked up
+        # X-Forwarded-Proto from the reverse proxy (drives both _keycloak_redirect_uri
+        # AND the Secure-cookie flow). ``cookie_names_present`` shows whether ANY
+        # cookies survived the round-trip — empty list = full cookie drop.
         logger.warning(
             "web_oidc_callback_state_mismatch",
             has_code=bool(code),
-            has_state=bool(state),
-            state_match=state == expected_state if expected_state else False,
+            has_state_query=bool(state),
+            has_state_cookie=expected_state is not None,
+            state_match=(expected_state is not None and state == expected_state),
+            is_https=request.url.scheme == "https",
+            cookie_names_present=sorted(request.cookies.keys()),
         )
         return HTMLResponse(
             "OIDC callback rejected: state mismatch (likely CSRF or expired login).",
