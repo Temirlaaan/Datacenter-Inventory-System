@@ -14,10 +14,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-dcinv}
       POSTGRES_USER: ${POSTGRES_USER:-dcinv}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    ports:
-      - "5432:5432"
+        # ports:
+        # - "5432:5432"
     volumes:
       - dcinv-db-data:/var/lib/postgresql/data
+    networks:
+      - default
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dcinv} -d ${POSTGRES_DB:-dcinv}"]
       interval: 2s
@@ -55,6 +57,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dcinv}:${POSTGRES_PASSWORD}@dcinv-db:5432/${POSTGRES_DB:-dcinv}
     ports:
       - "8000:8000"
+    networks:
+      - default
+      - proxy-network
     healthcheck:
       # /health returns 503 if any downstream is unreachable. NetBox/Keycloak must be
       # reachable from inside this container for the stack to settle into "healthy".
@@ -66,3 +71,11 @@ services:
 
 volumes:
   dcinv-db-data:
+    name: dcinv-db-data
+
+networks:
+  default:
+    driver: bridge
+  proxy-network:
+    external: true
+    name: proxy-network
