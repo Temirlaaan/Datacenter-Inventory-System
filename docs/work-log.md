@@ -1078,3 +1078,38 @@ First-deployment feedback: users opening `https://qr-dc.t-cloud.kz/` saw FastAPI
 Also added `/` to `_UNLIMITED_PATHS` in [backend/app/middleware/rate_limit.py](../backend/app/middleware/rate_limit.py) so an upstream LB liveness probe pointed at `/` (we saw this from `10.121.43.31:0` in the first-deploy logs) cannot exhaust the per-user READ bucket. Semantically correct: bare `/` is pure redirect plumbing with no business logic.
 
 Tests: new [tests/unit/test_main.py](../backend/tests/unit/test_main.py) with one direct-await test, plus a new row in the parametrized `_classify_request` table. Unit suite: 551 → 553 passing.
+
+### 2026-06-05 — fix(web): OIDC state-mismatch log → actionable fields
+
+First-login attempt in production hit `state_mismatch` even in incognito (no stale-cookie carryover possible). The existing log collapsed three distinct failure modes into one boolean `state_match=False`, so we couldn't tell which one fired. Root cause turned out to be Keycloak client-scopes misconfig on the IdP side (unrelated to our code), discovered out-of-band — but the diagnostic log improvement landed anyway since it's load-bearing for the next time this misfires.
+
+**Fix.** Split [backend/app/web/router.py](../backend/app/web/router.py)'s `web_oidc_callback_state_mismatch` log into five actionable fields:
+- `has_state_query` — did Keycloak echo state back?
+- `has_state_cookie` — did `__dcinv_oidc_state` reach the callback?
+- `state_match` — both present, equal?
+- `is_https` — does the server see this as HTTPS? (checks `--proxy-headers` + nginx `X-Forwarded-Proto`)
+- `cookie_names_present` — sorted list of all cookies that DID arrive (empty list = full cookie drop)
+
+No behaviour change. Diagnostic-only.
+
+### 2026-06-05 — feat(web): admin-action forms (create batch + retire QR + decommission device)
+
+User feedback after first successful login: "I can see batches and audit, but I don't know how to issue QRs or control them." The Sprint 8b admin surface was read-only + force-close-only; the curl-only admin workflows (create batch, retire QR, decommission device) needed UI to close the daily-use loop.
+
+**Added** in [backend/app/web/router.py](../backend/app/web/router.py):
+- `GET /web/batches/new` + `POST /web/batches/` — full create-batch form (count, comment, optional intended site/location/rack). Delegates to `QRGenerationService.generate_batch` directly (decision I — same Python-call pattern as `web_force_close_session`), 303 to `/web/batches/{id}` with flash.
+- `POST /web/qr/{qr_id}/retire` — inline FREE-only retire button on batch detail rows. Maps `QRNotFoundError`, `QRStateConflictError(RETIRED)` (idempotent info flash), `QRStateConflictError(BOUND)` + `MissingVersionError` (error flash pointing at decommission flow), and the rollback variants to distinct flash banners.
+- `GET /web/devices/decommission` + `POST /web/devices/decommission` — device-id + reason form. Handler fetches the device's current `last_updated` itself, passes it as the OCC version, calls `DeviceDecommissionService.decommission`. Error surface: 404, `WriteConflictError`, `QRStateConflictError` on the bound QR, plus the rollback / inconsistency exceptions — each mapped to its own flash banner.
+
+Helper `_build_auth_user_for_admin_action` factors the cookie-decode + active-shift-lookup + `AuthUser` construction that was previously duplicated inline in `web_force_close_session`. Five new routes total.
+
+**Templates** added: [batches/new.html](../backend/app/web/templates/batches/new.html), [devices/decommission.html](../backend/app/web/templates/devices/decommission.html). Modified: [dashboard.html](../backend/app/web/templates/dashboard.html) (new `quick-actions` row with two CTAs), [batches/list.html](../backend/app/web/templates/batches/list.html) (`+ New batch` CTA + flash banner), [batches/detail.html](../backend/app/web/templates/batches/detail.html) (extra column with inline Retire form on FREE rows). CSS: one new `.quick-actions` flex rule in [admin.css](../backend/app/web/static/admin.css).
+
+**Tests:** 12 new direct-await cases in [tests/unit/web/test_router.py](../backend/tests/unit/web/test_router.py) covering create-batch happy + comment-stripping, all five retire-QR error branches, decommission happy + 404 + write-conflict, and template-render coverage for both new GET forms. Unit suite: 553 → 565 passing.
+
+**Workflow now closed entirely in the browser:**
+1. Dashboard → "+ New QR batch" → form → 303 to `/web/batches/{id}` → "Download labels (PDF)" → print.
+2. Batch detail → Retire button next to any FREE code → 303 with flash.
+3. Dashboard → "Decommission device" → form → 303 with flash. QR-first ordering still handled in the underlying service; OCC version fetched server-side so the admin only types device id + reason.
+
+**Still deferred** (parking lot unchanged otherwise): CSRF for `/web/*` POSTs; `/web/qr/search` (lookup by id); `/web/users/` (Keycloak admin client). BOUND→RETIRED via the dedicated retire button is intentionally NOT supported — the device decommission flow does it correctly with proper OCC, and the retire button is for FREE codes only.

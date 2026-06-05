@@ -43,6 +43,24 @@ from app.db.repositories.shift_session import (
 from app.db.session import get_session, get_sessionmaker
 from app.domain.audit import AuditResult
 from app.domain.shift_session import ShiftEndReason
+from app.netbox.client import get_netbox_client
+from app.netbox.errors import NetBoxNotFound
+from app.services.device import DeviceService
+from app.services.device_decommission import (
+    DeviceDecommissionInconsistencyError,
+    DeviceDecommissionRolledBackError,
+    DeviceDecommissionService,
+)
+from app.services.netbox_write import NetBoxWriteService, WriteConflictError
+from app.services.qr.generation import GenerateBatchRequest, QRGenerationService
+from app.services.qr.lifecycle import (
+    MissingVersionError,
+    QRLifecycleService,
+    QRNotFoundError,
+    QRRetireInconsistencyError,
+    QRRetireRolledBackError,
+    QRStateConflictError,
+)
 from app.services.shift_session import SessionAlreadyActive, ShiftSessionService
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
@@ -320,11 +338,18 @@ _WEB_BATCHES_PAGE_SIZE = 20
 async def batches_list(
     request: Request,
     page: int = Query(default=1, ge=1),
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     """Render the paginated batch list. Calls ``QRBatchRepository.query``
-    directly (decision I — no HTTP self-call). Newest-first."""
+    directly (decision I — no HTTP self-call). Newest-first.
+
+    ``flash`` / ``flash_kind`` query params are surfaced to the template so
+    the post-retire-QR 303 redirect from ``web_qr_retire`` can show a
+    confirmation/error banner (same pattern as ``/web/sessions/``).
+    """
     rows, has_more = await QRBatchRepository(session).query(
         page=page, page_size=_WEB_BATCHES_PAGE_SIZE
     )
@@ -337,6 +362,8 @@ async def batches_list(
             "page": page,
             "has_more": has_more,
             "has_prev": page > 1,
+            "flash": flash,
+            "flash_kind": flash_kind,
         },
     )
 
@@ -736,3 +763,265 @@ async def web_admin_shift_start(
     except SessionAlreadyActive:
         pass
     return RedirectResponse(url="/web/", status_code=status.HTTP_303_SEE_OTHER)
+
+
+# ---------- Auth shim: web cookie → AuthUser for JSON-layer services --------
+
+
+async def _build_auth_user_for_admin_action(user: WebAdminUser) -> AuthUser:
+    """Look up the admin's active shift_session_id + build an ``AuthUser``.
+
+    Same pattern as ``web_force_close_session``'s shim block. Required so the
+    JSON-layer services (QRGenerationService, QRLifecycleService,
+    DeviceDecommissionService) can write audit rows attributed to the admin's
+    current shift. ``require_web_admin`` already guarantees an active shift
+    exists, so the lookup either returns it or trips the asserted invariant.
+
+    Uses a FRESH session so the FastAPI-injected per-request session stays in
+    its no-transaction-active state — the services open their own
+    ``async with session.begin()`` blocks.
+    """
+    async with get_sessionmaker()() as lookup_session:
+        active = await ShiftSessionRepository(lookup_session).get_active_for_user(user.sub)
+    assert active is not None, "require_web_admin must have raised AdminShiftNeeded"
+    return AuthUser(
+        sub=str(user.sub),
+        email=user.email,
+        roles=tuple(user.roles),
+        session_id=None,
+        shift_session_id=active.id,
+    )
+
+
+# ---------- /web/batches/new + POST /web/batches/ — create batch form -------
+
+
+@router.get("/batches/new", response_class=HTMLResponse)
+async def batches_new_form(
+    request: Request,
+    user: WebAdminUser = Depends(require_web_admin),
+) -> HTMLResponse:
+    """Render the "create new batch" form. POST target is ``/web/batches/``."""
+    return templates.TemplateResponse(
+        request,
+        "batches/new.html",
+        {"user_email": user.email},
+    )
+
+
+@router.post("/batches/")
+async def web_batches_create(
+    count: int = Form(ge=1, le=500),
+    comment: str = Form(default="", max_length=200),
+    intended_site_id: int | None = Form(default=None, ge=1),
+    intended_location_id: int | None = Form(default=None, ge=1),
+    intended_rack_id: int | None = Form(default=None, ge=1),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Create a QR batch from the web form. Delegates to ``QRGenerationService``
+    directly so the three-record-write apparatus (batch row + N FREE codes +
+    one ``qr.generate_batch`` audit row) stays in one place.
+
+    No idempotency key — the form is one-shot from a browser; double-submit
+    of the same form would create two batches, which is acceptable for an
+    interactive flow (the admin sees the redirect and won't double-submit).
+    303 to the new batch's detail page with a flash banner.
+    """
+    auth_user = await _build_auth_user_for_admin_action(user)
+    service = QRGenerationService(
+        session,
+        QRBatchRepository(session),
+        QRCodeRepository(session),
+        AuditLogRepository(session),
+    )
+    payload = GenerateBatchRequest(
+        count=count,
+        intended_site_id=intended_site_id,
+        intended_location_id=intended_location_id,
+        intended_rack_id=intended_rack_id,
+        comment=comment.strip() or None,
+    )
+    batch = await service.generate_batch(payload, auth_user)
+    await session.commit()
+    flash = f"Batch created with {count} codes"
+    target = f"/web/batches/{batch.id}?{urlencode({'flash': flash, 'flash_kind': 'info'})}"
+    return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
+
+
+# ---------- POST /web/qr/{qr_id}/retire — inline retire-QR form -------------
+
+
+@router.post("/qr/{qr_id}/retire")
+async def web_qr_retire(
+    qr_id: str,
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Retire a QR from the inline form on the batch detail page.
+
+    Scope-limited to FREE→RETIRED: the batch detail template only renders
+    the retire button on FREE rows (BOUND retires need a device version
+    that's awkward to surface in HTML and is better routed through the
+    mobile flow or the decommission-device page). If a BOUND QR arrives
+    here anyway (race), the service raises ``QRStateConflictError`` and
+    we flash an error instead of silently corrupting state.
+
+    Idempotent: ``QRStateConflictError`` on an already-RETIRED QR maps to
+    an info flash ("QR already retired") rather than an error.
+    """
+    auth_user = await _build_auth_user_for_admin_action(user)
+    lifecycle = QRLifecycleService(
+        netbox_client=get_netbox_client(),
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=AuditLogRepository(session),
+        write_service=NetBoxWriteService(
+            get_netbox_client(), session, AuditLogRepository(session)
+        ),
+    )
+    target = "/web/batches/"
+    try:
+        await lifecycle.retire(qr_id=qr_id, expected_version=None, user=auth_user)
+    except QRNotFoundError:
+        flash, kind = f"QR {qr_id} not registered", "error"
+    except QRStateConflictError as exc:
+        # FREE→RETIRED happy path won't trip this; only an already-RETIRED
+        # row or a concurrent bind would. Treat already-RETIRED as a no-op,
+        # bound-now as an error.
+        if exc.current_status.value == "retired":
+            flash, kind = f"QR {qr_id} already retired", "info"
+        else:
+            flash, kind = (
+                f"QR {qr_id} is {exc.current_status.value} — use device decommission to retire it",
+                "error",
+            )
+    except MissingVersionError:
+        flash, kind = (
+            f"QR {qr_id} is bound — retire it via device decommission instead",
+            "error",
+        )
+    except (QRRetireRolledBackError, QRRetireInconsistencyError):
+        flash, kind = f"QR {qr_id} retire rolled back — see audit log", "error"
+    else:
+        flash, kind = f"QR {qr_id} retired", "info"
+    return RedirectResponse(
+        url=f"{target}?{urlencode({'flash': flash, 'flash_kind': kind})}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ---------- /web/devices/decommission GET + POST — decommission form --------
+
+
+@router.get("/devices/decommission", response_class=HTMLResponse)
+async def devices_decommission_form(
+    request: Request,
+    user: WebAdminUser = Depends(require_web_admin),
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
+) -> HTMLResponse:
+    """Render the decommission-device form. POST target is the same path."""
+    return templates.TemplateResponse(
+        request,
+        "devices/decommission.html",
+        {
+            "user_email": user.email,
+            "flash": flash,
+            "flash_kind": flash_kind,
+        },
+    )
+
+
+def _decommission_redirect(*, flash: str, flash_kind: str) -> RedirectResponse:
+    """303 back to the decommission form with a flash banner."""
+    qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+    return RedirectResponse(
+        url=f"/web/devices/decommission?{qs}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/devices/decommission")
+async def web_devices_decommission(
+    device_id: int = Form(ge=1),
+    reason: str = Form(min_length=1, max_length=2000),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Decommission ``device_id`` with ``reason``. Form takes only id + reason;
+    the handler fetches the device's current ``last_updated`` itself and
+    passes it as the OCC version to ``DeviceDecommissionService.decommission``.
+
+    Error surface (all → 303 back to the form with a flash banner):
+    - 404 (unknown device) → error flash
+    - 409 (device modified between our read and the decommission, or bound QR
+      not in BOUND state) → error flash
+    - 5xx (rollback / inconsistency) → error flash pointing at audit log
+    """
+    auth_user = await _build_auth_user_for_admin_action(user)
+    device_service = DeviceService(get_netbox_client())
+    try:
+        current = await device_service.get_device(device_id)
+    except NetBoxNotFound:
+        return _decommission_redirect(
+            flash=f"Device {device_id} not found in NetBox", flash_kind="error"
+        )
+    netbox = get_netbox_client()
+    audit_repo = AuditLogRepository(session)
+    qr_code_repo = QRCodeRepository(session)
+    write_service = NetBoxWriteService(netbox, session, audit_repo)
+    lifecycle_service = QRLifecycleService(
+        netbox_client=netbox,
+        session=session,
+        qr_code_repo=qr_code_repo,
+        audit_log_repo=audit_repo,
+        write_service=write_service,
+    )
+    decom_service = DeviceDecommissionService(
+        netbox_client=netbox,
+        session=session,
+        qr_code_repo=qr_code_repo,
+        write_service=write_service,
+        lifecycle_service=lifecycle_service,
+    )
+    try:
+        await decom_service.decommission(
+            device_id=device_id,
+            expected_version=current.version,
+            reason=reason,
+            user=auth_user,
+        )
+    except NetBoxNotFound:
+        return _decommission_redirect(
+            flash=f"Device {device_id} not found in NetBox", flash_kind="error"
+        )
+    except WriteConflictError:
+        return _decommission_redirect(
+            flash=(
+                f"Device {device_id} was modified concurrently — "
+                "reload and try again"
+            ),
+            flash_kind="error",
+        )
+    except QRStateConflictError as exc:
+        return _decommission_redirect(
+            flash=(
+                f"Bound QR is {exc.current_status.value} — cannot decommission cleanly"
+            ),
+            flash_kind="error",
+        )
+    except (
+        QRRetireRolledBackError,
+        DeviceDecommissionRolledBackError,
+        DeviceDecommissionInconsistencyError,
+    ):
+        return _decommission_redirect(
+            flash=(
+                f"Decommission of device {device_id} rolled back — see audit log"
+            ),
+            flash_kind="error",
+        )
+    return _decommission_redirect(
+        flash=f"Device {device_id} decommissioned", flash_kind="info"
+    )

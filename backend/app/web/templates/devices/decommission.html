@@ -1,0 +1,22 @@
+{% extends "_base.html" %}
+{% block title %}Decommission device &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Decommission device</h1>
+    <p>Marks a NetBox device as decommissioned. If the device has a bound QR, the QR is retired in the same flow (QR-first ordering). Records a per-incident reason in the NetBox journal entry + audit log.</p>
+
+    {% if flash %}
+    <div class="flash flash-{{ flash_kind|default('info') }}">{{ flash }}</div>
+    {% endif %}
+
+    <form method="post" action="/web/devices/decommission">
+        <label>Device id
+            <input name="device_id" type="number" min="1" required placeholder="NetBox device numeric id">
+        </label>
+        <label>Reason
+            <textarea name="reason" rows="3" minlength="1" maxlength="2000" required placeholder="Why this device is being decommissioned (will be visible in NetBox journal + audit log)"></textarea>
+        </label>
+        <button type="submit">Decommission device</button>
+    </form>
+</section>
+{% endblock %}

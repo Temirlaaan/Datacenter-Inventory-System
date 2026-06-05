@@ -131,6 +131,13 @@ form button:hover { background: var(--color-accent-hover); }
     color: var(--color-muted);
 }
 
+.quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 0 0 24px;
+}
+
 .card-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

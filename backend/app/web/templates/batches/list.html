@@ -5,6 +5,12 @@
     <h1>Batches</h1>
     <p>Newest first. Click a row to see its codes + download printable labels.</p>
 
+    {% if flash %}
+    <div class="flash flash-{{ flash_kind|default('info') }}">{{ flash }}</div>
+    {% endif %}
+
+    <p><a class="download-btn" href="/web/batches/new">+ New batch</a></p>
+
     {% if batches %}
     <table class="data-table">
         <thead>

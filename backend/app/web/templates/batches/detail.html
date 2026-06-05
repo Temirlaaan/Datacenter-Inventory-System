@@ -36,6 +36,7 @@
                 <th>Bound device</th>
                 <th>Bound at</th>
                 <th>Retired at</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -46,6 +47,13 @@
                 <td>{{ c.bound_to_device_id or "" }}</td>
                 <td>{{ c.bound_at.strftime("%Y-%m-%d %H:%M") if c.bound_at else "" }}</td>
                 <td>{{ c.retired_at.strftime("%Y-%m-%d %H:%M") if c.retired_at else "" }}</td>
+                <td>
+                    {% if c.status.value == "free" %}
+                    <form class="inline-form" method="post" action="/web/qr/{{ c.id }}/retire">
+                        <button type="submit">Retire</button>
+                    </form>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

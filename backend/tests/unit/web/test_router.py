@@ -40,11 +40,16 @@ from app.web.router import (
     audit_list,
     batches_detail,
     batches_list,
+    batches_new_form,
     dashboard,
+    devices_decommission_form,
     oidc_callback,
     sessions_list,
     web_admin_shift_start,
+    web_batches_create,
+    web_devices_decommission,
     web_force_close_session,
+    web_qr_retire,
 )
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
@@ -1014,6 +1019,561 @@ async def test_web_admin_shift_start_returns_303_to_login_when_role_missing(
     assert response.status_code == 303
     assert response.headers["location"] == "/web/login"
 
+
+# ---------- Admin-action handlers (post-Sprint 8b fixes 2026-06-05) ---------
+#
+# Five new handlers added 2026-06-05 to close the admin-loop gap (admin can now
+# create batches, retire FREE QRs, and decommission devices from /web/* instead
+# of curling JSON endpoints). The pattern follows ``web_force_close_session``:
+# delegate to the underlying service directly so the three-record-write
+# apparatus stays in one place. Tests use the direct-await convention; the
+# heavy shift-lookup + service init lives behind monkeypatched fakes.
+
+
+def _admin_action_request() -> Request:
+    """Bare Request scope (cookie/role check happens in require_web_admin,
+    which is supplied as the ``user=`` arg directly in these tests)."""
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/web/admin-action",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    return Request(scope)
+
+
+def _patch_admin_shift_lookup(
+    monkeypatch: pytest.MonkeyPatch, *, sub: UUID = _USER_SUB
+) -> None:
+    """Make ``_build_auth_user_for_admin_action`` return cleanly by stubbing
+    the ShiftSessionRepository + get_sessionmaker pair it consults (same
+    pattern as the force-close tests)."""
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftSession
+
+    admin_shift = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=sub,
+        shift_start_at=datetime(2026, 6, 5, 9, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="admin-laptop-01",
+        end_reason=None,
+    )
+
+    class _FakeShiftRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_active_for_user(self, _user_id: UUID) -> ShiftSession:
+            return admin_shift
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeShiftRepo)
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
+
+
+def _admin_user() -> WebAdminUser:
+    return WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+
+# --- web_batches_create -----------------------------------------------------
+
+
+async def test_web_batches_create_redirects_to_detail_with_flash_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: form data → service.generate_batch → session.commit → 303."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QRBatch
+
+    new_batch_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class _FakeQRBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeGenerationService:
+        def __init__(self, _session: object, _b: object, _c: object, _a: object) -> None: ...
+
+        async def generate_batch(self, payload: Any, user: Any) -> QRBatch:
+            captured["count"] = payload.count
+            captured["comment"] = payload.comment
+            captured["user_sub"] = user.sub
+            return QRBatch(
+                id=new_batch_id,
+                created_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+                created_by_email=user.email,
+                created_by_keycloak_id=UUID(user.sub),
+                count=payload.count,
+                intended_site_id=payload.intended_site_id,
+                intended_location_id=payload.intended_location_id,
+                intended_rack_id=payload.intended_rack_id,
+                comment=payload.comment,
+            )
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeQRBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.QRGenerationService", _FakeGenerationService)
+
+    class _FakeSession:
+        async def commit(self) -> None: ...
+
+    response = await web_batches_create(
+        count=25,
+        comment="tray-A initial",
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        user=_admin_user(),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(f"/web/batches/{new_batch_id}?")
+    assert "flash=Batch+created+with+25+codes" in response.headers["location"]
+    assert "flash_kind=info" in response.headers["location"]
+    assert captured == {
+        "count": 25,
+        "comment": "tray-A initial",
+        "user_sub": str(_USER_SUB),
+    }
+
+
+async def test_web_batches_create_strips_comment_to_none_when_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty form ``comment`` → service receives ``None`` (the ``comment``
+    column is nullable; storing an empty string would lie about intent)."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QRBatch
+
+    received: dict[str, Any] = {}
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeGenerationService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def generate_batch(self, payload: Any, user: Any) -> QRBatch:
+            received["comment"] = payload.comment
+            return QRBatch(
+                id=uuid4(),
+                created_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+                created_by_email=user.email,
+                created_by_keycloak_id=UUID(user.sub),
+                count=payload.count,
+                intended_site_id=None,
+                intended_location_id=None,
+                intended_rack_id=None,
+                comment=payload.comment,
+            )
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.QRGenerationService", _FakeGenerationService)
+
+    class _FakeSession:
+        async def commit(self) -> None: ...
+
+    await web_batches_create(
+        count=10,
+        comment="   ",  # whitespace-only, stripped → empty → None
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        user=_admin_user(),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert received["comment"] is None
+
+
+# --- web_qr_retire ---------------------------------------------------------
+
+
+def _patch_lifecycle_service(monkeypatch: pytest.MonkeyPatch, retire_impl: Any) -> None:
+    """Install a fake QRLifecycleService whose ``retire`` runs ``retire_impl``.
+    Wires up the netbox_client + write_service deps as no-ops since the
+    handler reaches them via the import path on each call."""
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeWriteService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+    class _FakeLifecycle:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def retire(self, **kwargs: object) -> Any:
+            return await retire_impl(**kwargs)
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.NetBoxWriteService", _FakeWriteService)
+    monkeypatch.setattr("app.web.router.QRLifecycleService", _FakeLifecycle)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+
+@pytest.mark.parametrize(
+    "raise_factory, expected_flash_kind, expected_flash_fragment",
+    [
+        pytest.param(
+            lambda: None,
+            "info",
+            "QR+QR-ABC+retired",
+            id="success",
+        ),
+    ],
+)
+async def test_web_qr_retire_success_redirects_with_info_flash(
+    monkeypatch: pytest.MonkeyPatch,
+    raise_factory: Any,
+    expected_flash_kind: str,
+    expected_flash_fragment: str,
+) -> None:
+    """Happy path: service.retire returns cleanly → 303 with info flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _retire(**_kwargs: object) -> Any:
+        return raise_factory()
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    response = await web_qr_retire(
+        qr_id="QR-ABC",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/web/batches/?")
+    assert f"flash_kind={expected_flash_kind}" in response.headers["location"]
+    assert expected_flash_fragment in response.headers["location"]
+
+
+async def test_web_qr_retire_unknown_qr_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QRNotFoundError → 303 with error flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.qr.lifecycle import QRNotFoundError
+
+    async def _retire(**_kwargs: object) -> Any:
+        raise QRNotFoundError("QR-DOESNT-EXIST")
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    response = await web_qr_retire(
+        qr_id="QR-DOESNT-EXIST",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "not+registered" in response.headers["location"]
+
+
+async def test_web_qr_retire_already_retired_redirects_with_info_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QRStateConflictError(current=RETIRED) → 303 with info flash ("already
+    retired"). Treats a no-op as success so the UI is idempotent."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.domain.qr import QRStatus
+    from app.services.qr.lifecycle import QRStateConflictError
+
+    async def _retire(**_kwargs: object) -> Any:
+        raise QRStateConflictError(current_status=QRStatus.RETIRED)
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    response = await web_qr_retire(
+        qr_id="QR-X",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=info" in response.headers["location"]
+    assert "already+retired" in response.headers["location"]
+
+
+async def test_web_qr_retire_bound_qr_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A QR somehow caught in BOUND state (the template hides this button for
+    BOUND codes, but a race or hand-rolled POST could still hit it) →
+    QRStateConflictError(current=BOUND) → 303 with error flash that points
+    at the decommission flow."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.domain.qr import QRStatus
+    from app.services.qr.lifecycle import QRStateConflictError
+
+    async def _retire(**_kwargs: object) -> Any:
+        raise QRStateConflictError(current_status=QRStatus.BOUND)
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    response = await web_qr_retire(
+        qr_id="QR-B",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "device+decommission" in response.headers["location"]
+
+
+async def test_web_qr_retire_missing_version_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MissingVersionError (BOUND retire without a version) → 303 error,
+    same pointer to decommission flow."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.qr.lifecycle import MissingVersionError
+
+    async def _retire(**_kwargs: object) -> Any:
+        raise MissingVersionError("QR-V")
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    response = await web_qr_retire(
+        qr_id="QR-V",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "device+decommission" in response.headers["location"]
+
+
+# --- web_devices_decommission ----------------------------------------------
+
+
+def _patch_decommission_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    get_device_impl: Any,
+    decommission_impl: Any,
+) -> None:
+    """Install fakes for DeviceService.get_device + DeviceDecommissionService.decommission."""
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            return await get_device_impl(device_id)
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeWriteService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+    class _FakeLifecycle:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+    class _FakeDecommissionService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def decommission(self, **kwargs: object) -> Any:
+            return await decommission_impl(**kwargs)
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.NetBoxWriteService", _FakeWriteService)
+    monkeypatch.setattr("app.web.router.QRLifecycleService", _FakeLifecycle)
+    monkeypatch.setattr(
+        "app.web.router.DeviceDecommissionService", _FakeDecommissionService
+    )
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+
+async def test_web_devices_decommission_success_redirects_with_info_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: get_device + decommission both succeed → 303 info flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    captured: dict[str, Any] = {}
+
+    class _DeviceStub:
+        version = "2026-06-05T12:00:00Z"
+
+    async def _get_device(_device_id: int) -> Any:
+        return _DeviceStub()
+
+    async def _decommission(**kwargs: object) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    _patch_decommission_pipeline(
+        monkeypatch, get_device_impl=_get_device, decommission_impl=_decommission
+    )
+
+    response = await web_devices_decommission(
+        device_id=42,
+        reason="end of life",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/web/devices/decommission?")
+    assert "flash_kind=info" in response.headers["location"]
+    assert "Device+42+decommissioned" in response.headers["location"]
+    assert captured["device_id"] == 42
+    assert captured["expected_version"] == "2026-06-05T12:00:00Z"
+    assert captured["reason"] == "end of life"
+
+
+async def test_web_devices_decommission_unknown_device_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_device raises NetBoxNotFound → 303 with error flash; decommission
+    service never called."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.netbox.errors import NetBoxNotFound
+
+    async def _get_device(_device_id: int) -> Any:
+        raise NetBoxNotFound("device 999")
+
+    decom_called = False
+
+    async def _decommission(**_kwargs: object) -> Any:
+        nonlocal decom_called
+        decom_called = True
+        return object()
+
+    _patch_decommission_pipeline(
+        monkeypatch, get_device_impl=_get_device, decommission_impl=_decommission
+    )
+
+    response = await web_devices_decommission(
+        device_id=999,
+        reason="bad lookup",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "not+found" in response.headers["location"]
+    assert not decom_called
+
+
+async def test_web_devices_decommission_write_conflict_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WriteConflictError between our get_device and the decommission write
+    (someone else modified the device concurrently) → 303 with error flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.netbox_write import WriteConflictError
+
+    class _DeviceStub:
+        version = "2026-06-05T12:00:00Z"
+
+    async def _get_device(_device_id: int) -> Any:
+        return _DeviceStub()
+
+    async def _decommission(**_kwargs: object) -> Any:
+        raise WriteConflictError(
+            current_version="2026-06-05T12:00:05Z", current_object={"id": 7}
+        )
+
+    _patch_decommission_pipeline(
+        monkeypatch, get_device_impl=_get_device, decommission_impl=_decommission
+    )
+
+    response = await web_devices_decommission(
+        device_id=7,
+        reason="concurrent",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "modified+concurrently" in response.headers["location"]
+
+
+# --- GET form pages (template-render coverage) ------------------------------
+
+
+async def test_batches_new_form_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``GET /web/batches/new`` returns the form template."""
+    _set_env(monkeypatch)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/batches/new",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await batches_new_form(request=Request(scope), user=_admin_user())
+    assert response.status_code == 200
+    assert b"New QR batch" in response.body
+
+
+async def test_devices_decommission_form_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``GET /web/devices/decommission`` returns the form, including any
+    flash banner passed via query params."""
+    _set_env(monkeypatch)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/devices/decommission",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await devices_decommission_form(
+        request=Request(scope),
+        user=_admin_user(),
+        flash="Device 42 decommissioned",
+        flash_kind="info",
+    )
+    assert response.status_code == 200
+    assert b"Device 42 decommissioned" in response.body
+    assert b"Decommission device" in response.body
+
+
+# Use _admin_action_request so the helper isn't dead code (CI-side flake guard).
+_ = _admin_action_request
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.
 _ = (Fernet, AsyncIterator, jwt, SESSION_COOKIE_NAME, Any)

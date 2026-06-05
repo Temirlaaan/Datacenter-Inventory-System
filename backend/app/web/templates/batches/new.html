@@ -1,0 +1,28 @@
+{% extends "_base.html" %}
+{% block title %}New batch &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>New QR batch</h1>
+    <p><a href="/web/batches/">&laquo; Back to batches</a></p>
+    <p>Generates N free QR codes in a single batch. After creation you'll land on the batch detail page where you can download printable PDF labels.</p>
+
+    <form method="post" action="/web/batches/">
+        <label>Count
+            <input name="count" type="number" min="1" max="500" value="50" required>
+        </label>
+        <label>Comment (optional)
+            <input name="comment" type="text" maxlength="200" placeholder="e.g. tray-A initial stock">
+        </label>
+        <label>Intended site id (optional)
+            <input name="intended_site_id" type="number" min="1" placeholder="NetBox site numeric id">
+        </label>
+        <label>Intended location id (optional)
+            <input name="intended_location_id" type="number" min="1" placeholder="NetBox location numeric id">
+        </label>
+        <label>Intended rack id (optional)
+            <input name="intended_rack_id" type="number" min="1" placeholder="NetBox rack numeric id">
+        </label>
+        <button type="submit">Create batch</button>
+    </form>
+</section>
+{% endblock %}

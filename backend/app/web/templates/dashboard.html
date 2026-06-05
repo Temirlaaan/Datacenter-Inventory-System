@@ -5,6 +5,11 @@
     <h1>Dashboard</h1>
     <p class="generated-at">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
 
+    <div class="quick-actions">
+        <a class="download-btn" href="/web/batches/new">+ New QR batch</a>
+        <a class="download-btn" href="/web/devices/decommission">Decommission device</a>
+    </div>
+
     <div class="card-grid">
         <div class="card">
             <div class="card__label">Free QRs</div>
