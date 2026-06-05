@@ -11,6 +11,7 @@
 
     <form method="post" action="/web/devices/decommission"
           onsubmit="return confirm('Decommission device ' + this.device_id.value + '? This changes NetBox status and retires the bound QR if any. Cannot be undone in one click.');">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <label>Device id
             <input name="device_id" type="number" min="1" required placeholder="NetBox device numeric id">
         </label>

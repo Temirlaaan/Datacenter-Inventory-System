@@ -52,6 +52,7 @@
                 <td>
                     {% if s.is_active %}
                     <form class="inline-form" method="post" action="/web/sessions/{{ s.id }}/force-close">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <textarea name="reason" rows="2" maxlength="500" required placeholder="Reason for force-closing this shift…"></textarea>
                         <input type="hidden" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}">
                         <input type="hidden" name="from" value="{{ filters['from'] }}">

@@ -108,6 +108,7 @@ def test_decode_session_cookie_returns_none_for_expired_payload(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) - timedelta(seconds=1),
+        csrf_token="irrelevant",
     )
     cookie = encode_session_cookie(expired_user)
     assert decode_session_cookie(cookie) is None

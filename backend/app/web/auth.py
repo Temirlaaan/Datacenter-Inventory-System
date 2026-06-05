@@ -21,14 +21,16 @@ the user from the web path; we just need to render pages.
 
 from __future__ import annotations
 
+import hmac
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 
 from app.config import get_settings
 from app.db.repositories.shift_session import ShiftSessionRepository
@@ -56,6 +58,12 @@ class WebAdminUser:
     exp: datetime
     """Cookie payload expiry. The browser ``Max-Age`` enforces the same
     boundary client-side; ``exp`` is the server-side authority."""
+    csrf_token: str
+    """Per-session CSRF token. 32 url-safe random bytes generated at OIDC
+    callback, carried in the (Fernet-encrypted) cookie payload, surfaced
+    to templates as a hidden form input, verified on every ``/web/*``
+    POST. Constant for the cookie's lifetime; rotates on each fresh
+    login. Self-contained — no server-side token storage required."""
 
 
 class WebAdminAuthRequired(Exception):
@@ -116,6 +124,7 @@ def encode_session_cookie(user: WebAdminUser) -> str:
         "email": user.email,
         "roles": list(user.roles),
         "exp": int(user.exp.timestamp()),
+        "csrf_token": user.csrf_token,
     }
     return _fernet().encrypt(json.dumps(payload).encode("utf-8")).decode("ascii")
 
@@ -126,6 +135,11 @@ def decode_session_cookie(raw: str) -> WebAdminUser | None:
     Returns ``None`` on any failure: tampered cookie, wrong Fernet key,
     expired payload, malformed JSON, missing fields. The route handler
     treats ``None`` as "no valid auth" → redirect to login.
+
+    Note: cookies issued before the CSRF rollout lack ``csrf_token`` and
+    return ``None`` here — those admins are redirected to /web/login and
+    re-authenticate, getting a fresh cookie that includes the token. One-
+    time cost on rollout; no ongoing migration story needed.
     """
     try:
         plaintext = _fernet().decrypt(raw.encode("ascii"))
@@ -137,19 +151,48 @@ def decode_session_cookie(raw: str) -> WebAdminUser | None:
         email = str(payload["email"])
         roles = tuple(str(r) for r in payload["roles"])
         exp = datetime.fromtimestamp(int(payload["exp"]), tz=UTC)
+        csrf_token = str(payload["csrf_token"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if exp <= datetime.now(UTC):
         return None
-    return WebAdminUser(sub=sub, email=email, roles=roles, exp=exp)
+    return WebAdminUser(
+        sub=sub, email=email, roles=roles, exp=exp, csrf_token=csrf_token
+    )
 
 
 def build_session_cookie_payload(*, sub: UUID, email: str, roles: tuple[str, ...]) -> WebAdminUser:
     """Construct a fresh ``WebAdminUser`` with ``exp`` set ``SESSION_COOKIE_MAX_AGE_SECONDS``
     in the future. Used by the OIDC callback handler after a successful token
-    exchange."""
+    exchange.
+
+    Generates a fresh CSRF token (32 url-safe random bytes) bound to this
+    cookie's lifetime — survives across requests but rotates on each new
+    login, which is the standard CSRF-token property.
+    """
     exp = datetime.now(UTC) + timedelta(seconds=SESSION_COOKIE_MAX_AGE_SECONDS)
-    return WebAdminUser(sub=sub, email=email, roles=roles, exp=exp)
+    csrf_token = secrets.token_urlsafe(32)
+    return WebAdminUser(
+        sub=sub, email=email, roles=roles, exp=exp, csrf_token=csrf_token
+    )
+
+
+# ---------- CSRF verification ------------------------------------------------
+
+
+def verify_csrf_token(submitted: str | None, expected: str) -> None:
+    """Constant-time compare submitted vs expected CSRF token.
+
+    Raises 403 on missing or mismatched token. Used by every ``/web/*``
+    POST handler — the submitted token comes from a hidden ``_csrf`` form
+    input rendered server-side from the same cookie; mismatch means
+    either a stale form (cookie rotated) or a cross-site forgery attempt.
+    """
+    if submitted is None or not hmac.compare_digest(submitted, expected):
+        logger.warning("web_csrf_mismatch", has_submitted=submitted is not None)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="CSRF token mismatch"
+        )
 
 
 # ---------- FastAPI dep -------------------------------------------------------

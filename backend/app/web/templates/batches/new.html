@@ -7,6 +7,7 @@
     <p>Generates N free QR codes in a single batch. After creation you'll land on the batch detail page where you can download printable PDF labels.</p>
 
     <form method="post" action="/web/batches/">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <label>Count
             <input name="count" type="number" min="1" max="500" value="50" required>
         </label>

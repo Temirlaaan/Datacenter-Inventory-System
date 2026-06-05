@@ -1126,3 +1126,22 @@ Self-code-review of the admin-action forms surfaced two issues:
 One new direct-await test covers the `batch_id`-present branch; existing retire tests updated to pass `batch_id=None` explicitly (direct-await bypasses FastAPI's `Form(...)` default-unwrap, so the dependency-injected default doesn't apply when the handler is called as a plain coroutine). Unit suite: 565 → 567 passing.
 
 **CSRF still deferred** — same parking-lot item from Sprint 8b. Worth escalating into the next sprint now that there are four `/web/*` POST forms in active use.
+
+### 2026-06-05 — feat(web): CSRF protection on all /web/* POST forms
+
+Closed the Sprint 8b parking-lot item ahead of any new sprint open, on user request the day they hit live production. Five POST forms in active use (admin-shift-start, create-batch, retire-QR, force-close-session, decommission-device) were all CSRF-vulnerable until this change.
+
+**Design.** Per-session CSRF token stored in the Fernet-encrypted cookie payload:
+- 32 url-safe random bytes generated at OIDC callback (`secrets.token_urlsafe(32)`), bound to the cookie's 8-hour lifetime, rotates on each fresh login.
+- Surfaced to templates as `csrf_token` context var; embedded in every form as `<input type="hidden" name="_csrf" value="{{ csrf_token }}">`.
+- Each POST handler reads `csrf: str = Form(alias="_csrf")` and calls `verify_csrf_token(csrf, user.csrf_token)` before any business logic. Mismatch → 403 via `HTTPException`. Constant-time compare via `hmac.compare_digest`.
+
+**Why this design.** Stateless (no server-side token storage), tied to the encrypted cookie so a stolen-cookie attack already wins everything, simple to implement against the existing OIDC-cookie infrastructure. Pydantic doesn't allow leading-underscore parameter names, hence the Python identifier `csrf` with HTML alias `_csrf`.
+
+**Changes.** [app/web/auth.py](../backend/app/web/auth.py): `csrf_token` added to `WebAdminUser` dataclass, threaded through `encode_session_cookie` / `decode_session_cookie` / `build_session_cookie_payload`, plus new `verify_csrf_token(submitted, expected)` helper. [app/web/router.py](../backend/app/web/router.py): 5 template-render sites now pass `csrf_token=user.csrf_token`, 5 POST handlers accept `csrf` form field + verify on entry. Five templates ([_admin_shift_needed.html](../backend/app/web/templates/_admin_shift_needed.html), [batches/new.html](../backend/app/web/templates/batches/new.html), [batches/detail.html](../backend/app/web/templates/batches/detail.html), [sessions/list.html](../backend/app/web/templates/sessions/list.html), [devices/decommission.html](../backend/app/web/templates/devices/decommission.html)) embed the hidden input.
+
+**Migration.** All pre-CSRF cookies fail to decode (missing `csrf_token` field) → redirect to `/web/login` → fresh cookie carries the token. One-time re-login on the deploy. No DB migration.
+
+**Tests:** 5 new direct-await CSRF-mismatch tests (one per POST handler), confirming `HTTPException(403)` raises before any DB work happens. Updated all 18 existing POST-handler test invocations to pass `csrf="test-csrf-token"`, refactored `_admin_cookie_value` test helper to build the cookie with a deterministic `csrf_token` (matching what tests pass). Unit suite: 567 → 572 passing.
+
+**Parking lot now empty for `/web/*` security.** `/web/qr/search` and `/web/users/` remain as feature gaps, not security ones.

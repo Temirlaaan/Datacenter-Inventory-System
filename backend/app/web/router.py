@@ -70,6 +70,7 @@ from app.web.auth import (
     decode_session_cookie,
     encode_session_cookie,
     require_web_admin,
+    verify_csrf_token,
 )
 
 logger = structlog.get_logger()
@@ -298,7 +299,7 @@ def _render_admin_shift_needed(request: Request, user: WebAdminUser) -> HTMLResp
     return templates.TemplateResponse(
         request,
         "_admin_shift_needed.html",
-        {"user_email": user.email},
+        {"user_email": user.email, "csrf_token": user.csrf_token},
         status_code=status.HTTP_403_FORBIDDEN,
     )
 
@@ -385,13 +386,14 @@ async def batches_new_form(
     return templates.TemplateResponse(
         request,
         "batches/new.html",
-        {"user_email": user.email},
+        {"user_email": user.email, "csrf_token": user.csrf_token},
     )
 
 
 @router.post("/batches/")
 async def web_batches_create(
     count: int = Form(ge=1, le=500),
+    csrf: str = Form(alias="_csrf"),
     comment: str = Form(default="", max_length=200),
     intended_site_id: int | None = Form(default=None, ge=1),
     intended_location_id: int | None = Form(default=None, ge=1),
@@ -408,6 +410,7 @@ async def web_batches_create(
     interactive flow (the admin sees the redirect and won't double-submit).
     303 to the new batch's detail page with a flash banner.
     """
+    verify_csrf_token(csrf, user.csrf_token)
     auth_user = await _build_auth_user_for_admin_action(user)
     service = QRGenerationService(
         session,
@@ -459,6 +462,7 @@ async def batches_detail(
             "batch": batch,
             "codes": codes,
             "status_counts": status_counts,
+            "csrf_token": user.csrf_token,
         },
     )
 
@@ -685,6 +689,7 @@ async def sessions_list(
             "end_reason_values": [r.value for r in ShiftEndReason],
             "flash": flash,
             "flash_kind": flash_kind,
+            "csrf_token": user.csrf_token,
         },
     )
 
@@ -705,6 +710,7 @@ async def web_force_close_session(
     request: Request,
     session_id: UUID,
     reason: str = Form(min_length=1, max_length=500),
+    csrf: str = Form(alias="_csrf"),
     user_keycloak_id: str | None = Form(default=None),
     from_: str | None = Form(default=None, alias="from"),
     to: str | None = Form(default=None),
@@ -736,6 +742,7 @@ async def web_force_close_session(
     # already auto-started a transaction by using ``session`` for the
     # lookup ("A transaction is already begun on this Session").
     _ = request  # FastAPI binds; unused inside this handler
+    verify_csrf_token(csrf, user.csrf_token)
     async with get_sessionmaker()() as lookup_session:
         active = await ShiftSessionRepository(lookup_session).get_active_for_user(user.sub)
     # Class invariant from require_web_admin: active is not None here.
@@ -796,6 +803,7 @@ def _resolve_web_admin_cookie(request: Request) -> WebAdminUser | None:
 async def web_admin_shift_start(
     request: Request,
     workstation_id: str = Form(min_length=1, max_length=255),
+    csrf: str = Form(alias="_csrf"),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
     """Open an admin shift from the ``_admin_shift_needed.html`` form.
@@ -814,6 +822,7 @@ async def web_admin_shift_start(
     user = _resolve_web_admin_cookie(request)
     if user is None:
         return RedirectResponse(url="/web/login", status_code=status.HTTP_303_SEE_OTHER)
+    verify_csrf_token(csrf, user.csrf_token)
     service = ShiftSessionService(session=session, repo=ShiftSessionRepository(session))
     try:
         await service.start(
@@ -860,6 +869,7 @@ async def _build_auth_user_for_admin_action(user: WebAdminUser) -> AuthUser:
 @router.post("/qr/{qr_id}/retire")
 async def web_qr_retire(
     qr_id: str,
+    csrf: str = Form(alias="_csrf"),
     batch_id: UUID | None = Form(default=None),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
@@ -882,6 +892,7 @@ async def web_qr_retire(
     inspection context when retiring multiple FREE codes in a row.
     Falls back to the list when absent (curl / hand-rolled POST).
     """
+    verify_csrf_token(csrf, user.csrf_token)
     auth_user = await _build_auth_user_for_admin_action(user)
     lifecycle = QRLifecycleService(
         netbox_client=get_netbox_client(),
@@ -941,6 +952,7 @@ async def devices_decommission_form(
             "user_email": user.email,
             "flash": flash,
             "flash_kind": flash_kind,
+            "csrf_token": user.csrf_token,
         },
     )
 
@@ -958,6 +970,7 @@ def _decommission_redirect(*, flash: str, flash_kind: str) -> RedirectResponse:
 async def web_devices_decommission(
     device_id: int = Form(ge=1),
     reason: str = Form(min_length=1, max_length=2000),
+    csrf: str = Form(alias="_csrf"),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
@@ -971,6 +984,7 @@ async def web_devices_decommission(
       not in BOUND state) → error flash
     - 5xx (rollback / inconsistency) → error flash pointing at audit log
     """
+    verify_csrf_token(csrf, user.csrf_token)
     auth_user = await _build_auth_user_for_admin_action(user)
     device_service = DeviceService(get_netbox_client())
     try:

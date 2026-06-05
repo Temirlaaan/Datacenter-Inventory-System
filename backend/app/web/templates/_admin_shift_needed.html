@@ -8,6 +8,7 @@
     one to proceed.</p>
 
     <form method="post" action="/web/admin/shift/start">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <label for="workstation_id">Workstation id</label>
         <input id="workstation_id" name="workstation_id" type="text" required
                minlength="1" maxlength="255" placeholder="admin-laptop-01">

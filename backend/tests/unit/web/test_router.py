@@ -269,6 +269,7 @@ async def test_dashboard_handler_returns_html_response_with_snapshot(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     # session arg isn't used by the fake repo; pass a sentinel.
@@ -332,6 +333,7 @@ async def test_batches_list_handler_returns_html_response_with_seeded_rows(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     response = await batches_list(
@@ -408,6 +410,7 @@ async def test_batches_detail_handler_returns_html_response_for_existing_batch(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     response = await batches_detail(
@@ -474,6 +477,7 @@ async def test_audit_list_handler_returns_html_response_with_seeded_rows(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     response = await audit_list(
@@ -543,6 +547,7 @@ async def test_audit_detail_handler_returns_html_response_for_existing_row(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     response = await audit_detail(
@@ -627,6 +632,7 @@ async def test_sessions_list_handler_returns_html_response_with_rows(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
 
     response = await sessions_list(
@@ -697,6 +703,7 @@ async def test_web_force_close_session_returns_303_on_success(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
     scope = {
         "type": "http",
@@ -716,6 +723,7 @@ async def test_web_force_close_session_returns_303_on_success(
         from_=None,
         to=None,
         active_only_value=None,
+        csrf="test-csrf-token",
         user=user,
         session=object(),  # type: ignore[arg-type]
     )
@@ -770,6 +778,7 @@ async def test_web_force_close_session_returns_303_with_error_flash_on_404(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
     scope = {
         "type": "http",
@@ -789,6 +798,7 @@ async def test_web_force_close_session_returns_303_with_error_flash_on_404(
         from_=None,
         to=None,
         active_only_value=None,
+        csrf="test-csrf-token",
         user=user,
         session=object(),  # type: ignore[arg-type]
     )
@@ -846,6 +856,7 @@ async def test_web_force_close_session_reraises_non_404_http_exception(
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
     )
     scope = {
         "type": "http",
@@ -866,6 +877,7 @@ async def test_web_force_close_session_reraises_non_404_http_exception(
             from_=None,
             to=None,
             active_only_value=None,
+            csrf="test-csrf-token",
             user=user,
             session=object(),  # type: ignore[arg-type]
         )
@@ -897,13 +909,24 @@ def _build_shift_start_request(
     return Request(scope)
 
 
-def _admin_cookie_value(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Fernet-encrypt an admin WebAdminUser payload using the test key."""
-    _set_env(monkeypatch)
-    from app.web.auth import build_session_cookie_payload, encode_session_cookie
+def _admin_cookie_value(
+    monkeypatch: pytest.MonkeyPatch, *, csrf_token: str = "test-csrf-token"
+) -> str:
+    """Fernet-encrypt an admin WebAdminUser payload using the test key.
 
-    user = build_session_cookie_payload(
-        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",)
+    Builds the WebAdminUser directly (not via ``build_session_cookie_payload``)
+    so the CSRF token is deterministic — tests need to know it to pass a
+    matching value into the POST handler.
+    """
+    _set_env(monkeypatch)
+    from app.web.auth import encode_session_cookie
+
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token=csrf_token,
     )
     return encode_session_cookie(user)
 
@@ -942,6 +965,7 @@ async def test_web_admin_shift_start_returns_303_to_dashboard_on_success(
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
         workstation_id="admin-laptop-01",
+        csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 303
@@ -985,6 +1009,7 @@ async def test_web_admin_shift_start_returns_303_to_dashboard_when_already_activ
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
         workstation_id="admin-laptop-01",
+        csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 303
@@ -999,6 +1024,7 @@ async def test_web_admin_shift_start_returns_303_to_login_without_cookie(
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=None),
         workstation_id="admin-laptop-01",
+        csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 303
@@ -1014,6 +1040,7 @@ async def test_web_admin_shift_start_returns_303_to_login_when_role_missing(
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
         workstation_id="admin-laptop-01",
+        csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 303
@@ -1080,12 +1107,13 @@ def _patch_admin_shift_lookup(
     monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
 
 
-def _admin_user() -> WebAdminUser:
+def _admin_user(csrf_token: str = "test-csrf-token") -> WebAdminUser:
     return WebAdminUser(
         sub=_USER_SUB,
         email="alice@example.com",
         roles=("dcinv-admin",),
         exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token=csrf_token,
     )
 
 
@@ -1147,6 +1175,7 @@ async def test_web_batches_create_redirects_to_detail_with_flash_on_success(
         intended_site_id=None,
         intended_location_id=None,
         intended_rack_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=_FakeSession(),  # type: ignore[arg-type]
     )
@@ -1208,6 +1237,7 @@ async def test_web_batches_create_strips_comment_to_none_when_blank(
         intended_site_id=None,
         intended_location_id=None,
         intended_rack_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=_FakeSession(),  # type: ignore[arg-type]
     )
@@ -1270,6 +1300,7 @@ async def test_web_qr_retire_success_redirects_with_info_flash(
     response = await web_qr_retire(
         qr_id="QR-ABC",
         batch_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1299,6 +1330,7 @@ async def test_web_qr_retire_redirects_back_to_batch_detail_when_batch_id_presen
     response = await web_qr_retire(
         qr_id="QR-K",
         batch_id=batch_id,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1323,6 +1355,7 @@ async def test_web_qr_retire_unknown_qr_redirects_with_error_flash(
     response = await web_qr_retire(
         qr_id="QR-DOESNT-EXIST",
         batch_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1349,6 +1382,7 @@ async def test_web_qr_retire_already_retired_redirects_with_info_flash(
     response = await web_qr_retire(
         qr_id="QR-X",
         batch_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1377,6 +1411,7 @@ async def test_web_qr_retire_bound_qr_redirects_with_error_flash(
     response = await web_qr_retire(
         qr_id="QR-B",
         batch_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1402,6 +1437,7 @@ async def test_web_qr_retire_missing_version_redirects_with_error_flash(
     response = await web_qr_retire(
         qr_id="QR-V",
         batch_id=None,
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1479,6 +1515,7 @@ async def test_web_devices_decommission_success_redirects_with_info_flash(
     response = await web_devices_decommission(
         device_id=42,
         reason="end of life",
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1517,6 +1554,7 @@ async def test_web_devices_decommission_unknown_device_redirects_with_error_flas
     response = await web_devices_decommission(
         device_id=999,
         reason="bad lookup",
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1553,12 +1591,131 @@ async def test_web_devices_decommission_write_conflict_redirects_with_error_flas
     response = await web_devices_decommission(
         device_id=7,
         reason="concurrent",
+        csrf="test-csrf-token",
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 303
     assert "flash_kind=error" in response.headers["location"]
     assert "modified+concurrently" in response.headers["location"]
+
+
+# --- CSRF verification (one mismatch test per POST handler) -----------------
+
+
+async def test_web_batches_create_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong ``csrf`` → 403 from ``verify_csrf_token`` before any DB work."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_batches_create(
+            count=10,
+            csrf="WRONG-TOKEN",
+            comment="",
+            intended_site_id=None,
+            intended_location_id=None,
+            intended_rack_id=None,
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_qr_retire_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_qr_retire(
+            qr_id="QR-X",
+            csrf="WRONG-TOKEN",
+            batch_id=None,
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_devices_decommission_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_devices_decommission(
+            device_id=42,
+            reason="any",
+            csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_force_close_session_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/web/sessions/x/force-close",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    with pytest.raises(HTTPException) as exc:
+        await web_force_close_session(
+            request=Request(scope),
+            session_id=uuid4(),
+            reason="any",
+            csrf="WRONG-TOKEN",
+            user_keycloak_id=None,
+            from_=None,
+            to=None,
+            active_only_value=None,
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_admin_shift_start_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shift-start handler resolves the cookie itself, so the CSRF
+    token comes from the cookie payload — a wrong ``csrf`` form value
+    fails ``verify_csrf_token`` after auth succeeds but before any DB
+    work."""
+    from fastapi import HTTPException
+
+    cookie = _admin_cookie_value(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await web_admin_shift_start(
+            request=_build_shift_start_request(cookie_value=cookie),
+            workstation_id="admin-laptop-01",
+            csrf="WRONG-TOKEN",
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
 
 
 # --- GET form pages (template-render coverage) ------------------------------

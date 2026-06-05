@@ -52,6 +52,7 @@
                     <form class="inline-form" method="post"
                           action="/web/qr/{{ c.id }}/retire"
                           onsubmit="return confirm('Retire QR {{ c.id }}? This cannot be undone.');">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <input type="hidden" name="batch_id" value="{{ batch.id }}">
                         <button type="submit">Retire</button>
                     </form>
