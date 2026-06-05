@@ -101,10 +101,11 @@ async def login(request: Request, next: str = "/web/") -> RedirectResponse:
         f"{settings.keycloak_issuer}/protocol/openid-connect/auth?{urlencode(params)}"
     )
     response = RedirectResponse(url=keycloak_auth_url, status_code=status.HTTP_302_FOUND)
-    # Note: ``secure=True`` belongs in production behind TLS. For dev/test
-    # against http://localhost, leave it off so the cookie actually sets.
-    # Deployment runs behind TLS (CLAUDE.md "VPN-only" doesn't imply
-    # plaintext); ops can flip via a Settings knob in Sprint 9+ if needed.
+    # ``secure=settings.cookie_secure`` is True in production (set
+    # COOKIE_SECURE=true behind TLS); False in dev so localhost http://
+    # actually receives the cookie. The browser drops Secure-flagged cookies
+    # over plain HTTP, so flipping the flag wrong in dev would silently
+    # break the OIDC flow.
     for cookie_name, cookie_value in (
         (_OIDC_STATE_COOKIE, state),
         (_OIDC_NONCE_COOKIE, nonce),
@@ -114,6 +115,7 @@ async def login(request: Request, next: str = "/web/") -> RedirectResponse:
             cookie_name,
             cookie_value,
             httponly=True,
+            secure=settings.cookie_secure,
             samesite="lax",
             max_age=_OIDC_FLOW_COOKIE_MAX_AGE_SECONDS,
         )
@@ -216,6 +218,7 @@ async def oidc_callback(
         SESSION_COOKIE_NAME,
         cookie_value,
         httponly=True,
+        secure=settings.cookie_secure,
         samesite="lax",
         max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
     )

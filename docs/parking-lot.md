@@ -7,92 +7,73 @@ what's *in* a sprint; this file holds what's parked.
 
 ---
 
-## Pending NetBox configuration (deployment dependency for Sprint 5+)
+## Pending NetBox configuration — Decommissioning RESOLVED 2026-06-04
 
-Per ToR §4.3.7, NetBox currently has only `Active` / `Offline` device statuses.
-Before the Decommission use case ships, the NetBox admin must add the standard
-NetBox statuses:
+User confirmed the `Decommissioning` device status exists in the deployed
+NetBox 4.4.5 at `https://web-netbox.t-cloud.kz/`. The decommission service's
+hardcoded `changes={"status": "decommissioning"}` slug should work, but a
+spot-check via `OPTIONS /api/dcim/devices/` is recommended on first deploy
+in case the install uses a non-default casing.
 
-- `Staged`, `Decommissioning`, `Inventory`, `Failed`
-
-**Owner:** NetBox admin (user)
-**Blocker for:** Sprint 5 (Decommission flow — needs `Decommissioning`)
-**Not a blocker for:** Sprints 3-4 (Update + bind/retire flows use statuses
-discovered dynamically from NetBox via the `/api/v1/meta/statuses` endpoint
-— they do not hardcode the status set).
-
-**Slug verification gate (Sprint 5 Task 4 — `app/services/device_decommission.py`):**
-The decommission service hardcodes `changes={"status": "decommissioning"}` as
-the lowercase NetBox-convention slug. When the NetBox admin adds the status,
-record the exact slug returned by `OPTIONS /api/dcim/devices/`'s
-`actions.POST.status.choices[].value` field. If it differs from
-`"decommissioning"` (e.g. some NetBox installs use display-cased slugs),
-update the constant in `device_decommission.py` to match — single call
-site, one focused commit. Production deploy of Sprint 5 gates on this
-verification.
+The other three statuses (`Staged`, `Inventory`, `Failed`) are not used
+by any sprint shipped to date — `/api/v1/meta/statuses` discovers what
+NetBox actually exposes; the mobile / web clients render whatever comes
+back. No action required.
 
 ---
 
-## NetBox custom field name verification (deployment dependency for production)
+## NetBox custom field name verification — RESOLVED 2026-06-04
 
-The code carries two NetBox custom-field names as design assumptions, written
-in Sprints 3-4 with respx-mocked NetBox (no live instance available).
-Production deploy must verify they match the deployed NetBox schema:
+**Status:** Verified against production NetBox 4.4.5 at
+`https://web-netbox.t-cloud.kz/`.
 
-- **`custom_fields.asset_tag`** (Sprint 3) — used by `app/services/forms/device_edit.yaml`
-  (the form's `netbox_field: custom_fields.asset_tag`) and by
-  `app/services/device.py::to_device_data` (reads
-  `device["custom_fields"].get("asset_tag")`). NetBox devices also have a
-  *native* `asset_tag` field; if the deployed NetBox uses the native field,
-  swap the YAML's `netbox_field` to `asset_tag` and the parser to
-  `device["asset_tag"]`.
-- **`custom_fields.qr_id`** (Sprint 4) — written by the QR bind flow to attach
-  the QR token to the device, and cleared by QR retire on a BOUND QR. Read by
-  the combined QR+device response. The exact NetBox custom-field name is
-  unverified.
+- **`asset_tag`** — switched from the previously-assumed
+  `custom_fields.asset_tag` path to the **native** NetBox 4.x `asset_tag`
+  field on Device. The custom-field-named-`asset_tag` ALSO exists in the
+  deployed NetBox (along with 22 other Device custom fields including
+  Zabbix-integration fields), but the native field is the one the
+  operators populate. Code change covered all five call sites:
+  `app/services/device.py::_EXTRACTED_CUSTOM_FIELDS`, `to_device_data`,
+  `to_netbox_changes`, `to_netbox_create_payload`, +
+  `app/services/forms/{device_edit,device_create}.yaml` (`netbox_field:
+  asset_tag`). Form `version` bumped on both YAML files so the mobile
+  client refetches.
+- **`custom_fields.qr_id`** — confirmed present on the deployed Device
+  model. Code unchanged.
 
-**Owner:** NetBox admin (user) + the engineer running the production deploy.
-**Blocker for:** production deploy of Sprints 3-4 — neither sprint can write
-to the wrong NetBox field at runtime.
-**Not a blocker for:** Sprint 4 development (respx-mocked tests don't depend
-on real NetBox; same constraint Sprints 1-3 worked under).
-**How to fix if wrong:** each field has exactly one source-of-truth call site
-(the YAML for `asset_tag`'s read path; the bind/retire NetBox-write payload
-for `qr_id`); isolated by design.
+**No further action required.**
 
 ---
 
-## NetBox response shape verification (Sprint 4 Task 3 — pending production)
+## NetBox response shape verification — VERIFIED 2026-06-04 (partial)
 
-Three defensive code paths in `to_device_data()` (`app/services/device.py`)
-assume specific NetBox response shapes. Production deploy must verify each
-against the real NetBox; current respx-mocked tests use the assumed shapes,
-so a mismatch only surfaces at runtime.
+Three defensive code paths in `to_device_data()` were verified against the
+production NetBox 4.4.5 at `https://web-netbox.t-cloud.kz/`:
 
-1. **Device role key.**
-   - Code uses: `device.get("role") or device.get("device_role")`
-   - NetBox 4.x exposes it under `"role"`; NetBox 3.x under `"device_role"`.
-   - Verify which key is actually present in the deployed NetBox version.
+1. **Device role key.** ✓ NetBox 4.x exposes it under `"role"`. The code's
+   `device.get("role") or device.get("device_role")` fallback for NB 3.x is
+   unused now but harmless.
+2. **`primary_ip{4,6}` shape.** ✓ Returns `{"address": "192.0.2.10/24", ...}`
+   at the device root. CIDR notation present as expected.
 
-2. **`u_height` location.**
-   - Code uses: `device["device_type"]["u_height"]`
-   - Verify it's nested under `device_type`, not at the device root (in
-     some NetBox versions it may appear in both places).
+**Outstanding (cosmetic regression):**
 
-3. **`primary_ip{4,6}` shape.**
-   - Code uses: `device["primary_ip4"]["address"]`
-   - Verify the field is named `address` (not `value` or other) and that
-     it returns the full CIDR notation (e.g. `"192.0.2.10/24"`).
+3. **`device_type.u_height`** is NOT present in NetBox 4.x's nested
+   `device_type` slim serializer on either the device LIST or DETAIL
+   endpoint (only `id, display, manufacturer, model, slug, url, description`).
+   It IS available on `GET /api/dcim/device-types/{id}/` (a separate call).
+   Our code (`app/services/device.py:122`) returns `None` when missing,
+   so behaviour is: mobile device screen shows empty U value.
 
-**Owner:** NetBox admin (user) + the engineer running the production deploy.
-**Blocker for:** correct device-screen field display in the combined
-`GET /api/v1/qr/{qr_id}` response for BOUND QRs. Wrong assumptions silently
-return `None` for the affected field rather than crash — so a deploy could
-pass smoke tests with a missing manufacturer/role/IP and only surface in
-mobile-app QA.
-**How to fix if any assumption differs:** adjust the extraction in
-`to_device_data` in one focused commit; update the affected unit tests in
-`tests/unit/services/test_device.py` to match the real shape.
+   **How to fix if needed:** add a second NetBox call to the device-type
+   endpoint when populating `to_device_data`. Trade-off: extra round-trip
+   per device read. Defer until the mobile UX team asks for the U-height
+   field to display.
+
+**Owner:** Mobile workstream — surface in mobile QA, then decide whether
+to add the second round-trip.
+**Not a blocker for:** Sprint 8b web admin surface (web pages don't show
+device-screen U values); first production deploy.
 
 ---
 

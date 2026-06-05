@@ -132,7 +132,8 @@ def _device(qr_id_in_netbox: str | None = None) -> dict[str, Any]:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9", "qr_id": qr_id_in_netbox},
+        "asset_tag": "A-9",
+        "custom_fields": {"qr_id": qr_id_in_netbox},
         "last_updated": "2026-05-24T08:00:00.000000Z",
         "device_type": {
             "id": 11,

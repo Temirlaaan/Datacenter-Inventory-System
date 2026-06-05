@@ -213,7 +213,8 @@ def _device_dict(version: str = _VERSION, **overrides: Any) -> dict[str, Any]:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9"},
+        "asset_tag": "A-9",
+        "custom_fields": {},
         "last_updated": version,
     }
     device.update(overrides)
@@ -448,7 +449,8 @@ def _created_dict(device_id: int = 99) -> dict[str, Any]:
         "position": None,
         "serial": "",
         "comments": "",
-        "custom_fields": {"asset_tag": None},
+        "asset_tag": None,
+        "custom_fields": {},
         "last_updated": _NEW_VERSION,
     }
 
@@ -490,7 +492,7 @@ async def test_create_device_handler_passes_payload_through_post_with_attributio
     assert kwargs["payload"]["role"] == 31
     assert kwargs["payload"]["site"] == 1
     assert kwargs["payload"]["serial"] == "ABC"
-    assert kwargs["payload"]["custom_fields"] == {"asset_tag": "A-9"}
+    assert kwargs["payload"]["asset_tag"] == "A-9"
 
 
 async def test_create_device_handler_returns_422_on_netbox_validation_error() -> None:

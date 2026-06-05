@@ -13,7 +13,7 @@
 #     in ToR §4.3.2"
 #
 # Bump `version` on every change so the mobile client refetches.
-version: "2026-05-28.1"
+version: "2026-06-04.1"
 fields:
   - key: device_type_id
     label: Device Type
@@ -85,8 +85,10 @@ fields:
     type: text
     required: false
     max_length: 50
-    netbox_field: custom_fields.asset_tag
-    # Same Sprint 3 parking-lot mapping (custom_fields vs native asset_tag).
+    netbox_field: asset_tag
+    # NetBox 4.x native asset_tag field, verified 2026-06-04 against the
+    # production NetBox; the previously-flagged custom_fields path was
+    # retired in the same change.
 
   - key: comments
     label: Comments

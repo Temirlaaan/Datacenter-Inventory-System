@@ -59,7 +59,8 @@ def _device_dict(version: str = _NEW_VERSION, *, status: str = "decommissioning"
         "position": 42,
         "serial": "ABC123",
         "comments": "",
-        "custom_fields": {"asset_tag": "A-9", "qr_id": None},
+        "asset_tag": "A-9",
+        "custom_fields": {"qr_id": None},
         "last_updated": version,
     }
 

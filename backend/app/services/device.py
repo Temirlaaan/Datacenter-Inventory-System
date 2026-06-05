@@ -74,7 +74,10 @@ class DeviceResponse(BaseModel):
     version: str
 
 
-_EXTRACTED_CUSTOM_FIELDS = frozenset({"asset_tag", "qr_id"})
+_EXTRACTED_CUSTOM_FIELDS = frozenset({"qr_id"})
+"""Custom-field keys we surface typed on ``DeviceData`` rather than in the
+catch-all ``custom_fields`` map. Production verification 2026-06-04 moved
+``asset_tag`` off the custom-fields path onto NetBox 4.x's native field."""
 
 
 def to_device_data(device: dict[str, Any], *, qr_id: str | None = None) -> DeviceData:
@@ -141,7 +144,7 @@ def to_device_data(device: dict[str, Any], *, qr_id: str | None = None) -> Devic
         rack=ObjectRef(id=rack["id"], name=rack["name"]) if rack else None,
         position=device["position"],
         serial=device["serial"],
-        asset_tag=device["custom_fields"].get("asset_tag"),
+        asset_tag=device.get("asset_tag"),
         comments=device["comments"],
         # Task 3 additions
         device_type=device_type,
@@ -223,8 +226,8 @@ def to_netbox_create_payload(req: DeviceCreateRequest) -> dict[str, Any]:
     - ``role_id`` → ``role`` (NetBox 4.x convention; NetBox 3.x uses
       ``device_role`` — flagged in ``docs/parking-lot.md`` alongside the
       Sprint 4 Task 3 role-key entry)
-    - ``asset_tag`` → ``custom_fields.asset_tag`` (Sprint 3 mapping per
-      parking-lot)
+    - ``asset_tag`` → ``asset_tag`` (NetBox 4.x native field; verified
+      2026-06-04 against the production NetBox)
 
     Only fields the client provided appear in the output; optional fields
     left as None are omitted.
@@ -245,7 +248,7 @@ def to_netbox_create_payload(req: DeviceCreateRequest) -> dict[str, Any]:
     if req.comments is not None:
         payload["comments"] = req.comments
     if req.asset_tag is not None:
-        payload["custom_fields"] = {"asset_tag": req.asset_tag}
+        payload["asset_tag"] = req.asset_tag
     return payload
 
 
@@ -257,7 +260,8 @@ def to_netbox_changes(request: DeviceUpdateRequest) -> dict[str, Any]:
     ``rack_id=None`` unracks the device).
 
     Field renames: ``site_id``/``rack_id`` -> ``site``/``rack`` (NetBox's FK
-    keys take the raw id); ``asset_tag`` nests under ``custom_fields``.
+    keys take the raw id); ``asset_tag`` is the NetBox 4.x native field
+    (verified 2026-06-04 against the production NetBox).
     """
     sent = request.model_dump(exclude_unset=True)
     changes: dict[str, Any] = {}
@@ -274,7 +278,7 @@ def to_netbox_changes(request: DeviceUpdateRequest) -> dict[str, Any]:
     if "serial" in sent:
         changes["serial"] = sent["serial"]
     if "asset_tag" in sent:
-        changes["custom_fields"] = {"asset_tag": sent["asset_tag"]}
+        changes["asset_tag"] = sent["asset_tag"]
     if "comments" in sent:
         changes["comments"] = sent["comments"]
     return changes

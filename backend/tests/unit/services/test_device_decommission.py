@@ -213,7 +213,8 @@ def _device_dict(
         "position": None,
         "serial": "SN-99",
         "comments": "",
-        "custom_fields": {"qr_id": qr_id, "asset_tag": None},
+        "asset_tag": None,
+        "custom_fields": {"qr_id": qr_id},
     }
 
 

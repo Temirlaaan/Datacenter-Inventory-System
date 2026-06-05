@@ -128,7 +128,8 @@ def _device(version: str = _VERSION, *, qr_id: str | None = None) -> dict[str, A
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9", "qr_id": qr_id},
+        "asset_tag": "A-9",
+        "custom_fields": {"qr_id": qr_id},
         "last_updated": version,
     }
 

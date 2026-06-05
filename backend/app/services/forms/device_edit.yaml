@@ -6,7 +6,7 @@
 # mobile client refetches (Architecture §5.3).
 #
 # Field set is fixed by Sprint 3 decision F / ToR §4.3.4 — no additions.
-version: "2026-05-19.1"
+version: "2026-06-04.1"
 fields:
   - key: status
     label: Status
@@ -52,15 +52,16 @@ fields:
     required: false
     max_length: 50
 
-  # NetBox device asset tag. Architecture §5.1 maps this to a custom field;
-  # verify `custom_fields.asset_tag` matches the deployed NetBox before Task 6
-  # wires the device PATCH (NetBox also has a native `asset_tag` field).
-  - key: cf_asset_tag
+  # NetBox 4.x native `asset_tag` field (50-char max per NetBox model).
+  # Deployment verification 2026-06-04 against production NetBox 4.4.5
+  # confirmed the native field is used; the previously-flagged
+  # custom_fields.asset_tag path was retired in this same change.
+  - key: asset_tag
     label: Asset Tag
     type: text
     required: false
     max_length: 50
-    netbox_field: custom_fields.asset_tag
+    netbox_field: asset_tag
 
   - key: comments
     label: Comments

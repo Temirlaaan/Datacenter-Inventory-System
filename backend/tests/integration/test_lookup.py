@@ -119,7 +119,8 @@ def _device_payload() -> dict[str, Any]:
         "position": 10,
         "serial": "X9",
         "comments": "",
-        "custom_fields": {"asset_tag": None, "qr_id": None},
+        "asset_tag": None,
+        "custom_fields": {"qr_id": None},
         "last_updated": "2026-05-24T08:00:00.000000Z",
         "device_type": {
             "id": 11,

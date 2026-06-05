@@ -50,7 +50,8 @@ def _device(**overrides: Any) -> dict[str, Any]:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9"},
+        "asset_tag": "A-9",
+        "custom_fields": {},
         "last_updated": _VERSION,
     }
     device.update(overrides)
@@ -81,11 +82,11 @@ async def test_get_device_parses_a_full_device(clean_env: None, netbox_env: None
 
 
 async def test_get_device_handles_a_device_with_no_rack(clean_env: None, netbox_env: None) -> None:
-    """An unracked device: rack/position null, no asset_tag custom field."""
+    """An unracked device: rack/position null, no asset_tag set."""
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:
             router.get(f"{NETBOX_URL}/api/dcim/devices/5/").respond(
-                json=_device(rack=None, position=None, custom_fields={})
+                json=_device(rack=None, position=None, asset_tag=None, custom_fields={})
             )
             result = await DeviceService(client).get_device(5)
 
@@ -183,9 +184,11 @@ def test_to_netbox_changes_maps_site_id_and_rack_id_to_netbox_keys() -> None:
     assert changes == {"site": 1, "rack": 7}
 
 
-def test_to_netbox_changes_nests_asset_tag_under_custom_fields() -> None:
+def test_to_netbox_changes_writes_asset_tag_at_root() -> None:
+    """NetBox 4.x exposes ``asset_tag`` as a native field on Device, not via
+    ``custom_fields`` (verified 2026-06-04 against production NetBox)."""
     changes = to_netbox_changes(DeviceUpdateRequest(asset_tag="A-9"))
-    assert changes == {"custom_fields": {"asset_tag": "A-9"}}
+    assert changes == {"asset_tag": "A-9"}
 
 
 def test_to_netbox_changes_forwards_explicit_null_rack_id_to_unrack() -> None:
@@ -214,7 +217,7 @@ def test_to_netbox_changes_emits_all_keys_when_every_field_is_set() -> None:
         "position": 42,
         "name": "sw-01",
         "serial": "ABC123",
-        "custom_fields": {"asset_tag": "A-9"},
+        "asset_tag": "A-9",
         "comments": "core switch",
     }
 
@@ -233,8 +236,8 @@ def _full_device(**overrides: Any) -> dict[str, Any]:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
+        "asset_tag": "A-9",
         "custom_fields": {
-            "asset_tag": "A-9",
             "qr_id": "DCQR-OLDVALUE",  # NetBox-side value; decision H ignores this
             "rack_unit_offset": 2,  # arbitrary extra cf — must survive into `custom_fields`
             "deprecated_note": None,  # null — must be filtered out
@@ -356,11 +359,12 @@ def test_to_device_data_custom_fields_drops_none_values() -> None:
     assert "deprecated_note" not in data.custom_fields
 
 
-def test_to_device_data_custom_fields_excludes_asset_tag_and_qr_id() -> None:
-    """The dedicated typed fields own these; custom_fields holds the rest."""
+def test_to_device_data_custom_fields_excludes_qr_id() -> None:
+    """The dedicated typed field owns qr_id; custom_fields holds the rest.
+    (NetBox 4.x asset_tag is the native field, no longer a custom field —
+    so the exclusion list now contains only qr_id.)"""
     data = to_device_data(_full_device())
     assert data.custom_fields is not None
-    assert "asset_tag" not in data.custom_fields
     assert "qr_id" not in data.custom_fields
     # The other custom field passes through.
     assert data.custom_fields["rack_unit_offset"] == 2
@@ -368,7 +372,7 @@ def test_to_device_data_custom_fields_excludes_asset_tag_and_qr_id() -> None:
 
 def test_to_device_data_custom_fields_returns_none_when_empty_after_filter() -> None:
     """A device with only excluded keys yields no custom_fields entry."""
-    device = _device(custom_fields={"asset_tag": "A-9", "qr_id": "x"})
+    device = _device(asset_tag="A-9", custom_fields={"qr_id": "x"})
     assert to_device_data(device).custom_fields is None
 
 
@@ -567,9 +571,11 @@ def test_to_netbox_create_payload_renames_rack_id_to_rack() -> None:
     assert to_netbox_create_payload(req)["rack"] == 7
 
 
-def test_to_netbox_create_payload_nests_asset_tag_under_custom_fields() -> None:
+def test_to_netbox_create_payload_writes_asset_tag_at_root() -> None:
+    """NetBox 4.x native asset_tag — at root, not under custom_fields."""
     req = DeviceCreateRequest(**_minimal_create(), asset_tag="A-9")
-    assert to_netbox_create_payload(req)["custom_fields"] == {"asset_tag": "A-9"}
+    assert to_netbox_create_payload(req)["asset_tag"] == "A-9"
+    assert "custom_fields" not in to_netbox_create_payload(req)
 
 
 def test_to_netbox_create_payload_emits_all_fields_when_all_set() -> None:
@@ -591,5 +597,5 @@ def test_to_netbox_create_payload_emits_all_fields_when_all_set() -> None:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9"},
+        "asset_tag": "A-9",
     }

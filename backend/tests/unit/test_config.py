@@ -41,10 +41,14 @@ def test_settings_missing_netbox_url_raises_validation_error(
     monkeypatch.setenv("NETBOX_SERVICE_TOKEN", "x")
     monkeypatch.setenv("KEYCLOAK_BASE_URL", "https://sso.example.com")
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("KEYCLOAK_WEB_CLIENT_SECRET", "x")
+    monkeypatch.setenv("SESSION_COOKIE_KEY", "x" * 44)
     from app.config import Settings
 
+    # _env_file=None bypasses any local .env that would otherwise fill in
+    # the deliberately-missing NETBOX_URL and let the test silently pass.
     with pytest.raises(ValidationError) as exc:
-        Settings()
+        Settings(_env_file=None)
     assert "netbox_url" in str(exc.value).lower()
 
 
@@ -357,8 +361,10 @@ def test_settings_missing_keycloak_web_client_secret_raises(
     monkeypatch.delenv("KEYCLOAK_WEB_CLIENT_SECRET", raising=False)
     from app.config import Settings
 
+    # _env_file=None bypasses any local .env that would otherwise fill in
+    # the deliberately-missing secret and let the test silently pass.
     with pytest.raises(ValidationError) as exc:
-        Settings()
+        Settings(_env_file=None)
     assert "keycloak_web_client_secret" in str(exc.value).lower()
 
 
@@ -375,8 +381,10 @@ def test_settings_missing_session_cookie_key_raises(
     monkeypatch.delenv("SESSION_COOKIE_KEY", raising=False)
     from app.config import Settings
 
+    # _env_file=None bypasses any local .env that would otherwise fill in
+    # the deliberately-missing key and let the test silently pass.
     with pytest.raises(ValidationError) as exc:
-        Settings()
+        Settings(_env_file=None)
     assert "session_cookie_key" in str(exc.value).lower()
 
 

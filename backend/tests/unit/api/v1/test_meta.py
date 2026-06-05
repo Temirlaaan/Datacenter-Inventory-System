@@ -171,7 +171,7 @@ async def test_get_device_form_handler_returns_config() -> None:
         "position",
         "name",
         "serial",
-        "cf_asset_tag",
+        "asset_tag",
         "comments",
     }
 

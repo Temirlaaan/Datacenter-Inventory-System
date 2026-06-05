@@ -33,15 +33,26 @@ services:
     depends_on:
       dcinv-db:
         condition: service_healthy
+    # ``env_file`` carries every variable from .env into the container so
+    # newer Settings fields (Sprint 7+ SHIFT_AUTO_END_*, Sprint 8a
+    # NETBOX_CIRCUIT_* / RATE_LIMIT_*, Sprint 8b KEYCLOAK_WEB_CLIENT_* /
+    # SESSION_COOKIE_KEY / COOKIE_SECURE) don't need explicit enumeration
+    # here. Anything explicitly listed under ``environment:`` below
+    # overrides .env — used for required-var validation + assembling
+    # DATABASE_URL from the POSTGRES_* parts.
+    env_file: .env
     environment:
-      # All required Settings fields come from .env (see .env.example for the list).
+      # Required vars: ``${VAR:?...}`` fails at compose-up if unset, before
+      # the container even starts. Catches missing env earlier than the
+      # Pydantic Settings validator.
       NETBOX_URL: ${NETBOX_URL:?NETBOX_URL is required}
       NETBOX_SERVICE_TOKEN: ${NETBOX_SERVICE_TOKEN:?NETBOX_SERVICE_TOKEN is required}
       KEYCLOAK_BASE_URL: ${KEYCLOAK_BASE_URL:?KEYCLOAK_BASE_URL is required}
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-prod-v1}
+      KEYCLOAK_WEB_CLIENT_SECRET: ${KEYCLOAK_WEB_CLIENT_SECRET:?KEYCLOAK_WEB_CLIENT_SECRET is required}
+      SESSION_COOKIE_KEY: ${SESSION_COOKIE_KEY:?SESSION_COOKIE_KEY is required (generate via cryptography.fernet.Fernet.generate_key())}
+      # DATABASE_URL is assembled from POSTGRES_* so it stays in sync with
+      # the dcinv-db service env above.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dcinv}:${POSTGRES_PASSWORD}@dcinv-db:5432/${POSTGRES_DB:-dcinv}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      JWKS_CACHE_TTL_SECONDS: ${JWKS_CACHE_TTL_SECONDS:-3600}
     ports:
       - "8000:8000"
     healthcheck:

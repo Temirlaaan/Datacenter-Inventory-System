@@ -113,7 +113,8 @@ def _created_dict() -> dict[str, Any]:
         "position": None,
         "serial": "",
         "comments": "",
-        "custom_fields": {"asset_tag": None},
+        "asset_tag": None,
+        "custom_fields": {},
         "last_updated": _NEW_VERSION,
     }
 

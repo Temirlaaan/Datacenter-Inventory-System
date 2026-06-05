@@ -105,7 +105,8 @@ def _device(version: str = _VERSION, **overrides: Any) -> dict[str, Any]:
         "position": 42,
         "serial": "ABC123",
         "comments": "core switch",
-        "custom_fields": {"asset_tag": "A-9"},
+        "asset_tag": "A-9",
+        "custom_fields": {},
         "last_updated": version,
     }
     device.update(overrides)

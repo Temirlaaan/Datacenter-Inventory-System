@@ -47,12 +47,25 @@ class Settings(BaseSettings):
     keycloak_web_client_id: str = "dcinv-web"
     keycloak_web_client_secret: SecretStr
     session_cookie_key: SecretStr
+    # Production deploys behind TLS MUST set ``COOKIE_SECURE=true`` so the
+    # dcinv_admin_session + OIDC-flow cookies get the ``Secure`` attribute and
+    # the browser refuses to send them over plaintext. Defaults to ``false``
+    # so localhost dev (``http://localhost:8000``) actually receives the
+    # cookies — Secure-flagged cookies are dropped by browsers over plain HTTP.
+    cookie_secure: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="forbid",
+        # ``ignore`` (not ``forbid``) because ``.env`` is shared with
+        # docker-compose. POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD are
+        # consumed by the dcinv-db service + assembled into DATABASE_URL via
+        # compose substitution — they aren't (and shouldn't be) Settings
+        # fields, but they live in the same .env. ``forbid`` would reject the
+        # whole load on any unknown key. Typos in REAL app env names still
+        # fail-fast via the "field required" path on missing required fields.
+        extra="ignore",
         secrets_dir=_resolve_secrets_dir(),
     )
 

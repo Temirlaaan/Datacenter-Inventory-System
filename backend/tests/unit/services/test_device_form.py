@@ -34,7 +34,7 @@ _MVP_FIELD_KEYS = {
     "position",
     "name",
     "serial",
-    "cf_asset_tag",
+    "asset_tag",
     "comments",
 }
 
@@ -99,7 +99,7 @@ def test_device_edit_yaml_loads_with_the_eight_mvp_fields() -> None:
     assert {field.key for field in config.fields} == _MVP_FIELD_KEYS
     by_key = {field.key: field for field in config.fields}
     assert by_key["status"].model_dump()["choices_endpoint"] == "/api/v1/meta/statuses"
-    assert by_key["cf_asset_tag"].model_dump()["netbox_field"] == "custom_fields.asset_tag"
+    assert by_key["asset_tag"].model_dump()["netbox_field"] == "asset_tag"
 
 
 def test_get_device_form_config_is_cached() -> None:
@@ -169,7 +169,7 @@ def test_device_create_yaml_field_specific_keys_pass_through() -> None:
     assert by_key["site_id"]["netbox_field"] == "site"
     assert by_key["rack_id"]["depends_on"] == ["site_id"]
     assert by_key["position"]["depends_on"] == ["rack_id"]
-    assert by_key["asset_tag"]["netbox_field"] == "custom_fields.asset_tag"
+    assert by_key["asset_tag"]["netbox_field"] == "asset_tag"
     assert by_key["status"]["choices_endpoint"] == "/api/v1/meta/statuses"
 
 
