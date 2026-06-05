@@ -43,6 +43,7 @@ from app.web.router import (
     dashboard,
     oidc_callback,
     sessions_list,
+    web_admin_shift_start,
     web_force_close_session,
 )
 
@@ -864,6 +865,154 @@ async def test_web_force_close_session_reraises_non_404_http_exception(
             session=object(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 500
+
+
+# ---------- web_admin_shift_start: "Open admin shift" form handler ----------
+
+
+def _build_shift_start_request(
+    *, cookie_value: str | None = None
+) -> Request:
+    """Construct a POST /web/admin/shift/start Request, optionally carrying
+    a session cookie. The handler reads the cookie inline (skipping
+    ``require_web_admin``'s shift check), so unit tests build the Request
+    directly rather than threading a dep-overridden TestClient."""
+    headers: list[tuple[bytes, bytes]] = []
+    if cookie_value is not None:
+        headers.append((b"cookie", f"{SESSION_COOKIE_NAME}={cookie_value}".encode()))
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/web/admin/shift/start",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": headers,
+    }
+    return Request(scope)
+
+
+def _admin_cookie_value(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Fernet-encrypt an admin WebAdminUser payload using the test key."""
+    _set_env(monkeypatch)
+    from app.web.auth import build_session_cookie_payload, encode_session_cookie
+
+    user = build_session_cookie_payload(
+        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",)
+    )
+    return encode_session_cookie(user)
+
+
+def _non_admin_cookie_value(monkeypatch: pytest.MonkeyPatch) -> str:
+    _set_env(monkeypatch)
+    from app.web.auth import build_session_cookie_payload, encode_session_cookie
+
+    user = build_session_cookie_payload(
+        sub=_USER_SUB, email="bob@example.com", roles=("dcinv-mobile-user",)
+    )
+    return encode_session_cookie(user)
+
+
+async def test_web_admin_shift_start_returns_303_to_dashboard_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: valid admin cookie + workstation_id → service.start
+    succeeds → 303 to /web/."""
+    cookie = _admin_cookie_value(monkeypatch)
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeService:
+        def __init__(self, *, session: object, repo: object) -> None: ...
+
+        async def start(self, *, user_email: str, user_keycloak_id: UUID, tablet_id: str) -> None:
+            assert user_email == "alice@example.com"
+            assert user_keycloak_id == _USER_SUB
+            assert tablet_id == "admin-laptop-01"
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.ShiftSessionService", _FakeService)
+
+    response = await web_admin_shift_start(
+        request=_build_shift_start_request(cookie_value=cookie),
+        workstation_id="admin-laptop-01",
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/web/"
+
+
+async def test_web_admin_shift_start_returns_303_to_dashboard_when_already_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idempotent UX: ``SessionAlreadyActive`` (concurrent open in another
+    tab) still lands the user on /web/ — they're already in the state the
+    page wanted."""
+    from uuid import uuid4
+
+    from app.domain.shift_session import ShiftSession
+    from app.services.shift_session import SessionAlreadyActive
+
+    cookie = _admin_cookie_value(monkeypatch)
+    winner = ShiftSession(
+        id=uuid4(),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        shift_start_at=datetime(2026, 6, 5, 10, 0, 0, tzinfo=UTC),
+        shift_end_at=None,
+        tablet_id="admin-laptop-01",
+        end_reason=None,
+    )
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeService:
+        def __init__(self, *, session: object, repo: object) -> None: ...
+
+        async def start(self, **_kwargs: object) -> None:
+            raise SessionAlreadyActive(winner)
+
+    monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.ShiftSessionService", _FakeService)
+
+    response = await web_admin_shift_start(
+        request=_build_shift_start_request(cookie_value=cookie),
+        workstation_id="admin-laptop-01",
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/web/"
+
+
+async def test_web_admin_shift_start_returns_303_to_login_without_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No session cookie → redirect to /web/login (no information leak)."""
+    _set_env(monkeypatch)
+    response = await web_admin_shift_start(
+        request=_build_shift_start_request(cookie_value=None),
+        workstation_id="admin-laptop-01",
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/web/login"
+
+
+async def test_web_admin_shift_start_returns_303_to_login_when_role_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid cookie but no ``dcinv-admin`` role → same redirect as no
+    cookie (same information-leak rule as require_web_admin)."""
+    cookie = _non_admin_cookie_value(monkeypatch)
+    response = await web_admin_shift_start(
+        request=_build_shift_start_request(cookie_value=cookie),
+        workstation_id="admin-laptop-01",
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/web/login"
 
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.

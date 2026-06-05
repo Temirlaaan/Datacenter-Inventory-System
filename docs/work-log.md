@@ -1051,3 +1051,20 @@ To smoke-test the full admin web surface against a running stack:
 4. Create a batch via `POST /api/v1/admin/batches/` (curl or the existing mobile path), then go to `/web/batches/` → click the row → "Download labels (PDF)".
 5. Go to `/web/audit/`, filter on `entity_type=qr`, click "Download CSV" to download a filtered export.
 6. Go to `/web/sessions/`, type a reason into another shift's force-close form, submit. See the green flash + the row's state change.
+
+---
+
+## Post-Sprint 8b fixes (pre-deployment)
+
+Standalone bug-fix commits between Sprint 8b close and first production deployment. Not a sprint — small targeted fixes that surfaced during a pre-deploy template walk-through. Sprint 9 has not been opened.
+
+### 2026-06-05 — fix: `_admin_shift_needed.html` form actually opens an admin shift
+
+The "Start admin shift" intermediate page was visually correct but functionally broken in any real browser:
+
+- The form set `enctype="application/json"` and posted to `/api/v1/admin/sessions/start`. Browsers ignore that enctype (it is not a valid form enctype value) and send `application/x-www-form-urlencoded` regardless — so the JSON endpoint's Pydantic body parser saw urlencoded data and returned 422.
+- Even with a matching body shape, the JSON endpoint is gated by `require_role("dcinv-admin")` which reads the JWT bearer header. The web admin only carries the Fernet cookie → 401.
+
+**Fix.** New `POST /web/admin/shift/start` handler in [backend/app/web/router.py](../backend/app/web/router.py) mirroring the Sprint 8b Task 4 force-close pattern: cookie auth inline (skipping the active-shift check — this handler IS for the no-shift state), `Form(workstation_id)`, delegates directly to `ShiftSessionService.start(...)`, 303 → `/web/`. `SessionAlreadyActive` also 303s to `/web/` (idempotent UX: a concurrent open in another tab already put the user in the state the page wanted). Template ([_admin_shift_needed.html](../backend/app/web/templates/_admin_shift_needed.html)) action repointed and the misleading enctype dropped.
+
+Tests: four direct-await cases in [tests/unit/web/test_router.py](../backend/tests/unit/web/test_router.py) (success, already-active idempotent, no cookie, non-admin role). Unit suite: 547 → 551 passing (Sprint 8b's 1018-test count was suite-wide including integration).

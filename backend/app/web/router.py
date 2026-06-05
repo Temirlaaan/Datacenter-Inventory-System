@@ -43,11 +43,13 @@ from app.db.repositories.shift_session import (
 from app.db.session import get_session, get_sessionmaker
 from app.domain.audit import AuditResult
 from app.domain.shift_session import ShiftEndReason
+from app.services.shift_session import SessionAlreadyActive, ShiftSessionService
 from app.web.auth import (
     SESSION_COOKIE_MAX_AGE_SECONDS,
     SESSION_COOKIE_NAME,
     WebAdminUser,
     build_session_cookie_payload,
+    decode_session_cookie,
     encode_session_cookie,
     require_web_admin,
 )
@@ -665,3 +667,58 @@ async def web_force_close_session(
     return _sessions_flash_redirect(
         flash="Shift force-closed", flash_kind="info", filter_qs=filter_qs
     )
+
+
+# ---------- /web/admin/shift/start --- "Open admin shift" form target -------
+
+
+def _resolve_web_admin_cookie(request: Request) -> WebAdminUser | None:
+    """Cookie + admin-role check without the active-shift lookup.
+
+    ``require_web_admin`` raises ``AdminShiftNeeded`` when the user has no
+    active shift — but the whole point of this handler IS to open one. So
+    we re-do the lighter half of that dep inline. Returns ``None`` on any
+    auth failure; caller redirects to /web/login (same information-leak
+    rule as require_web_admin).
+    """
+    raw = request.cookies.get(SESSION_COOKIE_NAME)
+    if raw is None:
+        return None
+    user = decode_session_cookie(raw)
+    if user is None or "dcinv-admin" not in user.roles:
+        return None
+    return user
+
+
+@router.post("/admin/shift/start")
+async def web_admin_shift_start(
+    request: Request,
+    workstation_id: str = Form(min_length=1, max_length=255),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Open an admin shift from the ``_admin_shift_needed.html`` form.
+
+    The intermediate page renders when an admin has a valid cookie but no
+    active shift. This handler accepts the form post (urlencoded — browsers
+    ignore ``enctype="application/json"``, which was the original bug) and
+    delegates to ``ShiftSessionService.start`` directly so the shift-open
+    apparatus stays in one place — same decision-I pattern as
+    ``web_force_close_session`` above.
+
+    Idempotent: if ``SessionAlreadyActive`` fires (concurrent shift opened
+    in another tab), the user is already in the state the page wanted, so
+    303 to ``/web/`` anyway rather than surface an error.
+    """
+    user = _resolve_web_admin_cookie(request)
+    if user is None:
+        return RedirectResponse(url="/web/login", status_code=status.HTTP_303_SEE_OTHER)
+    service = ShiftSessionService(session=session, repo=ShiftSessionRepository(session))
+    try:
+        await service.start(
+            user_email=user.email,
+            user_keycloak_id=user.sub,
+            tablet_id=workstation_id,
+        )
+    except SessionAlreadyActive:
+        pass
+    return RedirectResponse(url="/web/", status_code=status.HTTP_303_SEE_OTHER)
