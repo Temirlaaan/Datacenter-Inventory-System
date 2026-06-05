@@ -368,6 +368,67 @@ async def batches_list(
     )
 
 
+# ---------- /web/batches/new + POST /web/batches/ — create batch form -------
+#
+# IMPORTANT: declared BEFORE ``/batches/{batch_id}`` so FastAPI's order-based
+# dispatch matches /web/batches/new to this handler and not to the
+# parameterised detail route. The detail route's path converter (UUID) would
+# 422 on "new" otherwise.
+
+
+@router.get("/batches/new", response_class=HTMLResponse)
+async def batches_new_form(
+    request: Request,
+    user: WebAdminUser = Depends(require_web_admin),
+) -> HTMLResponse:
+    """Render the "create new batch" form. POST target is ``/web/batches/``."""
+    return templates.TemplateResponse(
+        request,
+        "batches/new.html",
+        {"user_email": user.email},
+    )
+
+
+@router.post("/batches/")
+async def web_batches_create(
+    count: int = Form(ge=1, le=500),
+    comment: str = Form(default="", max_length=200),
+    intended_site_id: int | None = Form(default=None, ge=1),
+    intended_location_id: int | None = Form(default=None, ge=1),
+    intended_rack_id: int | None = Form(default=None, ge=1),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Create a QR batch from the web form. Delegates to ``QRGenerationService``
+    directly so the three-record-write apparatus (batch row + N FREE codes +
+    one ``qr.generate_batch`` audit row) stays in one place.
+
+    No idempotency key — the form is one-shot from a browser; double-submit
+    of the same form would create two batches, which is acceptable for an
+    interactive flow (the admin sees the redirect and won't double-submit).
+    303 to the new batch's detail page with a flash banner.
+    """
+    auth_user = await _build_auth_user_for_admin_action(user)
+    service = QRGenerationService(
+        session,
+        QRBatchRepository(session),
+        QRCodeRepository(session),
+        AuditLogRepository(session),
+    )
+    payload = GenerateBatchRequest(
+        count=count,
+        intended_site_id=intended_site_id,
+        intended_location_id=intended_location_id,
+        intended_rack_id=intended_rack_id,
+        comment=comment.strip() or None,
+    )
+    batch = await service.generate_batch(payload, auth_user)
+    await session.commit()
+    flash = f"Batch created with {count} codes"
+    target = f"/web/batches/{batch.id}?{urlencode({'flash': flash, 'flash_kind': 'info'})}"
+    return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.get("/batches/{batch_id}", response_class=HTMLResponse)
 async def batches_detail(
     request: Request,
@@ -791,62 +852,6 @@ async def _build_auth_user_for_admin_action(user: WebAdminUser) -> AuthUser:
         session_id=None,
         shift_session_id=active.id,
     )
-
-
-# ---------- /web/batches/new + POST /web/batches/ — create batch form -------
-
-
-@router.get("/batches/new", response_class=HTMLResponse)
-async def batches_new_form(
-    request: Request,
-    user: WebAdminUser = Depends(require_web_admin),
-) -> HTMLResponse:
-    """Render the "create new batch" form. POST target is ``/web/batches/``."""
-    return templates.TemplateResponse(
-        request,
-        "batches/new.html",
-        {"user_email": user.email},
-    )
-
-
-@router.post("/batches/")
-async def web_batches_create(
-    count: int = Form(ge=1, le=500),
-    comment: str = Form(default="", max_length=200),
-    intended_site_id: int | None = Form(default=None, ge=1),
-    intended_location_id: int | None = Form(default=None, ge=1),
-    intended_rack_id: int | None = Form(default=None, ge=1),
-    user: WebAdminUser = Depends(require_web_admin),
-    session: AsyncSession = Depends(get_session),
-) -> RedirectResponse:
-    """Create a QR batch from the web form. Delegates to ``QRGenerationService``
-    directly so the three-record-write apparatus (batch row + N FREE codes +
-    one ``qr.generate_batch`` audit row) stays in one place.
-
-    No idempotency key — the form is one-shot from a browser; double-submit
-    of the same form would create two batches, which is acceptable for an
-    interactive flow (the admin sees the redirect and won't double-submit).
-    303 to the new batch's detail page with a flash banner.
-    """
-    auth_user = await _build_auth_user_for_admin_action(user)
-    service = QRGenerationService(
-        session,
-        QRBatchRepository(session),
-        QRCodeRepository(session),
-        AuditLogRepository(session),
-    )
-    payload = GenerateBatchRequest(
-        count=count,
-        intended_site_id=intended_site_id,
-        intended_location_id=intended_location_id,
-        intended_rack_id=intended_rack_id,
-        comment=comment.strip() or None,
-    )
-    batch = await service.generate_batch(payload, auth_user)
-    await session.commit()
-    flash = f"Batch created with {count} codes"
-    target = f"/web/batches/{batch.id}?{urlencode({'flash': flash, 'flash_kind': 'info'})}"
-    return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
 
 
 # ---------- POST /web/qr/{qr_id}/retire — inline retire-QR form -------------

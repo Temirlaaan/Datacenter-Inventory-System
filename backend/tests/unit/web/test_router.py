@@ -1575,5 +1575,27 @@ async def test_devices_decommission_form_renders(monkeypatch: pytest.MonkeyPatch
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).
 _ = _admin_action_request
 
+
+def test_batches_new_route_declared_before_batches_detail() -> None:
+    """Regression guard: FastAPI dispatches routes in registration order, so
+    ``GET /batches/new`` MUST come before ``GET /batches/{batch_id}``,
+    otherwise FastAPI tries to parse ``"new"`` as a UUID and 422s.
+
+    Hit in production 2026-06-05; the fix was to reorder the handlers in
+    router.py. This test pins the order so a future refactor moving the
+    new-batch handler back down silently re-breaks the form.
+    """
+    from app.web.router import router
+
+    paths_in_order = [
+        getattr(r, "path", None) for r in router.routes if getattr(r, "path", None)
+    ]
+    new_idx = paths_in_order.index("/batches/new")
+    detail_idx = paths_in_order.index("/batches/{batch_id}")
+    assert new_idx < detail_idx, (
+        f"/batches/new must be registered before /batches/{{batch_id}}; "
+        f"got new at {new_idx}, detail at {detail_idx}"
+    )
+
 # Suppress unused-import warnings for symbols only referenced inside scopes.
 _ = (Fernet, AsyncIterator, jwt, SESSION_COOKIE_NAME, Any)
