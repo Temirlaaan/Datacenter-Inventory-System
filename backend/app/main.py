@@ -11,7 +11,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import RequestResponseEndpoint
 
@@ -118,6 +118,19 @@ app.mount(
     StaticFiles(directory=str(Path(__file__).parent / "web" / "static")),
     name="static",
 )
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect() -> RedirectResponse:
+    """Bare-hostname convenience: ``GET /`` → ``/web/``.
+
+    Without this, a user typing the hostname (or an LB liveness probe
+    pointed at ``/``) gets FastAPI's default JSON 404. The admin surface
+    lives under ``/web/`` (the OIDC redirect flow takes over from there).
+    307 keeps the method semantically correct and isn't aggressively
+    cached, leaving room to serve real content at ``/`` later if needed.
+    """
+    return RedirectResponse(url="/web/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @app.exception_handler(NetBoxNotFound)

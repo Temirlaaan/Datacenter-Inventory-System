@@ -1068,3 +1068,13 @@ The "Start admin shift" intermediate page was visually correct but functionally 
 **Fix.** New `POST /web/admin/shift/start` handler in [backend/app/web/router.py](../backend/app/web/router.py) mirroring the Sprint 8b Task 4 force-close pattern: cookie auth inline (skipping the active-shift check — this handler IS for the no-shift state), `Form(workstation_id)`, delegates directly to `ShiftSessionService.start(...)`, 303 → `/web/`. `SessionAlreadyActive` also 303s to `/web/` (idempotent UX: a concurrent open in another tab already put the user in the state the page wanted). Template ([_admin_shift_needed.html](../backend/app/web/templates/_admin_shift_needed.html)) action repointed and the misleading enctype dropped.
 
 Tests: four direct-await cases in [tests/unit/web/test_router.py](../backend/tests/unit/web/test_router.py) (success, already-active idempotent, no cookie, non-admin role). Unit suite: 547 → 551 passing (Sprint 8b's 1018-test count was suite-wide including integration).
+
+### 2026-06-05 — fix: bare-hostname `GET /` → 307 redirect to `/web/`
+
+First-deployment feedback: users opening `https://qr-dc.t-cloud.kz/` saw FastAPI's default `{"detail": "Not Found"}` JSON instead of the admin. The web surface lives under `/web/`; bare `/` had no route.
+
+**Fix.** Add `GET /` handler in [backend/app/main.py](../backend/app/main.py) returning `RedirectResponse(url="/web/", status_code=307)`. 307 (not 301/308) so we keep room to serve real content at `/` later without fighting browser cache. `include_in_schema=False` keeps `/docs` clean.
+
+Also added `/` to `_UNLIMITED_PATHS` in [backend/app/middleware/rate_limit.py](../backend/app/middleware/rate_limit.py) so an upstream LB liveness probe pointed at `/` (we saw this from `10.121.43.31:0` in the first-deploy logs) cannot exhaust the per-user READ bucket. Semantically correct: bare `/` is pure redirect plumbing with no business logic.
+
+Tests: new [tests/unit/test_main.py](../backend/tests/unit/test_main.py) with one direct-await test, plus a new row in the parametrized `_classify_request` table. Unit suite: 551 → 553 passing.

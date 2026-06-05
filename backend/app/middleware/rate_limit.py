@@ -46,7 +46,9 @@ from app.config import get_settings
 logger = structlog.get_logger()
 
 _WINDOW_SECONDS = 60
-_UNLIMITED_PATHS: frozenset[str] = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+_UNLIMITED_PATHS: frozenset[str] = frozenset(
+    {"/", "/health", "/docs", "/openapi.json", "/redoc"}
+)
 _UNLIMITED_PREFIXES: tuple[str, ...] = ("/web/", "/static/")
 """Sprint 8b Task 0 decision I: ``/web/*`` pages go through ``require_web_admin``
 which calls admin JSON endpoints internally via FastAPI dep injection (not

@@ -56,6 +56,7 @@ from app.middleware.rate_limit import (
         ("POST", "/api/v1/sessions/end", RateLimitClass.WRITE),
         ("GET", "/api/v1/sessions/active", RateLimitClass.READ),
         # UNLIMITED paths
+        ("GET", "/", RateLimitClass.UNLIMITED),
         ("GET", "/health", RateLimitClass.UNLIMITED),
         ("GET", "/docs", RateLimitClass.UNLIMITED),
         ("GET", "/openapi.json", RateLimitClass.UNLIMITED),
