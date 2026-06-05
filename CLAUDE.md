@@ -19,6 +19,8 @@ Sprint 8b (User-Facing Deliverables) closed 2026-06-04. The `backend/` directory
 - `docs/sprint-8b.md` — Sprint 8b plan (delivered)
 - `docs/work-log.md` — running log of what shipped, what was deferred, and per-sprint retrospectives. **Authoritative for sprint history.**
 - `docs/deploy.md` — first-deployment operator checklist (NetBox + Keycloak + `.env` + TLS + smoke).
+- `docs/nginx.example.conf` — minimal nginx reverse-proxy config (TLS termination + `X-Forwarded-*` headers).
+- `docs/mobile-api-guide.md` — `/api/v1/*` contract guide for the Android mobile app workstream.
 
 The two design docs (Architecture + ToR) are deliberately split: any change to architecture should be checked against the ToR's acceptance criteria, and vice versa.
 

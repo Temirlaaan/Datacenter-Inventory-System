@@ -61,4 +61,13 @@ HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=6 \
 # Migration runs before uvicorn. Failure here aborts startup — by design, since serving
 # traffic against an out-of-date schema would corrupt data.
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# ``--proxy-headers`` makes uvicorn read X-Forwarded-Proto + X-Forwarded-For
+# set by the reverse proxy (nginx/Caddy/Traefik), so FastAPI sees the
+# correct scheme/host/client-ip. Critical for the OIDC redirect URI
+# (web/router.py:_keycloak_redirect_uri) — Keycloak rejects a callback
+# under ``http://`` when only ``https://...`` is registered.
+#
+# ``--forwarded-allow-ips '*'`` trusts forwarded headers from any source.
+# Safe here because port 8000 is never exposed publicly — it's only reachable
+# from the reverse proxy on the same Docker network / host.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
