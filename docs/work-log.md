@@ -1113,3 +1113,16 @@ Helper `_build_auth_user_for_admin_action` factors the cookie-decode + active-sh
 3. Dashboard → "Decommission device" → form → 303 with flash. QR-first ordering still handled in the underlying service; OCC version fetched server-side so the admin only types device id + reason.
 
 **Still deferred** (parking lot unchanged otherwise): CSRF for `/web/*` POSTs; `/web/qr/search` (lookup by id); `/web/users/` (Keycloak admin client). BOUND→RETIRED via the dedicated retire button is intentionally NOT supported — the device decommission flow does it correctly with proper OCC, and the retire button is for FREE codes only.
+
+### 2026-06-05 — fix(web): retire redirects back to batch detail + confirm dialogs
+
+Self-code-review of the admin-action forms surfaced two issues:
+
+1. **Retire-QR redirected to `/web/batches/`** (the list page), losing the admin's context when retiring multiple FREE codes from inside a single batch detail page.
+2. **Destructive actions had no confirmation step** — Retire on each FREE row and Decommission device were single-click-submit, easy to misfire.
+
+**Fix.** `POST /web/qr/{qr_id}/retire` now accepts a `batch_id: UUID | None` form field. The inline form in [batches/detail.html](../backend/app/web/templates/batches/detail.html) carries it as a hidden input, so the 303 lands back on `/web/batches/{batch_id}?flash=...` instead of the bare list. Falls back to the list when absent (curl / hand-rolled POST). Both [batches/detail.html](../backend/app/web/templates/batches/detail.html) (Retire button) and [devices/decommission.html](../backend/app/web/templates/devices/decommission.html) (Decommission button) get a one-line `onsubmit="return confirm(...);"` JS guard. The decommission confirm interpolates the device id at submit time.
+
+One new direct-await test covers the `batch_id`-present branch; existing retire tests updated to pass `batch_id=None` explicitly (direct-await bypasses FastAPI's `Form(...)` default-unwrap, so the dependency-injected default doesn't apply when the handler is called as a plain coroutine). Unit suite: 565 → 567 passing.
+
+**CSRF still deferred** — same parking-lot item from Sprint 8b. Worth escalating into the next sprint now that there are four `/web/*` POST forms in active use.

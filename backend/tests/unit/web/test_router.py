@@ -1269,6 +1269,7 @@ async def test_web_qr_retire_success_redirects_with_info_flash(
 
     response = await web_qr_retire(
         qr_id="QR-ABC",
+        batch_id=None,
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1276,6 +1277,34 @@ async def test_web_qr_retire_success_redirects_with_info_flash(
     assert response.headers["location"].startswith("/web/batches/?")
     assert f"flash_kind={expected_flash_kind}" in response.headers["location"]
     assert expected_flash_fragment in response.headers["location"]
+
+
+async def test_web_qr_retire_redirects_back_to_batch_detail_when_batch_id_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hidden ``batch_id`` form input from the detail template → 303 to
+    ``/web/batches/{batch_id}`` instead of the bare list. Preserves the
+    admin's inspection context when retiring multiple FREE codes in a row
+    (HIGH-1 from the 2026-06-05 code review)."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from uuid import uuid4
+
+    async def _retire(**_kwargs: object) -> Any:
+        return None
+
+    _patch_lifecycle_service(monkeypatch, _retire)
+
+    batch_id = uuid4()
+    response = await web_qr_retire(
+        qr_id="QR-K",
+        batch_id=batch_id,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(f"/web/batches/{batch_id}?")
+    assert "flash_kind=info" in response.headers["location"]
 
 
 async def test_web_qr_retire_unknown_qr_redirects_with_error_flash(
@@ -1293,6 +1322,7 @@ async def test_web_qr_retire_unknown_qr_redirects_with_error_flash(
 
     response = await web_qr_retire(
         qr_id="QR-DOESNT-EXIST",
+        batch_id=None,
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1318,6 +1348,7 @@ async def test_web_qr_retire_already_retired_redirects_with_info_flash(
 
     response = await web_qr_retire(
         qr_id="QR-X",
+        batch_id=None,
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1345,6 +1376,7 @@ async def test_web_qr_retire_bound_qr_redirects_with_error_flash(
 
     response = await web_qr_retire(
         qr_id="QR-B",
+        batch_id=None,
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )
@@ -1369,6 +1401,7 @@ async def test_web_qr_retire_missing_version_redirects_with_error_flash(
 
     response = await web_qr_retire(
         qr_id="QR-V",
+        batch_id=None,
         user=_admin_user(),
         session=object(),  # type: ignore[arg-type]
     )

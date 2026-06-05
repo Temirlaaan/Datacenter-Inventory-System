@@ -49,7 +49,10 @@
                 <td>{{ c.retired_at.strftime("%Y-%m-%d %H:%M") if c.retired_at else "" }}</td>
                 <td>
                     {% if c.status.value == "free" %}
-                    <form class="inline-form" method="post" action="/web/qr/{{ c.id }}/retire">
+                    <form class="inline-form" method="post"
+                          action="/web/qr/{{ c.id }}/retire"
+                          onsubmit="return confirm('Retire QR {{ c.id }}? This cannot be undone.');">
+                        <input type="hidden" name="batch_id" value="{{ batch.id }}">
                         <button type="submit">Retire</button>
                     </form>
                     {% endif %}

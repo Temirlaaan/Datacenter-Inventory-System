@@ -860,6 +860,7 @@ async def _build_auth_user_for_admin_action(user: WebAdminUser) -> AuthUser:
 @router.post("/qr/{qr_id}/retire")
 async def web_qr_retire(
     qr_id: str,
+    batch_id: UUID | None = Form(default=None),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
@@ -874,6 +875,12 @@ async def web_qr_retire(
 
     Idempotent: ``QRStateConflictError`` on an already-RETIRED QR maps to
     an info flash ("QR already retired") rather than an error.
+
+    ``batch_id`` is the originating batch (hidden form input from the
+    detail template) so the post-action 303 lands the admin back on the
+    same detail page rather than the batch list — preserves their
+    inspection context when retiring multiple FREE codes in a row.
+    Falls back to the list when absent (curl / hand-rolled POST).
     """
     auth_user = await _build_auth_user_for_admin_action(user)
     lifecycle = QRLifecycleService(
@@ -885,7 +892,7 @@ async def web_qr_retire(
             get_netbox_client(), session, AuditLogRepository(session)
         ),
     )
-    target = "/web/batches/"
+    target = f"/web/batches/{batch_id}" if batch_id is not None else "/web/batches/"
     try:
         await lifecycle.retire(qr_id=qr_id, expected_version=None, user=auth_user)
     except QRNotFoundError:
