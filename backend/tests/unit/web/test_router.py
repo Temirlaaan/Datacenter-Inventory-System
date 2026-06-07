@@ -34,6 +34,7 @@ from app.web.auth import (
 from app.web.router import (
     _OIDC_NONCE_COOKIE,
     _OIDC_STATE_COOKIE,
+    _parse_optional_form_int,
     _redirect_to_login,
     _sessions_filter_query_string,
     audit_detail,
@@ -47,6 +48,7 @@ from app.web.router import (
     sessions_list,
     web_admin_shift_start,
     web_batches_create,
+    web_batches_labels_pdf,
     web_devices_decommission,
     web_force_close_session,
     web_qr_retire,
@@ -306,9 +308,9 @@ async def test_batches_list_handler_returns_html_response_with_seeded_rows(
         created_by_email="alice@example.com",
         created_by_keycloak_id=_USER_SUB,
         count=42,
-        intended_site_id=None,
-        intended_location_id=None,
-        intended_rack_id=None,
+        intended_site_id="",
+        intended_location_id="",
+        intended_rack_id="",
         comment="canned-batch",
     )
 
@@ -364,9 +366,9 @@ async def test_batches_detail_handler_returns_html_response_for_existing_batch(
         created_by_email="alice@example.com",
         created_by_keycloak_id=_USER_SUB,
         count=1,
-        intended_site_id=None,
-        intended_location_id=None,
-        intended_rack_id=None,
+        intended_site_id="",
+        intended_location_id="",
+        intended_rack_id="",
         comment="detail-canned",
     )
     canned_code = QR(
@@ -1175,9 +1177,9 @@ async def test_web_batches_create_redirects_to_detail_with_flash_on_success(
     response = await web_batches_create(
         count=25,
         comment="tray-A initial",
-        intended_site_id=None,
-        intended_location_id=None,
-        intended_rack_id=None,
+        intended_site_id="",
+        intended_location_id="",
+        intended_rack_id="",
         csrf="test-csrf-token",
         user=_admin_user(),
         session=_FakeSession(),  # type: ignore[arg-type]
@@ -1237,9 +1239,9 @@ async def test_web_batches_create_strips_comment_to_none_when_blank(
     await web_batches_create(
         count=10,
         comment="   ",  # whitespace-only, stripped → empty → None
-        intended_site_id=None,
-        intended_location_id=None,
-        intended_rack_id=None,
+        intended_site_id="",
+        intended_location_id="",
+        intended_rack_id="",
         csrf="test-csrf-token",
         user=_admin_user(),
         session=_FakeSession(),  # type: ignore[arg-type]
@@ -2087,6 +2089,180 @@ async def test_web_users_detail_renders_custom_404_for_unknown_user(
     )
     assert response.status_code == 404
     assert b"Not found" in response.body
+
+
+# --- _parse_optional_form_int + web_batches_labels_pdf (2026-06-07 fixes) ---
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", None),
+        ("   ", None),
+        ("42", 42),
+        ("  7 ", 7),
+    ],
+)
+def test_parse_optional_form_int_accepts_blank_and_positive(
+    raw: str, expected: int | None
+) -> None:
+    """Empty / whitespace → None (the column is nullable). Non-empty must
+    parse as positive int."""
+    assert _parse_optional_form_int(raw, field="intended_site_id") == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "1.5", "-3", "0"])
+def test_parse_optional_form_int_rejects_invalid_with_422(raw: str) -> None:
+    """Non-int / non-positive → ``HTTPException(422)`` with a clear
+    "must be a positive integer or blank" message instead of a silent
+    server error."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _parse_optional_form_int(raw, field="intended_site_id")
+    assert exc.value.status_code == 422
+    assert "intended_site_id" in exc.value.detail
+
+
+async def test_web_batches_create_accepts_blank_optional_id_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production bug 2026-06-07: empty intended_*_id form fields 422'd
+    because the handler declared them as ``int | None`` and the browser
+    submits "" rather than omitting the key. They're ``str`` now, parsed
+    via ``_parse_optional_form_int`` → all-blank submit creates cleanly."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QRBatch
+
+    captured: dict[str, Any] = {}
+    new_batch_id = uuid4()
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeGenerationService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def generate_batch(self, payload: Any, user: Any) -> QRBatch:
+            captured["site"] = payload.intended_site_id
+            captured["location"] = payload.intended_location_id
+            captured["rack"] = payload.intended_rack_id
+            return QRBatch(
+                id=new_batch_id,
+                created_at=datetime(2026, 6, 7, 12, 0, 0, tzinfo=UTC),
+                created_by_email=user.email,
+                created_by_keycloak_id=UUID(user.sub),
+                count=payload.count,
+                intended_site_id=None,
+                intended_location_id=None,
+                intended_rack_id=None,
+                comment=None,
+            )
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.QRGenerationService", _FakeGenerationService)
+
+    class _FakeSession:
+        async def commit(self) -> None: ...
+
+    response = await web_batches_create(
+        count=10,
+        csrf="test-csrf-token",
+        comment="",
+        intended_site_id="",
+        intended_location_id="",
+        intended_rack_id="",
+        user=_admin_user(),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert captured == {"site": None, "location": None, "rack": None}
+
+
+async def test_web_batches_labels_pdf_returns_pdf_bytes_for_known_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cookie-authed PDF endpoint (2026-06-07 fix). Browser couldn't hit
+    the bearer-only /api/v1/admin/batches/{id}/labels.pdf; this web shim
+    cookie-auths and renders the same PDF."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QRBatch
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id,
+        created_at=datetime(2026, 6, 7, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=2,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment=None,
+    )
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _bid: UUID) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def find_by_batch_id(self, _bid: UUID) -> list[Any]:
+            return []
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr(
+        "app.services.pdf_labels.render_batch_labels_pdf",
+        lambda batch, codes: b"%PDF-FAKE-BYTES",
+    )
+
+    response = await web_batches_labels_pdf(
+        batch_id=batch_id,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert response.media_type == "application/pdf"
+    assert response.body == b"%PDF-FAKE-BYTES"
+    assert f'filename="batch-{batch_id}.pdf"' in response.headers["content-disposition"]
+
+
+async def test_web_batches_labels_pdf_returns_404_for_unknown_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown batch → 404 (raised, not a flash) so curl / external
+    monitors see the correct status."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _bid: UUID) -> None:
+            return None
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_batches_labels_pdf(
+            batch_id=uuid4(),
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 404
 
 
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).

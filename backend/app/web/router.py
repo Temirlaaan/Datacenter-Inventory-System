@@ -15,6 +15,7 @@ Three OIDC flow endpoints + the dashboard placeholder.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
@@ -396,14 +397,37 @@ async def batches_new_form(
     )
 
 
+def _parse_optional_form_int(raw: str, *, field: str) -> int | None:
+    """Browsers submit empty optional fields as ``""`` instead of omitting
+    them — Pydantic's ``int | None`` coerces "" to a 422. We accept the
+    field as a string, strip, and treat empty as ``None``; non-empty must
+    parse as a positive int or we 422 explicitly via ``HTTPException``."""
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        value = int(stripped)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field} must be a positive integer or blank",
+        ) from exc
+    if value < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field} must be ≥ 1 (or blank)",
+        )
+    return value
+
+
 @router.post("/batches/")
 async def web_batches_create(
     count: int = Form(ge=1, le=500),
     csrf: str = Form(alias="_csrf"),
     comment: str = Form(default="", max_length=200),
-    intended_site_id: int | None = Form(default=None, ge=1),
-    intended_location_id: int | None = Form(default=None, ge=1),
-    intended_rack_id: int | None = Form(default=None, ge=1),
+    intended_site_id: str = Form(default=""),
+    intended_location_id: str = Form(default=""),
+    intended_rack_id: str = Form(default=""),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
@@ -415,8 +439,18 @@ async def web_batches_create(
     of the same form would create two batches, which is acceptable for an
     interactive flow (the admin sees the redirect and won't double-submit).
     303 to the new batch's detail page with a flash banner.
+
+    The ``intended_*_id`` form fields arrive as strings (HTML forms can't
+    omit optional fields, only send them empty) — we parse them with
+    ``_parse_optional_form_int`` rather than declaring ``int | None`` here,
+    which would 422 on the empty-string browsers submit.
     """
     verify_csrf_token(csrf, user.csrf_token)
+    site_id = _parse_optional_form_int(intended_site_id, field="intended_site_id")
+    location_id = _parse_optional_form_int(
+        intended_location_id, field="intended_location_id"
+    )
+    rack_id = _parse_optional_form_int(intended_rack_id, field="intended_rack_id")
     auth_user = await _build_auth_user_for_admin_action(user)
     service = QRGenerationService(
         session,
@@ -426,9 +460,9 @@ async def web_batches_create(
     )
     payload = GenerateBatchRequest(
         count=count,
-        intended_site_id=intended_site_id,
-        intended_location_id=intended_location_id,
-        intended_rack_id=intended_rack_id,
+        intended_site_id=site_id,
+        intended_location_id=location_id,
+        intended_rack_id=rack_id,
         comment=comment.strip() or None,
     )
     batch = await service.generate_batch(payload, auth_user)
@@ -469,6 +503,41 @@ async def batches_detail(
             "codes": codes,
             "status_counts": status_counts,
             "csrf_token": user.csrf_token,
+        },
+    )
+
+
+@router.get("/batches/{batch_id}/labels.pdf")
+async def web_batches_labels_pdf(
+    batch_id: UUID,
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Cookie-authed PDF download for the batch detail page.
+
+    The original Sprint 8b link pointed at ``/api/v1/admin/batches/{id}/labels.pdf``,
+    but that endpoint is JWT-bearer-gated. Browsers only carry the
+    Fernet session cookie, so clicking "Download labels" 401'd. This
+    handler does the same PDF render with cookie auth (delegates to the
+    same ``render_batch_labels_pdf`` worker, ran in a thread).
+    """
+    _ = user  # role-gating side-effect only
+    from app.services.pdf_labels import render_batch_labels_pdf
+
+    batch = await QRBatchRepository(session).get_by_id(batch_id)
+    if batch is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="batch not found"
+        )
+    codes = await QRCodeRepository(session).find_by_batch_id(batch_id)
+    pdf_bytes = await asyncio.to_thread(
+        render_batch_labels_pdf, batch=batch, codes=codes
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="batch-{batch_id}.pdf"'
         },
     )
 

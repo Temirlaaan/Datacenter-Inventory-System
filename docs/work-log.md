@@ -1187,3 +1187,17 @@ Closes the second parking-lot item. Sprint 6 decision J deliberately avoided thi
 **Tests:** 9 new — 6 for `KeycloakAdminClient` (respx mocking the token + admin endpoints): not-configured raise, list pagination with `has_more`, get_user 404 → None, get_user assembles roles, token cache hits token endpoint exactly once on repeated calls, non-404 4xx → KeycloakAdminError. 3 direct-await handler tests: list happy path, list not-configured notice, detail unknown user → 404 page. Unit suite: 576 → 585.
 
 **Out of scope (deliberate):** no disable/enable, no role mapping changes, no password reset trigger. Those land separately once we have a concrete use-case; meanwhile the page gives the admin enough visibility to know who can use the system and trace any user back to their audit trail.
+
+### 2026-06-07 — fix(web): create-batch + PDF download production bugs
+
+Two browser bugs surfaced from first-use of the new admin forms.
+
+**Bug 1: Empty optional id fields 422'd on create-batch.** The form declared `intended_site_id`/`intended_location_id`/`intended_rack_id` as `int | None = Form(default=None, ge=1)`, but browsers submit unchecked optional inputs as `""` rather than omitting them. Pydantic's `int | None` coerces `""` → 422 with `int_parsing` errors before the handler body even runs.
+
+Fix: accept them as `str = Form(default="")` and parse via new `_parse_optional_form_int(raw, field=...)` helper — empty/whitespace → `None`, valid positive int → `int`, anything else → 422 with a clear "must be a positive integer or blank" message. Tested with two parametrized cases (4 happy values + 4 invalid values) plus an all-blank create-batch flow.
+
+**Bug 2: Download labels (PDF) 401'd ("missing bearer token").** The batch detail page linked to `/api/v1/admin/batches/{id}/labels.pdf` (bearer-only JSON API). Browsers carry only the Fernet session cookie, so the click 401'd.
+
+Fix: new `GET /web/batches/{batch_id}/labels.pdf` handler ([app/web/router.py](../backend/app/web/router.py)) authed by the same `require_web_admin` cookie dep, delegates to the same `render_batch_labels_pdf` worker in `asyncio.to_thread`. Template link in [batches/detail.html](../backend/app/web/templates/batches/detail.html) repointed at the web shim. The JSON endpoint stays bearer-only — mobile / curl flows are unchanged.
+
+Three new tests for the PDF handler (happy path returns PDF bytes + correct Content-Disposition, 404 raises HTTPException). Unit suite: 585 → 596.
