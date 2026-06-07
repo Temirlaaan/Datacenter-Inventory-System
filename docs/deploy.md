@@ -23,6 +23,7 @@ You said `qr_id` is created and the web client secret exists. Still missing
 |---|---|
 | Web client `dcinv-web` | **Clients → Create client** → ID `dcinv-web`, type `confidential`. Settings tab → **Valid Redirect URIs**: `https://<your-backend-public-url>/web/oidc/callback`. **Web Origins**: `https://<your-backend-public-url>`. **Access Type**: confidential. Credentials tab → copy the secret into `KEYCLOAK_WEB_CLIENT_SECRET`. |
 | Mobile client (for the Android app, can wait) | **Clients → Create client** → ID e.g. `dcinv-mobile`, type `public`. Authentication flow: standard + direct access grants. PKCE required. No secret. |
+| Admin CLI client (for `/web/users/`, optional) | **Clients → Create client** → ID `dcinv-admin-cli`, type `confidential`. Authentication flow: **service accounts roles only** (no direct access, no standard flow). Credentials tab → copy the secret into `KEYCLOAK_ADMIN_CLIENT_SECRET`. Service Account Roles tab → assign **`realm-management.view-users`**. Leave the secret unset to disable `/web/users/`; the page renders a friendly "not configured" notice. |
 | Roles | **Realm Roles → Create role** twice: `dcinv-admin` and `dcinv-mobile-user`. |
 | Role mapping | Either assign roles to AD groups via group mappers, or assign directly to specific users. **You'll need `dcinv-admin` on your own account for the first smoke.** |
 | Token-claim shape | Default Keycloak puts roles under `realm_access.roles`. Our code reads exactly that — no extra mapper needed. |
@@ -47,6 +48,8 @@ Your `.env` (committed but secrets gitignored):
 | `KEYCLOAK_WEB_CLIENT_SECRET` | ✓ set | confidential client secret |
 | `SESSION_COOKIE_KEY` | ✓ set | Fernet key, generated 2026-06-04 |
 | `COOKIE_SECURE` | ✓ set `false` | **flip to `true` once you're behind TLS** |
+| `KEYCLOAK_ADMIN_CLIENT_ID` | optional | defaults to `dcinv-admin-cli`; set if the admin CLI client uses a different id |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` | optional | secret for the `dcinv-admin-cli` confidential client; required to enable `/web/users/`. Leave unset → page shows "not configured" notice |
 | `POSTGRES_PASSWORD` | ⚠️ `replace-me` | pick a real password before deploy |
 | `DATABASE_URL` | (auto-assembled) | docker-compose constructs from `POSTGRES_*` |
 

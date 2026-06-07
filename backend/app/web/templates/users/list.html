@@ -1,0 +1,73 @@
+{% extends "_base.html" %}
+{% block title %}Users &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>Users</h1>
+
+    {% if not_configured %}
+    <p class="flash flash-error">
+        Keycloak admin client not configured. Set
+        <code>KEYCLOAK_ADMIN_CLIENT_ID</code> and
+        <code>KEYCLOAK_ADMIN_CLIENT_SECRET</code> in <code>.env</code>,
+        and assign the <code>realm-management.view-users</code> role to
+        the service account in Keycloak. See <code>docs/deploy.md</code>.
+    </p>
+    {% elif error %}
+    <p class="flash flash-error">{{ error }}</p>
+    {% else %}
+    <p>Read-only — list and inspect Keycloak users for this realm.</p>
+
+    <form class="filter-form" method="get" action="/web/users/">
+        <label>Search
+            <input name="search" type="text" value="{{ search }}" placeholder="username, email, first/last name">
+        </label>
+        <div class="filter-form__actions">
+            <button type="submit">Apply</button>
+        </div>
+    </form>
+
+    {% if users %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Enabled</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td><a href="/web/users/{{ u.id }}">{{ u.username }}</a></td>
+                <td>{{ u.email or "—" }}</td>
+                <td>{{ (u.first_name or "") }} {{ (u.last_name or "") }}</td>
+                <td>
+                    {% if u.enabled %}
+                    <span class="result-badge result-badge--success">enabled</span>
+                    {% else %}
+                    <span class="result-badge result-badge--failure">disabled</span>
+                    {% endif %}
+                </td>
+                <td>{{ u.created_at.strftime("%Y-%m-%d") if u.created_at else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No users match.</p>
+    {% endif %}
+
+    <nav class="pagination">
+        {% if has_prev %}
+        <a class="pagination__link" href="/web/users/?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}">&laquo; Prev</a>
+        {% endif %}
+        <span class="pagination__current">Page {{ page }}</span>
+        {% if has_more %}
+        <a class="pagination__link" href="/web/users/?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+</section>
+{% endblock %}

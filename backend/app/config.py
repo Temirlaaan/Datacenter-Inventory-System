@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     rate_limit_admin_per_minute: int = Field(default=30, ge=1, le=100000)
     keycloak_web_client_id: str = "dcinv-web"
     keycloak_web_client_secret: SecretStr
+    # Service-account confidential client used by /web/users/ to list +
+    # inspect Keycloak users. Optional — leave secret unset to disable
+    # the page (handler renders a "not configured" notice instead of
+    # crashing). Requires the realm-management "view-users" role on the
+    # service account.
+    keycloak_admin_client_id: str = "dcinv-admin-cli"
+    keycloak_admin_client_secret: SecretStr | None = None
     session_cookie_key: SecretStr
     # Production deploys behind TLS MUST set ``COOKIE_SECURE=true`` so the
     # dcinv_admin_session + OIDC-flow cookies get the ``Secure`` attribute and
@@ -104,6 +111,23 @@ class Settings(BaseSettings):
     def jwks_url(self) -> str:
         """JWKS endpoint for JWT signature verification."""
         return f"{self.keycloak_issuer}/protocol/openid-connect/certs"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def keycloak_token_url(self) -> str:
+        """OIDC token endpoint — reused by /web/users/'s admin-client
+        ``client_credentials`` grant (in addition to the OIDC callback
+        ``authorization_code`` flow)."""
+        return f"{self.keycloak_issuer}/protocol/openid-connect/token"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def keycloak_admin_realm_base(self) -> str:
+        """Base URL for the Keycloak admin REST API for our realm —
+        ``{base}/admin/realms/{realm}``. Endpoints under this base:
+        ``/users``, ``/users/{id}``, ``/users/{id}/role-mappings/realm``."""
+        base = str(self.keycloak_base_url).rstrip("/")
+        return f"{base}/admin/realms/{self.keycloak_realm}"
 
 
 @lru_cache

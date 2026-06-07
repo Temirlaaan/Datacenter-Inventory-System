@@ -51,6 +51,8 @@ from app.web.router import (
     web_force_close_session,
     web_qr_retire,
     web_qr_search,
+    web_users_detail,
+    web_users_list,
 )
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
@@ -1955,6 +1957,136 @@ async def test_devices_decommission_form_renders(monkeypatch: pytest.MonkeyPatch
     assert response.status_code == 200
     assert b"Device 42 decommissioned" in response.body
     assert b"Decommission device" in response.body
+
+
+# --- /web/users/ list + detail (over a stubbed KeycloakAdminClient) --------
+
+
+def _patch_keycloak_admin_client(
+    monkeypatch: pytest.MonkeyPatch, *, list_impl: Any = None, get_impl: Any = None
+) -> None:
+    class _FakeAdminClient:
+        async def list_users(self, **kwargs: object) -> Any:
+            if list_impl is None:
+                raise AssertionError("list_users not stubbed for this test")
+            return await list_impl(**kwargs)
+
+        async def get_user(self, user_id: str) -> Any:
+            if get_impl is None:
+                raise AssertionError("get_user not stubbed for this test")
+            return await get_impl(user_id)
+
+    monkeypatch.setattr(
+        "app.web.router.get_keycloak_admin_client", lambda: _FakeAdminClient()
+    )
+
+
+async def test_web_users_list_renders_users_on_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``list_users`` returns rows → template renders them in the table."""
+    _set_env(monkeypatch)
+    from app.auth.keycloak_admin import KeycloakUser
+
+    async def _list(**_kwargs: object) -> tuple[list[KeycloakUser], bool]:
+        return (
+            [
+                KeycloakUser(
+                    id="u-1",
+                    username="alice",
+                    email="alice@example.com",
+                    first_name="Alice",
+                    last_name=None,
+                    enabled=True,
+                    created_at=None,
+                )
+            ],
+            False,
+        )
+
+    _patch_keycloak_admin_client(monkeypatch, list_impl=_list)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/users/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_users_list(
+        request=Request(scope),
+        page=1,
+        search=None,
+        user=_admin_user(),
+    )
+    assert response.status_code == 200
+    assert b"alice" in response.body
+    assert b"alice@example.com" in response.body
+
+
+async def test_web_users_list_renders_not_configured_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``KeycloakAdminNotConfigured`` → template surfaces the
+    "set KEYCLOAK_ADMIN_CLIENT_*" notice instead of 500-ing."""
+    _set_env(monkeypatch)
+    from app.auth.keycloak_admin import KeycloakAdminNotConfigured
+
+    async def _list(**_kwargs: object) -> Any:
+        raise KeycloakAdminNotConfigured("secret missing")
+
+    _patch_keycloak_admin_client(monkeypatch, list_impl=_list)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/users/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_users_list(
+        request=Request(scope),
+        page=1,
+        search=None,
+        user=_admin_user(),
+    )
+    assert response.status_code == 200
+    assert b"Keycloak admin client not configured" in response.body
+    assert b"KEYCLOAK_ADMIN_CLIENT_SECRET" in response.body
+
+
+async def test_web_users_detail_renders_custom_404_for_unknown_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``get_user`` returns ``None`` → custom 404 HTML page (mirrors
+    the batches-detail not-found flow from Sprint 8b)."""
+    _set_env(monkeypatch)
+
+    async def _get(_user_id: str) -> None:
+        return None
+
+    _patch_keycloak_admin_client(monkeypatch, get_impl=_get)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/users/ghost",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_users_detail(
+        request=Request(scope),
+        user_id="ghost",
+        user=_admin_user(),
+    )
+    assert response.status_code == 404
+    assert b"Not found" in response.body
 
 
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).

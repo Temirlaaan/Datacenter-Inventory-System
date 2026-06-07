@@ -1,0 +1,38 @@
+{% extends "_base.html" %}
+{% block title %}User {{ target.username }} &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>User <code>{{ target.username }}</code></h1>
+    <p><a href="/web/users/">&laquo; Back to users</a></p>
+
+    <dl class="kv">
+        <dt>Keycloak id</dt><dd><code>{{ target.id }}</code></dd>
+        <dt>Username</dt><dd>{{ target.username }}</dd>
+        <dt>Email</dt><dd>{{ target.email or "—" }}</dd>
+        <dt>Name</dt><dd>{{ (target.first_name or "") }} {{ (target.last_name or "") }}</dd>
+        <dt>Enabled</dt>
+        <dd>
+            {% if target.enabled %}
+            <span class="result-badge result-badge--success">enabled</span>
+            {% else %}
+            <span class="result-badge result-badge--failure">disabled</span>
+            {% endif %}
+        </dd>
+        <dt>Created</dt><dd>{{ target.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if target.created_at else "—" }}</dd>
+    </dl>
+
+    <h2>Realm roles</h2>
+    {% if target.roles %}
+    <ul>
+        {% for r in target.roles %}
+        <li><code>{{ r }}</code></li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty-state">No realm roles assigned.</p>
+    {% endif %}
+
+    <h2>Audit history</h2>
+    <p><a href="/web/audit/?user_keycloak_id={{ target.id }}">See all audit rows attributed to this user &raquo;</a></p>
+</section>
+{% endblock %}

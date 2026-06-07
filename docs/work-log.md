@@ -1157,3 +1157,33 @@ Closes the `/web/qr/search` parking-lot item. One-page lookup: form at the top, 
 [router.py](../backend/app/web/router.py) `web_qr_search` GET at `/web/qr/search`; template [qr/search.html](../backend/app/web/templates/qr/search.html); top-nav link in [_base.html](../backend/app/web/templates/_base.html) between Batches and Audit.
 
 Four direct-await tests: empty form (no `qr_id`), unknown QR, FREE QR (asserts NetBox isn't touched), BOUND QR with NetBox 404 (stale-binding flash). Unit suite: 572 → 576.
+
+### 2026-06-07 — feat(web): /web/users/ (read-only Keycloak admin)
+
+Closes the second parking-lot item. Sprint 6 decision J deliberately avoided this because it needed a separate Keycloak admin client — that's what this commit adds.
+
+**Design.** Read-only first slice: list + per-user detail. Write operations (disable/enable, role changes) stay deferred — they'd need their own audit-row + CSRF flow plus a spec for which writes the admin tool should actually expose.
+
+**New module** [app/auth/keycloak_admin.py](../backend/app/auth/keycloak_admin.py):
+- `KeycloakAdminClient` — async wrapper over Keycloak's `/admin/realms/{realm}/users` API.
+- `client_credentials` grant against a confidential admin client. Service account needs `realm-management.view-users`.
+- In-process token cache with 10s pre-expiry refresh leeway + an `asyncio.Lock` so concurrent requests don't all hit the token endpoint.
+- `KeycloakAdminNotConfigured` raised when `KEYCLOAK_ADMIN_CLIENT_SECRET` is unset — the web handler renders a friendly notice instead of crashing.
+- `KeycloakAdminError(status_code=...)` for transport / non-2xx errors so callers can distinguish misconfig (4xx) from transient failure (5xx).
+
+**New config fields** ([app/config.py](../backend/app/config.py)):
+- `keycloak_admin_client_id: str = "dcinv-admin-cli"` (defaulted, so the typical install needs no override).
+- `keycloak_admin_client_secret: SecretStr | None = None` (optional — leave unset to disable `/web/users/`).
+- Computed `keycloak_token_url` and `keycloak_admin_realm_base` so both the OIDC callback and the admin client read the same URL convention.
+
+**Routes** in [app/web/router.py](../backend/app/web/router.py):
+- `GET /web/users/` — paginated list with optional `?search=...` filter (Keycloak's free-text search across username/email/first/last).
+- `GET /web/users/{user_id}` — single-user detail: identity, enable state, realm roles, created-at. Links to `/web/audit/?user_keycloak_id=...` for the per-user audit trail.
+
+**Templates:** [users/list.html](../backend/app/web/templates/users/list.html) (filter form + table + not-configured + error fallbacks), [users/detail.html](../backend/app/web/templates/users/detail.html) (kv list + realm-roles list + audit link). Top-nav gains a `Users` link after `Sessions`.
+
+**Docs:** [docs/deploy.md](deploy.md) section 1 gets a new row for the admin CLI client (how to create + assign `realm-management.view-users`); the `.env` table gets two new optional rows.
+
+**Tests:** 9 new — 6 for `KeycloakAdminClient` (respx mocking the token + admin endpoints): not-configured raise, list pagination with `has_more`, get_user 404 → None, get_user assembles roles, token cache hits token endpoint exactly once on repeated calls, non-404 4xx → KeycloakAdminError. 3 direct-await handler tests: list happy path, list not-configured notice, detail unknown user → 404 page. Unit suite: 576 → 585.
+
+**Out of scope (deliberate):** no disable/enable, no role mapping changes, no password reset trigger. Those land separately once we have a concrete use-case; meanwhile the page gives the admin enough visibility to know who can use the system and trace any user back to their audit trail.
