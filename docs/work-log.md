@@ -1215,3 +1215,13 @@ After two weeks of production use, the user came back with concrete UI direction
 **[admin.css](../backend/app/web/static/admin.css) reduced** from ~450 lines of hand-rolled CSS to a 6-line stub kept as a stable URL the base template links — every visual is now Tailwind. The two-paragraph header notes when to add rules back (Tailwind can't easily express something).
 
 Unit suite still 596 passing — the redesign preserves every text string the tests assert on (h1 copy, error messages, badge text). Visual verification post-deploy.
+
+### 2026-06-07 — fix(web): audit CSV download cookie-authed + form a11y
+
+Two findings from a self-review of the Tailwind redesign commit:
+
+**HIGH — audit CSV link was bearer-only.** Same class of bug as the PDF download we just fixed in `901d827`: the Download CSV button in [audit/list.html](../backend/app/web/templates/audit/list.html) pointed at `/api/v1/admin/audit/csv` (JWT-bearer-gated), so clicking it in the browser returned `{"detail":"missing bearer token"}`. Add `GET /web/audit/csv` cookie-authed shim in [router.py](../backend/app/web/router.py) that builds an `AuthUser` from the cookie's active shift and delegates to `query_audit_log_csv` — keeps the `audit.export_csv` audit-of-audits row (ToR §5.4.6) firing with proper attribution. Template href repointed. Registered BEFORE `/audit/{audit_id}` (same route-ordering invariant as `/batches/new`); regression test pins it.
+
+**MEDIUM — form labels not associated with inputs.** The Tailwind redesign moved labels from wrapping inputs (`<label>Text <input></label>`) to sibling pairs (`<label>Text</label><input>`) without explicit `for=`/`id=` pairing, breaking screen-reader association. Added `for="X"`/`id="X"` to every label/input pair across [batches/new.html](../backend/app/web/templates/batches/new.html), [devices/decommission.html](../backend/app/web/templates/devices/decommission.html), [qr/search.html](../backend/app/web/templates/qr/search.html), [audit/list.html](../backend/app/web/templates/audit/list.html), [sessions/list.html](../backend/app/web/templates/sessions/list.html), [users/list.html](../backend/app/web/templates/users/list.html). The `_admin_shift_needed.html` form already had the pair from the earlier explicit-fix commit.
+
+Two new tests: `web_audit_csv` happy-path delegation (auth user built + filters passed through), `/audit/csv` registered before `/audit/{audit_id}` route-order regression guard. Unit suite: 596 → 598.

@@ -47,6 +47,7 @@ from app.web.router import (
     oidc_callback,
     sessions_list,
     web_admin_shift_start,
+    web_audit_csv,
     web_batches_create,
     web_batches_labels_pdf,
     web_devices_decommission,
@@ -2267,6 +2268,77 @@ async def test_web_batches_labels_pdf_returns_404_for_unknown_batch(
 
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).
 _ = _admin_action_request
+
+
+async def test_web_audit_csv_delegates_to_json_handler_with_auth_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Web shim must build an ``AuthUser`` from the cookie + active shift
+    and pass it to the JSON ``query_audit_log_csv`` so the
+    ``audit.export_csv`` audit-of-audits row writes with proper attribution
+    (2026-06-07 fix — original /api/v1 link was bearer-only and 401'd in
+    the browser, same class as the PDF download bug)."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from fastapi.responses import StreamingResponse
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_csv(**kwargs: object) -> StreamingResponse:
+        captured.update(kwargs)
+        return StreamingResponse(iter([b"timestamp,user\n"]), media_type="text/csv")
+
+    monkeypatch.setattr("app.web.router.query_audit_log_csv", _fake_csv)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/audit/csv",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_audit_csv(
+        request=Request(scope),
+        user_keycloak_id=None,
+        from_=None,
+        to=None,
+        entity_type="qr",
+        entity_id=None,
+        operation=None,
+        session_id=None,
+        result=None,
+        page_size=500,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.media_type == "text/csv"
+    auth_user = captured["user"]
+    assert auth_user.email == "alice@example.com"
+    assert auth_user.sub == str(_USER_SUB)
+    # Shift session id was set by _patch_admin_shift_lookup
+    assert auth_user.shift_session_id is not None
+    # Filters passed through verbatim
+    assert captured["entity_type"] == "qr"
+    assert captured["page_size"] == 500
+
+
+def test_web_audit_csv_route_declared_before_audit_detail() -> None:
+    """Regression guard mirroring ``test_batches_new_route_declared_...``:
+    ``GET /audit/csv`` MUST come before ``GET /audit/{audit_id}``, else
+    FastAPI tries to parse ``"csv"`` as an ``int`` and 422s."""
+    from app.web.router import router
+
+    paths_in_order = [
+        getattr(r, "path", None) for r in router.routes if getattr(r, "path", None)
+    ]
+    csv_idx = paths_in_order.index("/audit/csv")
+    detail_idx = paths_in_order.index("/audit/{audit_id}")
+    assert csv_idx < detail_idx, (
+        f"/audit/csv must be registered before /audit/{{audit_id}}; "
+        f"got csv at {csv_idx}, detail at {detail_idx}"
+    )
 
 
 def test_batches_new_route_declared_before_batches_detail() -> None:

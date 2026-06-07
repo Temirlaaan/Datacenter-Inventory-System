@@ -28,8 +28,8 @@
 
     <form method="get" action="/web/qr/search" class="flex flex-wrap items-end gap-3 mb-8">
         <div class="flex-1 min-w-[16rem]">
-            <label class="block text-sm font-medium text-gray-700 mb-1">QR id</label>
-            <input name="qr_id" type="text" maxlength="255" required value="{{ submitted_qr_id }}" placeholder="e.g. QR-7F3A2B"
+            <label for="qr_id" class="block text-sm font-medium text-gray-700 mb-1">QR id</label>
+            <input id="qr_id" name="qr_id" type="text" maxlength="255" required value="{{ submitted_qr_id }}" placeholder="e.g. QR-7F3A2B"
                    class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
         </div>
         <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Search</button>

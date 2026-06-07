@@ -25,11 +25,12 @@ from uuid import UUID
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin.audit import query_audit_log_csv
 from app.api.v1.admin.sessions import ForceCloseRequest, force_close_session
 from app.auth.dependencies import AuthUser
 from app.auth.keycloak_admin import (
@@ -647,6 +648,47 @@ async def audit_list(
             },
             "result_choices": [r.value for r in AuditResult],
         },
+    )
+
+
+@router.get("/audit/csv")
+async def web_audit_csv(
+    request: Request,
+    user_keycloak_id: UUID | None = Query(default=None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    operation: str | None = Query(default=None),
+    session_id: UUID | None = Query(default=None),
+    result: AuditResult | None = Query(default=None),
+    page_size: int = Query(default=1000, ge=1, le=10000),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    """Cookie-authed CSV export — delegates to the bearer-only JSON handler
+    so the ``audit.export_csv`` audit-of-audits row (ToR §5.4.6) still
+    writes. Same class of fix as ``web_batches_labels_pdf``: the API
+    endpoint requires a JWT bearer, browsers only carry the Fernet cookie.
+
+    IMPORTANT: declared BEFORE ``/audit/{audit_id}`` so FastAPI's
+    order-based dispatch matches /web/audit/csv to this handler. The
+    detail route's ``audit_id: int`` would otherwise 422 on "csv".
+    """
+    _ = request
+    auth_user = await _build_auth_user_for_admin_action(user)
+    return await query_audit_log_csv(
+        user_keycloak_id=user_keycloak_id,
+        from_=from_,
+        to=to,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        operation=operation,
+        session_id=session_id,
+        result=result,
+        page_size=page_size,
+        user=auth_user,
+        session=session,
     )
 
 

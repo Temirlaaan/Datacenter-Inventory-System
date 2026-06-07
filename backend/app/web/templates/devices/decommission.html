@@ -13,13 +13,13 @@
           onsubmit="return confirm('Decommission device ' + this.device_id.value + '? This changes NetBox status and retires the bound QR if any. Cannot be undone in one click.');">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Device id</label>
-            <input name="device_id" type="number" min="1" required placeholder="NetBox device numeric id"
+            <label for="device_id" class="block text-sm font-medium text-gray-700 mb-1">Device id</label>
+            <input id="device_id" name="device_id" type="number" min="1" required placeholder="NetBox device numeric id"
                    class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
         </div>
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Reason</label>
-            <textarea name="reason" rows="4" minlength="1" maxlength="2000" required placeholder="Why this device is being decommissioned (will be visible in NetBox journal + audit log)"
+            <label for="reason" class="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+            <textarea id="reason" name="reason" rows="4" minlength="1" maxlength="2000" required placeholder="Why this device is being decommissioned (will be visible in NetBox journal + audit log)"
                       class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500"></textarea>
         </div>
         <div class="pt-2">

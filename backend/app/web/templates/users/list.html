@@ -20,8 +20,8 @@
     {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
     <form method="get" action="/web/users/" class="flex flex-wrap items-end gap-3 mb-6 p-4 rounded-md bg-gray-50 border border-gray-200">
         <div class="flex-1 min-w-[16rem]">
-            <label class="block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Search</label>
-            <input name="search" type="text" value="{{ search }}" placeholder="username, email, first/last name" class="{{ _input_cls }}">
+            <label for="search" class="block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Search</label>
+            <input id="search" name="search" type="text" value="{{ search }}" placeholder="username, email, first/last name" class="{{ _input_cls }}">
         </div>
         <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Apply</button>
     </form>

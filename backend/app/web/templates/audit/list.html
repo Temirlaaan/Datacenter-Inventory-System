@@ -20,36 +20,36 @@
     {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
     <form method="get" action="/web/audit/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
         <div>
-            <label class="{{ _label_cls }}">User Keycloak ID</label>
-            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="user_keycloak_id">User Keycloak ID</label>
+            <input id="user_keycloak_id" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">From</label>
-            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="from">From</label>
+            <input id="from" type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">To</label>
-            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="to">To</label>
+            <input id="to" type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">Entity type</label>
-            <input name="entity_type" value="{{ filters.entity_type }}" placeholder="qr / device / shift_session / audit" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="entity_type">Entity type</label>
+            <input id="entity_type" name="entity_type" value="{{ filters.entity_type }}" placeholder="qr / device / shift_session / audit" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">Entity ID</label>
-            <input name="entity_id" value="{{ filters.entity_id }}" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="entity_id">Entity ID</label>
+            <input id="entity_id" name="entity_id" value="{{ filters.entity_id }}" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">Operation</label>
-            <input name="operation" value="{{ filters.operation }}" placeholder="qr.bind / device.update / …" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="operation">Operation</label>
+            <input id="operation" name="operation" value="{{ filters.operation }}" placeholder="qr.bind / device.update / …" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">Session ID</label>
-            <input name="session_id" value="{{ filters.session_id }}" placeholder="UUID" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="session_id">Session ID</label>
+            <input id="session_id" name="session_id" value="{{ filters.session_id }}" placeholder="UUID" class="{{ _input_cls }}">
         </div>
         <div>
-            <label class="{{ _label_cls }}">Result</label>
-            <select name="result" class="{{ _input_cls }}">
+            <label class="{{ _label_cls }}" for="result">Result</label>
+            <select id="result" name="result" class="{{ _input_cls }}">
                 <option value=""></option>
                 {% for r in result_choices %}
                 <option value="{{ r }}" {% if filters.result == r %}selected{% endif %}>{{ r }}</option>
@@ -58,7 +58,7 @@
         </div>
         <div class="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-2">
             <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Apply filters</button>
-            <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/api/v1/admin/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">Download CSV</a>
+            <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">Download CSV</a>
         </div>
     </form>
 
