@@ -4,11 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}DC Inventory admin{% endblock %}</title>
-    {# Tailwind Play CDN — JIT-compiles utility classes at load time.
-       Acceptable for an internal VPN-only admin tool (~300KB JS,
-       browser-cached). Swap to a precompiled build under /static/ if
-       this ever becomes a performance concern. #}
-    <script src="https://cdn.tailwindcss.com"></script>
+    {# Tailwind Play script, self-hosted under /static/ so the admin
+       surface has no runtime dependency on cdn.tailwindcss.com (closes
+       LOW 5 from the 2026-06-07 code review). Same JIT engine as the
+       CDN; pinned to the version we downloaded on 2026-06-07. Replace
+       the file to upgrade; precompile to a CSS bundle (needs Node)
+       only if the ~400KB JS load becomes a perf concern. #}
+    <script src="/static/tailwind.js"></script>
     <script>
       tailwind.config = {
         theme: {
