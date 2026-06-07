@@ -1201,3 +1201,17 @@ Fix: accept them as `str = Form(default="")` and parse via new `_parse_optional_
 Fix: new `GET /web/batches/{batch_id}/labels.pdf` handler ([app/web/router.py](../backend/app/web/router.py)) authed by the same `require_web_admin` cookie dep, delegates to the same `render_batch_labels_pdf` worker in `asyncio.to_thread`. Template link in [batches/detail.html](../backend/app/web/templates/batches/detail.html) repointed at the web shim. The JSON endpoint stays bearer-only — mobile / curl flows are unchanged.
 
 Three new tests for the PDF handler (happy path returns PDF bytes + correct Content-Disposition, 404 raises HTTPException). Unit suite: 585 → 596.
+
+### 2026-06-07 — feat(web): Tailwind-style redesign of all 14 templates
+
+After two weeks of production use, the user came back with concrete UI direction (was deferred per the ship-then-iterate principle): Tailwind-style utility classes, light-gray app background (`bg-gray-50`), white content cards (`bg-white`), dark-gray headings (`text-gray-900`), muted secondary text (`text-gray-500`), minimalist flat design with subtle shadows.
+
+**Approach.** Tailwind via Play CDN (`<script src="https://cdn.tailwindcss.com">`) — one line in `_base.html`, no build step (preserves CLAUDE.md's Python-only stack constraint). ~300KB JS load is browser-cached and acceptable for an internal VPN-only admin tool. Switch to a precompiled build under `/static/` if it ever becomes a perf concern (Sprint 9+).
+
+**Palette.** Indigo as primary action color (buttons + links), emerald/rose/amber for status/result/end-reason badges, slate-900 for the JSON pretty-print blocks, rose for the destructive Decommission button.
+
+**All 14 templates rewritten** with Tailwind utilities and Jinja macros for the status/result/end-reason badges (one macro per template family — no global include since Jinja includes don't auto-pass scope). [_base.html](../backend/app/web/templates/_base.html) restructured: top nav uses pill-link hover state, max-w-7xl content container, responsive grid for the dashboard counters (1/2/3 columns by viewport), `bg-gray-50` body, `bg-white` cards with `ring-1 ring-gray-200 shadow-sm`.
+
+**[admin.css](../backend/app/web/static/admin.css) reduced** from ~450 lines of hand-rolled CSS to a 6-line stub kept as a stable URL the base template links — every visual is now Tailwind. The two-paragraph header notes when to add rules back (Tailwind can't easily express something).
+
+Unit suite still 596 passing — the redesign preserves every text string the tests assert on (h1 copy, error messages, badge text). Visual verification post-deploy.

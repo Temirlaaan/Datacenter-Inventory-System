@@ -4,35 +4,64 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}DC Inventory admin{% endblock %}</title>
+    {# Tailwind Play CDN — JIT-compiles utility classes at load time.
+       Acceptable for an internal VPN-only admin tool (~300KB JS,
+       browser-cached). Swap to a precompiled build under /static/ if
+       this ever becomes a performance concern. #}
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'system-ui', 'sans-serif'],
+              mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+            },
+          },
+        },
+      };
+    </script>
     <link rel="stylesheet" href="/static/admin.css">
 </head>
-<body>
-<header class="topnav">
-    <a class="brand" href="/web/">DC Inventory admin</a>
-    <nav>
-        <a href="/web/">Dashboard</a>
-        <a href="/web/batches/">Batches</a>
-        <a href="/web/qr/search">QR search</a>
-        <a href="/web/audit/">Audit</a>
-        <a href="/web/sessions/">Sessions</a>
-        <a href="/web/users/">Users</a>
-    </nav>
-    <div class="userbox">
-        {% if user_email %}<span>{{ user_email }}</span>{% endif %}
-        <a class="logout" href="/web/logout">Log out</a>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+
+<header class="bg-white border-b border-gray-200 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center h-14 gap-8">
+        <a class="text-sm font-semibold text-gray-900 tracking-tight whitespace-nowrap" href="/web/">DC Inventory</a>
+        <nav class="flex items-center gap-1 flex-1 overflow-x-auto">
+            {% set _navlink = "px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 whitespace-nowrap" %}
+            <a class="{{ _navlink }}" href="/web/">Dashboard</a>
+            <a class="{{ _navlink }}" href="/web/batches/">Batches</a>
+            <a class="{{ _navlink }}" href="/web/qr/search">QR search</a>
+            <a class="{{ _navlink }}" href="/web/audit/">Audit</a>
+            <a class="{{ _navlink }}" href="/web/sessions/">Sessions</a>
+            <a class="{{ _navlink }}" href="/web/users/">Users</a>
+        </nav>
+        <div class="flex items-center gap-3 text-sm">
+            {% if user_email %}<span class="text-gray-500 hidden sm:inline">{{ user_email }}</span>{% endif %}
+            <a class="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-200 text-gray-700 hover:bg-gray-100" href="/web/logout">Log out</a>
+        </div>
     </div>
 </header>
 
 {% if flash %}
-<div class="flash flash-{{ flash_kind|default('info') }}">{{ flash }}</div>
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+    {% if flash_kind == "error" %}
+    <div class="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ flash }}</div>
+    {% else %}
+    <div class="rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">{{ flash }}</div>
+    {% endif %}
+</div>
 {% endif %}
 
-<main>
+<main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
     {% block content %}{% endblock %}
 </main>
 
-<footer class="footer">
-    <small>DC Inventory backend &middot; <a href="/health">/health</a> &middot; <a href="/docs">/docs</a></small>
+<footer class="border-t border-gray-200 py-6 text-center text-xs text-gray-500">
+    DC Inventory backend &middot;
+    <a class="hover:text-gray-700" href="/health">/health</a> &middot;
+    <a class="hover:text-gray-700" href="/docs">/docs</a>
 </footer>
 </body>
 </html>

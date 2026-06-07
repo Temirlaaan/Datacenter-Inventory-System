@@ -1,38 +1,55 @@
 {% extends "_base.html" %}
 {% block title %}User {{ target.username }} &middot; DC Inventory admin{% endblock %}
 {% block content %}
-<section class="content">
-    <h1>User <code>{{ target.username }}</code></h1>
-    <p><a href="/web/users/">&laquo; Back to users</a></p>
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <a class="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4" href="/web/users/">&laquo; Back to users</a>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-6">User <code class="font-mono text-xl text-gray-600">{{ target.username }}</code></h1>
 
-    <dl class="kv">
-        <dt>Keycloak id</dt><dd><code>{{ target.id }}</code></dd>
-        <dt>Username</dt><dd>{{ target.username }}</dd>
-        <dt>Email</dt><dd>{{ target.email or "—" }}</dd>
-        <dt>Name</dt><dd>{{ (target.first_name or "") }} {{ (target.last_name or "") }}</dd>
-        <dt>Enabled</dt>
-        <dd>
-            {% if target.enabled %}
-            <span class="result-badge result-badge--success">enabled</span>
-            {% else %}
-            <span class="result-badge result-badge--failure">disabled</span>
-            {% endif %}
-        </dd>
-        <dt>Created</dt><dd>{{ target.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if target.created_at else "—" }}</dd>
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6 mb-8">
+        <div class="sm:col-span-2">
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Keycloak id</dt>
+            <dd class="text-sm mt-1"><code class="font-mono text-gray-900">{{ target.id }}</code></dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Username</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ target.username }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Email</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ target.email or "—" }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Name</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ (target.first_name or "") }} {{ (target.last_name or "") }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Enabled</dt>
+            <dd class="text-sm mt-1">
+                {% if target.enabled %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">enabled</span>
+                {% else %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800">disabled</span>
+                {% endif %}
+            </dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Created</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ target.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if target.created_at else "—" }}</dd>
+        </div>
     </dl>
 
-    <h2>Realm roles</h2>
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Realm roles</h2>
     {% if target.roles %}
-    <ul>
+    <div class="flex flex-wrap gap-2 mb-8">
         {% for r in target.roles %}
-        <li><code>{{ r }}</code></li>
+        <span class="inline-flex items-center px-2.5 py-1 rounded-md bg-gray-100 text-gray-700 text-xs font-mono">{{ r }}</span>
         {% endfor %}
-    </ul>
+    </div>
     {% else %}
-    <p class="empty-state">No realm roles assigned.</p>
+    <p class="text-sm italic text-gray-500 mb-8">No realm roles assigned.</p>
     {% endif %}
 
-    <h2>Audit history</h2>
-    <p><a href="/web/audit/?user_keycloak_id={{ target.id }}">See all audit rows attributed to this user &raquo;</a></p>
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Audit history</h2>
+    <p class="text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/audit/?user_keycloak_id={{ target.id }}">See all audit rows attributed to this user &raquo;</a></p>
 </section>
 {% endblock %}

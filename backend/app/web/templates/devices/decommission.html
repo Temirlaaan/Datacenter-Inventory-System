@@ -1,24 +1,30 @@
 {% extends "_base.html" %}
 {% block title %}Decommission device &middot; DC Inventory admin{% endblock %}
 {% block content %}
-<section class="content">
-    <h1>Decommission device</h1>
-    <p>Marks a NetBox device as decommissioned. If the device has a bound QR, the QR is retired in the same flow (QR-first ordering). Records a per-incident reason in the NetBox journal entry + audit log.</p>
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6 max-w-2xl">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-1">Decommission device</h1>
+    <p class="text-sm text-gray-500 mb-6">Marks a NetBox device as decommissioned. If the device has a bound QR, the QR is retired in the same flow (QR-first ordering). Records a per-incident reason in the NetBox journal entry + audit log.</p>
 
     {% if flash %}
-    <div class="flash flash-{{ flash_kind|default('info') }}">{{ flash }}</div>
+    <div class="mb-6 rounded-md border border-{{ 'rose-200 bg-rose-50 text-rose-800' if flash_kind == 'error' else 'indigo-200 bg-indigo-50 text-indigo-800' }} px-4 py-3 text-sm">{{ flash }}</div>
     {% endif %}
 
-    <form method="post" action="/web/devices/decommission"
+    <form method="post" action="/web/devices/decommission" class="space-y-4"
           onsubmit="return confirm('Decommission device ' + this.device_id.value + '? This changes NetBox status and retires the bound QR if any. Cannot be undone in one click.');">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <label>Device id
-            <input name="device_id" type="number" min="1" required placeholder="NetBox device numeric id">
-        </label>
-        <label>Reason
-            <textarea name="reason" rows="3" minlength="1" maxlength="2000" required placeholder="Why this device is being decommissioned (will be visible in NetBox journal + audit log)"></textarea>
-        </label>
-        <button type="submit">Decommission device</button>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Device id</label>
+            <input name="device_id" type="number" min="1" required placeholder="NetBox device numeric id"
+                   class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+            <textarea name="reason" rows="4" minlength="1" maxlength="2000" required placeholder="Why this device is being decommissioned (will be visible in NetBox journal + audit log)"
+                      class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500"></textarea>
+        </div>
+        <div class="pt-2">
+            <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium shadow-sm">Decommission device</button>
+        </div>
     </form>
 </section>
 {% endblock %}

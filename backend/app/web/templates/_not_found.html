@@ -1,9 +1,9 @@
 {% extends "_base.html" %}
 {% block title %}Not found &middot; DC Inventory admin{% endblock %}
 {% block content %}
-<section class="content">
-    <h1>Not found</h1>
-    <p>The requested resource was not found: <code>{{ resource }}</code>.</p>
-    <p><a href="/web/">Back to dashboard</a></p>
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6 max-w-2xl">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Not found</h1>
+    <p class="text-sm text-gray-500 mb-4">The requested resource was not found: <code class="font-mono text-gray-900">{{ resource }}</code>.</p>
+    <p class="text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/">&laquo; Back to dashboard</a></p>
 </section>
 {% endblock %}

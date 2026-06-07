@@ -1,40 +1,37 @@
 {% extends "_base.html" %}
 {% block title %}Dashboard &middot; DC Inventory admin{% endblock %}
 {% block content %}
-<section class="content">
-    <h1>Dashboard</h1>
-    <p class="generated-at">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
-
-    <div class="quick-actions">
-        <a class="download-btn" href="/web/batches/new">+ New QR batch</a>
-        <a class="download-btn" href="/web/devices/decommission">Decommission device</a>
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <div class="flex items-baseline justify-between flex-wrap gap-2 mb-6">
+        <div>
+            <h1 class="text-2xl font-semibold text-gray-900">Dashboard</h1>
+            <p class="text-sm text-gray-500 mt-1">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
+        </div>
     </div>
 
-    <div class="card-grid">
-        <div class="card">
-            <div class="card__label">Free QRs</div>
-            <div class="card__value">{{ snapshot.qr_free_count }}</div>
+    <div class="flex flex-wrap gap-3 mb-8">
+        <a class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm" href="/web/batches/new">
+            <span class="mr-1">+</span> New QR batch
+        </a>
+        <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/devices/decommission">
+            Decommission device
+        </a>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for label, value in [
+            ("Free QRs", snapshot.qr_free_count),
+            ("Bound QRs", snapshot.qr_bound_count),
+            ("Retired QRs", snapshot.qr_retired_count),
+            ("Batches (last 30 days)", snapshot.batches_last_30_days),
+            ("Active shifts", snapshot.active_shifts_count),
+            ("Audit rows (last 24h)", snapshot.audit_rows_last_24h),
+        ] %}
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+            <div class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ label }}</div>
+            <div class="text-3xl font-semibold text-gray-900 mt-2">{{ value }}</div>
         </div>
-        <div class="card">
-            <div class="card__label">Bound QRs</div>
-            <div class="card__value">{{ snapshot.qr_bound_count }}</div>
-        </div>
-        <div class="card">
-            <div class="card__label">Retired QRs</div>
-            <div class="card__value">{{ snapshot.qr_retired_count }}</div>
-        </div>
-        <div class="card">
-            <div class="card__label">Batches (last 30 days)</div>
-            <div class="card__value">{{ snapshot.batches_last_30_days }}</div>
-        </div>
-        <div class="card">
-            <div class="card__label">Active shifts</div>
-            <div class="card__value">{{ snapshot.active_shifts_count }}</div>
-        </div>
-        <div class="card">
-            <div class="card__label">Audit rows (last 24h)</div>
-            <div class="card__value">{{ snapshot.audit_rows_last_24h }}</div>
-        </div>
+        {% endfor %}
     </div>
 </section>
 {% endblock %}

@@ -1,85 +1,110 @@
 {% extends "_base.html" %}
 {% block title %}Audit log &middot; DC Inventory admin{% endblock %}
-{% block content %}
-<section class="content">
-    <h1>Audit log</h1>
-    <p>Filter, page through results, or export the current query as CSV.</p>
 
-    <form class="filter-form" method="get" action="/web/audit/">
-        <label>User Keycloak ID
-            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID">
-        </label>
-        <label>From
-            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}">
-        </label>
-        <label>To
-            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}">
-        </label>
-        <label>Entity type
-            <input name="entity_type" value="{{ filters.entity_type }}" placeholder="qr / device / shift_session / audit">
-        </label>
-        <label>Entity ID
-            <input name="entity_id" value="{{ filters.entity_id }}">
-        </label>
-        <label>Operation
-            <input name="operation" value="{{ filters.operation }}" placeholder="qr.bind / device.update / …">
-        </label>
-        <label>Session ID
-            <input name="session_id" value="{{ filters.session_id }}" placeholder="UUID">
-        </label>
-        <label>Result
-            <select name="result">
+{% macro result_badge(result) -%}
+{% if result == "success" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">success</span>
+{% elif result == "failure" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800">failure</span>
+{% elif result == "conflict" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">conflict</span>
+{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-1">Audit log</h1>
+    <p class="text-sm text-gray-500 mb-6">Filter, page through results, or export the current query as CSV.</p>
+
+    {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
+    {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
+    <form method="get" action="/web/audit/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
+        <div>
+            <label class="{{ _label_cls }}">User Keycloak ID</label>
+            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">From</label>
+            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">To</label>
+            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">Entity type</label>
+            <input name="entity_type" value="{{ filters.entity_type }}" placeholder="qr / device / shift_session / audit" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">Entity ID</label>
+            <input name="entity_id" value="{{ filters.entity_id }}" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">Operation</label>
+            <input name="operation" value="{{ filters.operation }}" placeholder="qr.bind / device.update / …" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">Session ID</label>
+            <input name="session_id" value="{{ filters.session_id }}" placeholder="UUID" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">Result</label>
+            <select name="result" class="{{ _input_cls }}">
                 <option value=""></option>
                 {% for r in result_choices %}
                 <option value="{{ r }}" {% if filters.result == r %}selected{% endif %}>{{ r }}</option>
                 {% endfor %}
             </select>
-        </label>
-        <div class="filter-form__actions">
-            <button type="submit">Apply filters</button>
-            <a class="download-btn" href="/api/v1/admin/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">
-                Download CSV
-            </a>
+        </div>
+        <div class="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-2">
+            <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Apply filters</button>
+            <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/api/v1/admin/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">Download CSV</a>
         </div>
     </form>
 
     {% if rows %}
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>When</th>
-                <th>User</th>
-                <th>Operation</th>
-                <th>Entity</th>
-                <th>Result</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for r in rows %}
-            <tr>
-                <td>{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
-                <td>{{ r.user_email }}</td>
-                <td><code>{{ r.operation }}</code></td>
-                <td>{{ r.entity_type }} / <code>{{ r.entity_id }}</code></td>
-                <td><span class="result-badge result-badge--{{ r.result.value }}">{{ r.result.value }}</span></td>
-                <td><a href="/web/audit/{{ r.id }}">Details</a></td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="overflow-x-auto -mx-6 sm:mx-0">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">When</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">User</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Operation</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Entity</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Result</th>
+                    <th class="px-3 py-2"></th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+                {% for r in rows %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-3 py-3 text-sm text-gray-900">{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                    <td class="px-3 py-3 text-sm text-gray-900">{{ r.user_email }}</td>
+                    <td class="px-3 py-3 text-sm"><code class="font-mono text-gray-900">{{ r.operation }}</code></td>
+                    <td class="px-3 py-3 text-sm text-gray-500">{{ r.entity_type }} / <code class="font-mono text-gray-900">{{ r.entity_id }}</code></td>
+                    <td class="px-3 py-3 text-sm">{{ result_badge(r.result.value) }}</td>
+                    <td class="px-3 py-3 text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/audit/{{ r.id }}">Details</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
     {% else %}
-    <p class="empty-state">No audit rows match these filters.</p>
+    <p class="text-sm italic text-gray-500 py-6 text-center">No audit rows match these filters.</p>
     {% endif %}
 
-    <nav class="pagination">
-        {% if has_prev %}
-        <a class="pagination__link" href="/web/audit/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
-        {% endif %}
-        <span class="pagination__current">Page {{ page }}</span>
-        {% if has_more %}
-        <a class="pagination__link" href="/web/audit/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
-        {% endif %}
+    <nav class="mt-6 flex items-center justify-between gap-4 text-sm">
+        <div>
+            {% if has_prev %}
+            <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/audit/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
+            {% endif %}
+        </div>
+        <span class="text-gray-500">Page {{ page }}</span>
+        <div>
+            {% if has_more %}
+            <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/audit/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
+            {% endif %}
+        </div>
     </nav>
 </section>
 {% endblock %}

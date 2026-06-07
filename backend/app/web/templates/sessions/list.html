@@ -1,85 +1,111 @@
 {% extends "_base.html" %}
 {% block title %}Sessions &middot; DC Inventory admin{% endblock %}
-{% block content %}
-<section class="content">
-    <h1>Shift sessions</h1>
-    <p>Active and historical shifts. Force-close ends an active shift with the operator's reason recorded for audit.</p>
 
-    <form class="filter-form" method="get" action="/web/sessions/">
-        <label>User Keycloak ID
-            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID">
-        </label>
-        <label>From
-            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}">
-        </label>
-        <label>To
-            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}">
-        </label>
-        <label class="filter-form__check">
-            <input type="checkbox" name="active_only" value="true" {% if filters.active_only %}checked{% endif %}>
+{% macro end_reason_badge(reason) -%}
+{% if reason == "manual" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">manual</span>
+{% elif reason == "auto_timeout" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">auto_timeout</span>
+{% elif reason == "forced" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800">forced</span>
+{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-1">Shift sessions</h1>
+    <p class="text-sm text-gray-500 mb-6">Active and historical shifts. Force-close ends an active shift with the operator's reason recorded for audit.</p>
+
+    {% if flash %}
+    <div class="mb-6 rounded-md border border-{{ 'rose-200 bg-rose-50 text-rose-800' if flash_kind == 'error' else 'indigo-200 bg-indigo-50 text-indigo-800' }} px-4 py-3 text-sm">{{ flash }}</div>
+    {% endif %}
+
+    {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
+    {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
+    <form method="get" action="/web/sessions/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
+        <div>
+            <label class="{{ _label_cls }}">User Keycloak ID</label>
+            <input name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">From</label>
+            <input type="datetime-local" name="from" value="{{ filters['from'][:19] if filters['from'] else '' }}" class="{{ _input_cls }}">
+        </div>
+        <div>
+            <label class="{{ _label_cls }}">To</label>
+            <input type="datetime-local" name="to" value="{{ filters.to[:19] if filters.to else '' }}" class="{{ _input_cls }}">
+        </div>
+        <label class="flex items-center gap-2 self-end pb-2 text-sm text-gray-700">
+            <input type="checkbox" name="active_only" value="true" {% if filters.active_only %}checked{% endif %} class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
             Active only
         </label>
-        <div class="filter-form__actions">
-            <button type="submit">Apply filters</button>
+        <div class="sm:col-span-2 lg:col-span-4 pt-2">
+            <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Apply filters</button>
         </div>
     </form>
 
     {% if rows %}
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Started</th>
-                <th>User</th>
-                <th>Tablet / workstation</th>
-                <th>State</th>
-                <th>Force-close</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for s in rows %}
-            <tr class="{% if s.is_active %}session-row--active{% endif %}">
-                <td>{{ s.shift_start_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
-                <td>{{ s.user_email }}<br><code>{{ s.user_keycloak_id }}</code></td>
-                <td><code>{{ s.tablet_id }}</code></td>
-                <td>
-                    {% if s.is_active %}
-                    <span class="result-badge result-badge--success">active</span>
-                    {% else %}
-                    <span class="end-reason-badge end-reason-badge--{{ s.end_reason.value }}">{{ s.end_reason.value }}</span>
-                    <br><small>{{ s.shift_end_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</small>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if s.is_active %}
-                    <form class="inline-form" method="post" action="/web/sessions/{{ s.id }}/force-close">
-                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                        <textarea name="reason" rows="2" maxlength="500" required placeholder="Reason for force-closing this shift…"></textarea>
-                        <input type="hidden" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}">
-                        <input type="hidden" name="from" value="{{ filters['from'] }}">
-                        <input type="hidden" name="to" value="{{ filters.to }}">
-                        {% if filters.active_only %}<input type="hidden" name="active_only" value="true">{% endif %}
-                        <button type="submit">Force-close</button>
-                    </form>
-                    {% else %}
-                    <span class="empty-state">—</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="overflow-x-auto -mx-6 sm:mx-0">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Started</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">User</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Tablet / workstation</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">State</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Force-close</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+                {% for s in rows %}
+                <tr class="{% if s.is_active %}bg-emerald-50/40{% endif %} hover:bg-gray-50">
+                    <td class="px-3 py-3 text-sm text-gray-900 whitespace-nowrap">{{ s.shift_start_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                    <td class="px-3 py-3 text-sm text-gray-900">{{ s.user_email }}<br><code class="font-mono text-xs text-gray-500">{{ s.user_keycloak_id }}</code></td>
+                    <td class="px-3 py-3 text-sm"><code class="font-mono text-gray-900">{{ s.tablet_id }}</code></td>
+                    <td class="px-3 py-3 text-sm">
+                        {% if s.is_active %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">active</span>
+                        {% else %}
+                        {{ end_reason_badge(s.end_reason.value) }}<br>
+                        <span class="text-xs text-gray-500">{{ s.shift_end_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-3 py-3 text-sm">
+                        {% if s.is_active %}
+                        <form method="post" action="/web/sessions/{{ s.id }}/force-close" class="flex flex-col gap-2 max-w-xs">
+                            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                            <textarea name="reason" rows="2" maxlength="500" required placeholder="Reason for force-closing this shift…" class="block w-full rounded-md border-gray-300 shadow-sm text-xs focus:border-indigo-500 focus:ring-indigo-500"></textarea>
+                            <input type="hidden" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}">
+                            <input type="hidden" name="from" value="{{ filters['from'] }}">
+                            <input type="hidden" name="to" value="{{ filters.to }}">
+                            {% if filters.active_only %}<input type="hidden" name="active_only" value="true">{% endif %}
+                            <button type="submit" class="inline-flex items-center self-start px-2.5 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Force-close</button>
+                        </form>
+                        {% else %}
+                        <span class="text-gray-400">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
     {% else %}
-    <p class="empty-state">No shift sessions match these filters.</p>
+    <p class="text-sm italic text-gray-500 py-6 text-center">No shift sessions match these filters.</p>
     {% endif %}
 
-    <nav class="pagination">
-        {% if has_prev %}
-        <a class="pagination__link" href="/web/sessions/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
-        {% endif %}
-        <span class="pagination__current">Page {{ page }}</span>
-        {% if has_more %}
-        <a class="pagination__link" href="/web/sessions/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
-        {% endif %}
+    <nav class="mt-6 flex items-center justify-between gap-4 text-sm">
+        <div>
+            {% if has_prev %}
+            <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/sessions/?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">&laquo; Prev</a>
+            {% endif %}
+        </div>
+        <span class="text-gray-500">Page {{ page }}</span>
+        <div>
+            {% if has_more %}
+            <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/sessions/?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}">Next &raquo;</a>
+            {% endif %}
+        </div>
     </nav>
 </section>
 {% endblock %}

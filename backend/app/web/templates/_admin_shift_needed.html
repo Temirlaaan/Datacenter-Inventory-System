@@ -1,20 +1,20 @@
 {% extends "_base.html" %}
 {% block title %}Open an admin shift &middot; DC Inventory admin{% endblock %}
 {% block content %}
-<section class="content shift-needed">
-    <h1>Open an admin shift to continue</h1>
-    <p>Hello, {{ user_email }}. Every <code>/web/*</code> page requires an
-    active admin shift for audit attribution (Sprint 7 decision I). Open
-    one to proceed.</p>
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6 max-w-2xl">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Open an admin shift to continue</h1>
+    <p class="text-sm text-gray-500 mb-6">Hello, <span class="text-gray-900 font-medium">{{ user_email }}</span>. Every <code class="font-mono">/web/*</code> page requires an active admin shift for audit attribution. Open one to proceed.</p>
 
-    <form method="post" action="/web/admin/shift/start">
+    <form method="post" action="/web/admin/shift/start" class="space-y-4">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <label for="workstation_id">Workstation id</label>
-        <input id="workstation_id" name="workstation_id" type="text" required
-               minlength="1" maxlength="255" placeholder="admin-laptop-01">
-        <button type="submit">Start shift</button>
+        <div>
+            <label for="workstation_id" class="block text-sm font-medium text-gray-700 mb-1">Workstation id</label>
+            <input id="workstation_id" name="workstation_id" type="text" required minlength="1" maxlength="255" placeholder="admin-laptop-01"
+                   class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
+        </div>
+        <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Start shift</button>
     </form>
 
-    <p class="hint">After your shift starts, navigate back to the page you wanted.</p>
+    <p class="text-xs text-gray-500 italic mt-4">After your shift starts, navigate back to the page you wanted.</p>
 </section>
 {% endblock %}

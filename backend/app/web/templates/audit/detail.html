@@ -1,24 +1,56 @@
 {% extends "_base.html" %}
 {% block title %}Audit row {{ entry.id }} &middot; DC Inventory admin{% endblock %}
-{% block content %}
-<section class="content">
-    <h1>Audit row {{ entry.id }}</h1>
-    <p><a href="/web/audit/">&laquo; Back to audit log</a></p>
 
-    <dl class="kv">
-        <dt>Timestamp</dt><dd>{{ entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</dd>
-        <dt>Request ID</dt><dd><code>{{ entry.request_id }}</code></dd>
-        <dt>User</dt><dd>{{ entry.user_email }} (<code>{{ entry.user_keycloak_id }}</code>)</dd>
-        <dt>Shift session ID</dt><dd>{% if entry.session_id %}<code>{{ entry.session_id }}</code>{% else %}—{% endif %}</dd>
-        <dt>Operation</dt><dd><code>{{ entry.operation }}</code></dd>
-        <dt>Entity</dt><dd>{{ entry.entity_type }} / <code>{{ entry.entity_id }}</code></dd>
-        <dt>Result</dt><dd><span class="result-badge result-badge--{{ entry.result.value }}">{{ entry.result.value }}</span></dd>
+{% macro result_badge(result) -%}
+{% if result == "success" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">success</span>
+{% elif result == "failure" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800">failure</span>
+{% elif result == "conflict" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">conflict</span>
+{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <a class="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4" href="/web/audit/">&laquo; Back to audit log</a>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-6">Audit row <span class="text-gray-500 font-normal">#{{ entry.id }}</span></h1>
+
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6 mb-8">
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Timestamp</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Request ID</dt>
+            <dd class="text-sm mt-1"><code class="font-mono text-gray-900">{{ entry.request_id }}</code></dd>
+        </div>
+        <div class="sm:col-span-2">
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">User</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ entry.user_email }} <code class="font-mono text-gray-500 text-xs">{{ entry.user_keycloak_id }}</code></dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Shift session ID</dt>
+            <dd class="text-sm mt-1">{% if entry.session_id %}<code class="font-mono text-gray-900">{{ entry.session_id }}</code>{% else %}<span class="text-gray-500">—</span>{% endif %}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Result</dt>
+            <dd class="text-sm mt-1">{{ result_badge(entry.result.value) }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Operation</dt>
+            <dd class="text-sm mt-1"><code class="font-mono text-gray-900">{{ entry.operation }}</code></dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Entity</dt>
+            <dd class="text-sm text-gray-900 mt-1">{{ entry.entity_type }} / <code class="font-mono">{{ entry.entity_id }}</code></dd>
+        </div>
     </dl>
 
-    <h2>Before</h2>
-    <pre class="json-block">{{ entry.before_json | tojson(indent=2) }}</pre>
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Before</h2>
+    <pre class="rounded-md bg-slate-900 text-slate-100 p-4 overflow-x-auto text-xs font-mono leading-relaxed mb-6">{{ entry.before_json | tojson(indent=2) }}</pre>
 
-    <h2>After</h2>
-    <pre class="json-block">{{ entry.after_json | tojson(indent=2) }}</pre>
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">After</h2>
+    <pre class="rounded-md bg-slate-900 text-slate-100 p-4 overflow-x-auto text-xs font-mono leading-relaxed">{{ entry.after_json | tojson(indent=2) }}</pre>
 </section>
 {% endblock %}
