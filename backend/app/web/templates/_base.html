@@ -5,11 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}DC Inventory admin{% endblock %}</title>
     {# Tailwind Play script, self-hosted under /static/ so the admin
-       surface has no runtime dependency on cdn.tailwindcss.com (closes
-       LOW 5 from the 2026-06-07 code review). Same JIT engine as the
-       CDN; pinned to the version we downloaded on 2026-06-07. Replace
-       the file to upgrade; precompile to a CSS bundle (needs Node)
-       only if the ~400KB JS load becomes a perf concern. #}
+       surface has no runtime dependency on cdn.tailwindcss.com. Bundled
+       with the official @tailwindcss/forms plugin (gives all native
+       <input>/<textarea>/<select> sane padding + border defaults out
+       of the box — without it Tailwind's preflight strips browser
+       styling and inputs render with zero internal padding). Pinned to
+       the version we downloaded on 2026-06-07. To upgrade, re-fetch
+       `https://cdn.tailwindcss.com?plugins=forms`. Precompile to a CSS
+       bundle (needs Node) only if the ~400KB JS load becomes a perf
+       concern. #}
     <script src="/static/tailwind.js"></script>
     <script>
       tailwind.config = {
