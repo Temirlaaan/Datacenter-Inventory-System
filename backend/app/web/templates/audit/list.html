@@ -18,7 +18,7 @@
 
     {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
     {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
-    <form method="get" action="/web/audit/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
+    <form method="get" action="/web/audit/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
         <div>
             <label class="{{ _label_cls }}" for="user_keycloak_id">User Keycloak ID</label>
             <input id="user_keycloak_id" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
@@ -56,7 +56,7 @@
                 {% endfor %}
             </select>
         </div>
-        <div class="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-2">
+        <div class="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 pt-2">
             <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Apply filters</button>
             <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/audit/csv{% if filter_qs %}?{{ filter_qs }}{% endif %}">Download CSV</a>
         </div>

@@ -72,7 +72,7 @@
                     <td class="px-3 py-3 text-sm">
                         {% if c.status.value == "free" %}
                         <form method="post" action="/web/qr/{{ c.id }}/retire"
-                              onsubmit="return confirm('Retire QR {{ c.id }}? This cannot be undone.');">
+                              class="js-retire-form" data-qr-id="{{ c.id }}">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <input type="hidden" name="batch_id" value="{{ batch.id }}">
                             <button type="submit" class="inline-flex items-center px-2.5 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Retire</button>
@@ -88,4 +88,20 @@
     <p class="text-sm italic text-gray-500 py-6 text-center">This batch has no codes.</p>
     {% endif %}
 </section>
+
+{# Confirm dialog for each inline retire form. QR ids come from
+   secrets.token_urlsafe() (url-safe base64 — no quotes/backslashes) so
+   embedding them as a data- attribute is safe; this still avoids
+   template interpolation inside a JS attribute value, satisfying
+   defense-in-depth (2026-06-07 code review LOW 4). #}
+<script>
+  for (const form of document.querySelectorAll(".js-retire-form")) {
+    form.addEventListener("submit", (event) => {
+      const qrId = form.dataset.qrId;
+      if (!confirm("Retire QR " + qrId + "? This cannot be undone.")) {
+        event.preventDefault();
+      }
+    });
+  }
+</script>
 {% endblock %}

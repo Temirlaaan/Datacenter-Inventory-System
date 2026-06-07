@@ -6,7 +6,11 @@
     <p class="text-sm text-gray-500 mb-6">Marks a NetBox device as decommissioned. If the device has a bound QR, the QR is retired in the same flow (QR-first ordering). Records a per-incident reason in the NetBox journal entry + audit log.</p>
 
     {% if flash %}
-    <div class="mb-6 rounded-md border border-{{ 'rose-200 bg-rose-50 text-rose-800' if flash_kind == 'error' else 'indigo-200 bg-indigo-50 text-indigo-800' }} px-4 py-3 text-sm">{{ flash }}</div>
+    {% if flash_kind == "error" %}
+    <div class="mb-6 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ flash }}</div>
+    {% else %}
+    <div class="mb-6 rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">{{ flash }}</div>
+    {% endif %}
     {% endif %}
 
     <form method="post" action="/web/devices/decommission" class="space-y-4"

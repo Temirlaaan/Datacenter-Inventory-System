@@ -1225,3 +1225,19 @@ Two findings from a self-review of the Tailwind redesign commit:
 **MEDIUM — form labels not associated with inputs.** The Tailwind redesign moved labels from wrapping inputs (`<label>Text <input></label>`) to sibling pairs (`<label>Text</label><input>`) without explicit `for=`/`id=` pairing, breaking screen-reader association. Added `for="X"`/`id="X"` to every label/input pair across [batches/new.html](../backend/app/web/templates/batches/new.html), [devices/decommission.html](../backend/app/web/templates/devices/decommission.html), [qr/search.html](../backend/app/web/templates/qr/search.html), [audit/list.html](../backend/app/web/templates/audit/list.html), [sessions/list.html](../backend/app/web/templates/sessions/list.html), [users/list.html](../backend/app/web/templates/users/list.html). The `_admin_shift_needed.html` form already had the pair from the earlier explicit-fix commit.
 
 Two new tests: `web_audit_csv` happy-path delegation (auth user built + filters passed through), `/audit/csv` registered before `/audit/{audit_id}` route-order regression guard. Unit suite: 596 → 598.
+
+### 2026-06-07 — fix(web): code-review MEDIUM/LOW polish + wider filter forms
+
+Follow-up to the same-day code review. The HIGH was fixed in the previous commit; this one closes the MEDIUM + most of the LOW items plus a width tweak the user asked for on top.
+
+**MEDIUM 3 — Tailwind classes via Jinja string concatenation.** The flash banner pattern `border-{{ 'rose-200 …' if … else 'indigo-200 …' }}` worked because the Play CDN JIT scans the rendered DOM, but it was fragile (a typo would silently drop the border) and invisible to IDE/CI Tailwind tooling. Replaced with full `{% if %}{% else %}` blocks holding complete class strings in [batches/list.html](../backend/app/web/templates/batches/list.html), [sessions/list.html](../backend/app/web/templates/sessions/list.html), [devices/decommission.html](../backend/app/web/templates/devices/decommission.html).
+
+**LOW 4 — inline `onsubmit` with Jinja interpolation.** The Retire button on each FREE row in [batches/detail.html](../backend/app/web/templates/batches/detail.html) was confirming via `onsubmit="return confirm('Retire QR {{ c.id }}? …');"` — safe today because QR ids come from `secrets.token_urlsafe()` (url-safe base64, no quotes/backslashes), but defense-in-depth dictates avoiding template interpolation inside JS attribute values. Refactored to `<form class="js-retire-form" data-qr-id="{{ c.id }}">` + a small `<script>` block at the end of the template that wires `submit` listeners. The QR id is read from the DOM as a string at runtime — no JS injection path even if the id-character-set widens later.
+
+**LOW 5 — supply-chain CDN dependency.** Self-hosting the Tailwind Play script was BLOCKED by the auto-mode classifier (downloading executable JS from an external CDN into the repo is a real supply-chain action requiring user authorization). Three options surfaced to the user: they download the file themselves, accept the CDN dependency as-is, or grant a one-off `curl … cdn.tailwindcss.com` permission. No code change in this commit.
+
+**LOW 6 — CDN console warning.** Not actionable without a precompile step (Node), which would break the Python-only stack constraint. Acknowledged; left as-is.
+
+**Wider filter forms.** User feedback on the screenshot: the UUID input in the audit filter form was squeezed at `lg:grid-cols-4` (≈25% of form width on large viewports). Dropped to `lg:grid-cols-3` in [audit/list.html](../backend/app/web/templates/audit/list.html) and [sessions/list.html](../backend/app/web/templates/sessions/list.html) — each input now gets ~33% width on `lg`, plenty for a 36-char UUID. Span on the action row updated to match (`lg:col-span-3`).
+
+Unit suite still 598 passing — these were all template-only changes preserving the text strings tests assert on. Lint clean.
