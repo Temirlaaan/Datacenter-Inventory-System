@@ -1145,3 +1145,15 @@ Closed the Sprint 8b parking-lot item ahead of any new sprint open, on user requ
 **Tests:** 5 new direct-await CSRF-mismatch tests (one per POST handler), confirming `HTTPException(403)` raises before any DB work happens. Updated all 18 existing POST-handler test invocations to pass `csrf="test-csrf-token"`, refactored `_admin_cookie_value` test helper to build the cookie with a deterministic `csrf_token` (matching what tests pass). Unit suite: 567 → 572 passing.
 
 **Parking lot now empty for `/web/*` security.** `/web/qr/search` and `/web/users/` remain as feature gaps, not security ones.
+
+### 2026-06-07 — feat(web): /web/qr/search
+
+Closes the `/web/qr/search` parking-lot item. One-page lookup: form at the top, optional result block below when `?qr_id=...` is set.
+
+**Renders:** the QR row (status badge, batch link, bound device id, bound/retired timestamps); the bound NetBox device card (id, name, status, site, rack, version) when QR is BOUND and the device is reachable; the 20 most recent audit rows for the QR with a "See all" link to `/web/audit/?entity_type=qr&entity_id=…` for deeper history. Stale-binding diagnostic when QR points at a device NetBox no longer recognizes (404) — surfaces a flash banner instead of silently swallowing.
+
+**Read-only.** No audit row for the search itself (operational read, mirrors Sprint 7 decision 8). NetBox is consulted only when QR is BOUND — FREE and RETIRED skip the network round-trip.
+
+[router.py](../backend/app/web/router.py) `web_qr_search` GET at `/web/qr/search`; template [qr/search.html](../backend/app/web/templates/qr/search.html); top-nav link in [_base.html](../backend/app/web/templates/_base.html) between Batches and Audit.
+
+Four direct-await tests: empty form (no `qr_id`), unknown QR, FREE QR (asserts NetBox isn't touched), BOUND QR with NetBox 404 (stale-binding flash). Unit suite: 572 → 576.

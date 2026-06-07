@@ -1,0 +1,82 @@
+{% extends "_base.html" %}
+{% block title %}QR search &middot; DC Inventory admin{% endblock %}
+{% block content %}
+<section class="content">
+    <h1>QR search</h1>
+    <p>Look up a QR by id — see its current state, the bound device (if any), and recent audit history.</p>
+
+    <form method="get" action="/web/qr/search">
+        <label>QR id
+            <input name="qr_id" type="text" maxlength="255" required
+                   value="{{ submitted_qr_id }}" placeholder="e.g. QR-7F3A2B">
+        </label>
+        <button type="submit">Search</button>
+    </form>
+
+    {% if lookup_attempted %}
+        {% if qr is none %}
+        <p class="empty-state">No QR with id <code>{{ submitted_qr_id }}</code>.</p>
+        {% else %}
+        <h2>QR <code>{{ qr.id }}</code></h2>
+        <dl class="kv">
+            <dt>Status</dt>
+            <dd><span class="status-badge status-badge--{{ qr.status.value }}">{{ qr.status.value }}</span></dd>
+            <dt>Batch</dt>
+            <dd><a href="/web/batches/{{ qr.batch_id }}"><code>{{ qr.batch_id }}</code></a></dd>
+            <dt>Bound device id</dt>
+            <dd>{{ qr.bound_to_device_id or "—" }}</dd>
+            <dt>Bound at</dt>
+            <dd>{{ qr.bound_at.strftime("%Y-%m-%d %H:%M:%S UTC") if qr.bound_at else "—" }}</dd>
+            <dt>Retired at</dt>
+            <dd>{{ qr.retired_at.strftime("%Y-%m-%d %H:%M:%S UTC") if qr.retired_at else "—" }}</dd>
+        </dl>
+
+        {% if device is not none %}
+        <h2>Bound device</h2>
+        <dl class="kv">
+            <dt>Device id</dt><dd>{{ device.data.id }}</dd>
+            <dt>Name</dt><dd>{{ device.data.name or "—" }}</dd>
+            <dt>Status</dt><dd>{{ device.data.status.label if device.data.status else "—" }}</dd>
+            <dt>Site</dt><dd>{{ device.data.site.name if device.data.site else "—" }}</dd>
+            <dt>Rack</dt><dd>{{ device.data.rack.name if device.data.rack else "—" }}</dd>
+            <dt>Version</dt><dd><code>{{ device.version }}</code></dd>
+        </dl>
+        {% elif device_error %}
+        <h2>Bound device</h2>
+        <p class="flash flash-error">{{ device_error }}</p>
+        {% endif %}
+
+        <h2>Audit history</h2>
+        {% if audit_rows %}
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>User</th>
+                    <th>Operation</th>
+                    <th>Result</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in audit_rows %}
+                <tr>
+                    <td>{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                    <td>{{ r.user_email }}</td>
+                    <td><code>{{ r.operation }}</code></td>
+                    <td><span class="result-badge result-badge--{{ r.result.value }}">{{ r.result.value }}</span></td>
+                    <td><a href="/web/audit/{{ r.id }}">Details</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if audit_has_more %}
+        <p><a href="/web/audit/?entity_type=qr&entity_id={{ submitted_qr_id }}">See all audit rows for this QR &raquo;</a></p>
+        {% endif %}
+        {% else %}
+        <p class="empty-state">No audit entries for this QR yet.</p>
+        {% endif %}
+        {% endif %}
+    {% endif %}
+</section>
+{% endblock %}

@@ -50,6 +50,7 @@ from app.web.router import (
     web_devices_decommission,
     web_force_close_session,
     web_qr_retire,
+    web_qr_search,
 )
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
@@ -1736,6 +1737,200 @@ async def test_batches_new_form_renders(monkeypatch: pytest.MonkeyPatch) -> None
     response = await batches_new_form(request=Request(scope), user=_admin_user())
     assert response.status_code == 200
     assert b"New QR batch" in response.body
+
+
+async def test_web_qr_search_renders_empty_form_when_no_qr_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /web/qr/search`` with no ``qr_id`` shows the search form and no
+    result block (``lookup_attempted=False``)."""
+    _set_env(monkeypatch)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/qr/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope),
+        qr_id=None,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert b"QR search" in response.body
+    assert b"No QR with id" not in response.body  # no lookup attempted
+
+
+async def test_web_qr_search_renders_not_found_for_unknown_qr_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lookup returns ``None`` → empty-state message under the form."""
+    _set_env(monkeypatch)
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> None:
+            return None
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/qr/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"qr_id=QR-DOESNT-EXIST",
+        "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope),
+        qr_id="QR-DOESNT-EXIST",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert b"No QR with id" in response.body
+    assert b"QR-DOESNT-EXIST" in response.body
+
+
+async def test_web_qr_search_renders_free_qr_without_device_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FREE QR → no NetBox call, audit history rendered, no device card."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    free_qr = QR(
+        id="QR-FREE-1",
+        batch_id=uuid4(),
+        status=QRStatus.FREE,
+        bound_to_device_id=None,
+        bound_at=None,
+        bound_by_email=None,
+        retired_at=None,
+        retired_reason=None,
+    )
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> QR:
+            return free_qr
+
+    netbox_called = False
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, _device_id: int) -> Any:
+            nonlocal netbox_called
+            netbox_called = True
+            raise AssertionError("DeviceService.get_device must not be called for FREE QRs")
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
+            return [], False
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/qr/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"qr_id=QR-FREE-1",
+        "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope),
+        qr_id="QR-FREE-1",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert b"QR-FREE-1" in response.body
+    assert b"free" in response.body
+    assert not netbox_called
+
+
+async def test_web_qr_search_renders_bound_qr_with_stale_device_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BOUND QR but bound device id missing in NetBox → device_error flash
+    surfaced (stale-binding diagnostic) instead of swallowing the 404."""
+    _set_env(monkeypatch)
+    from datetime import datetime
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+    from app.netbox.errors import NetBoxNotFound
+
+    bound_qr = QR(
+        id="QR-BOUND-1",
+        batch_id=uuid4(),
+        status=QRStatus.BOUND,
+        bound_to_device_id=999,
+        bound_at=datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC),
+        bound_by_email="engineer@example.com",
+        retired_at=None,
+        retired_reason=None,
+    )
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> QR:
+            return bound_qr
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, _device_id: int) -> Any:
+            raise NetBoxNotFound("device 999")
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
+            return [], False
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/qr/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"qr_id=QR-BOUND-1",
+        "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope),
+        qr_id="QR-BOUND-1",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert b"QR-BOUND-1" in response.body
+    assert b"stale binding" in response.body
 
 
 async def test_devices_decommission_form_renders(monkeypatch: pytest.MonkeyPatch) -> None:

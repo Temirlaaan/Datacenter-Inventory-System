@@ -41,7 +41,7 @@ from app.db.repositories.shift_session import (
     ShiftSessionRepository,
 )
 from app.db.session import get_session, get_sessionmaker
-from app.domain.audit import AuditResult
+from app.domain.audit import AuditLogEntry, AuditResult
 from app.domain.shift_session import ShiftEndReason
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxNotFound
@@ -1050,4 +1050,83 @@ async def web_devices_decommission(
         )
     return _decommission_redirect(
         flash=f"Device {device_id} decommissioned", flash_kind="info"
+    )
+
+
+# ---------- /web/qr/search — QR lookup by id --------------------------------
+
+
+_WEB_QR_SEARCH_AUDIT_PAGE_SIZE = 20
+
+
+@router.get("/qr/search", response_class=HTMLResponse)
+async def web_qr_search(
+    request: Request,
+    qr_id: str | None = Query(default=None, max_length=255),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """One-page QR lookup: form + (optional) result block.
+
+    ``GET /web/qr/search`` with no ``qr_id`` renders just the search form.
+    With ``?qr_id=...`` renders the form pre-filled + a result block
+    showing the QR row, the bound NetBox device (if any), and the 20
+    most recent audit rows for this QR.
+
+    Read-only — no writes, no audit row (operational read, mirrors
+    ``/admin/audit`` per Sprint 7 decision 8). NetBox is consulted only
+    when the QR is BOUND; FREE and RETIRED skip the network round-trip.
+    """
+    if qr_id is None or not qr_id.strip():
+        return templates.TemplateResponse(
+            request,
+            "qr/search.html",
+            {
+                "user_email": user.email,
+                "submitted_qr_id": "",
+                "qr": None,
+                "device": None,
+                "device_error": None,
+                "audit_rows": None,
+                "audit_has_more": False,
+                "lookup_attempted": False,
+            },
+        )
+    qr_id = qr_id.strip()
+    qr = await QRCodeRepository(session).get_by_id(qr_id)
+    device = None
+    device_error: str | None = None
+    audit_rows: list[AuditLogEntry] = []
+    audit_has_more = False
+    if qr is not None:
+        if qr.bound_to_device_id is not None:
+            try:
+                device = await DeviceService(get_netbox_client()).get_device(
+                    qr.bound_to_device_id
+                )
+            except NetBoxNotFound:
+                device_error = (
+                    f"Bound device {qr.bound_to_device_id} not found in NetBox "
+                    "(stale binding?)."
+                )
+            except Exception as exc:  # NetBoxClientError / circuit open / etc.
+                device_error = f"Could not fetch bound device: {type(exc).__name__}"
+        audit_rows, audit_has_more = await AuditLogRepository(session).query(
+            filters=AuditLogQueryFilters(entity_type="qr", entity_id=qr_id),
+            page=1,
+            page_size=_WEB_QR_SEARCH_AUDIT_PAGE_SIZE,
+        )
+    return templates.TemplateResponse(
+        request,
+        "qr/search.html",
+        {
+            "user_email": user.email,
+            "submitted_qr_id": qr_id,
+            "qr": qr,
+            "device": device,
+            "device_error": device_error,
+            "audit_rows": audit_rows,
+            "audit_has_more": audit_has_more,
+            "lookup_attempted": True,
+        },
     )
