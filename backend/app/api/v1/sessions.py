@@ -21,15 +21,16 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.dependencies import AuthUser, require_role
 from app.db.repositories.shift_session import ShiftSessionRepository
-from app.db.session import get_session
+from app.db.session import get_session, get_sessionmaker
 from app.domain.shift_session import ShiftEndReason, ShiftSession
+from app.services.idempotency import with_optional_idempotency_outer
 from app.services.shift_session import (
     NoActiveShift,
     SessionAlreadyActive,
@@ -117,26 +118,46 @@ async def start_session(
     request: SessionStartRequest,
     user: AuthUser = Depends(require_role("dcinv-mobile-user")),
     service: ShiftSessionService = Depends(get_shift_session_service),
-) -> SessionResponse | JSONResponse:
-    """Open a new active shift for the JWT-identified user."""
-    try:
-        started = await service.start(
-            user_email=user.email or "",
-            user_keycloak_id=UUID(user.sub),
-            tablet_id=request.tablet_id,
-        )
-    except SessionAlreadyActive as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
+    """Open a new active shift for the JWT-identified user.
+
+    Optional ``Idempotency-Key`` header (Sprint 9 Task 0): when the mobile
+    client supplies a UUID-shaped key, a retry with the same key + same
+    payload returns the original response bit-for-bit (whether that was the
+    201 success or the 409 ``SESSION_ALREADY_ACTIVE``). Same key + different
+    payload → 422 ``Idempotency-Key reused …``. No header = current
+    behaviour (uncached, every call hits the service).
+    """
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            started = await service.start(
+                user_email=user.email or "",
+                user_keycloak_id=UUID(user.sub),
+                tablet_id=request.tablet_id,
+            )
+        except SessionAlreadyActive as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "SESSION_ALREADY_ACTIVE",
                     "message": "A shift is already active for this user.",
                     "active": _to_session_info(exc.active).model_dump(mode="json"),
                 }
-            },
-        )
-    return SessionResponse(session=_to_session_info(started))
+            }
+        return status.HTTP_200_OK, SessionResponse(
+            session=_to_session_info(started)
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload=request.model_dump(mode="json"),
+        do_work=_do_work,
+    )
+    return JSONResponse(body, status_code=status_code)
 
 
 @router.post(
@@ -148,24 +169,40 @@ async def end_session(
     request: SessionEndRequest,
     user: AuthUser = Depends(require_role("dcinv-mobile-user")),
     service: ShiftSessionService = Depends(get_shift_session_service),
-) -> SessionResponse | JSONResponse:
-    """End the JWT-identified user's active shift."""
-    try:
-        ended = await service.end(
-            user_keycloak_id=UUID(user.sub),
-            reason=ShiftEndReason(request.end_reason),
-        )
-    except NoActiveShift:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
+    """End the JWT-identified user's active shift.
+
+    Optional ``Idempotency-Key`` header — see :func:`start_session` for the
+    contract.
+    """
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            ended = await service.end(
+                user_keycloak_id=UUID(user.sub),
+                reason=ShiftEndReason(request.end_reason),
+            )
+        except NoActiveShift:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "NO_ACTIVE_SHIFT",
                     "message": "No active shift to end for this user.",
                 }
-            },
-        )
-    return SessionResponse(session=_to_session_info(ended))
+            }
+        return status.HTTP_200_OK, SessionResponse(
+            session=_to_session_info(ended)
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload=request.model_dump(mode="json"),
+        do_work=_do_work,
+    )
+    return JSONResponse(body, status_code=status_code)
 
 
 @router.get(

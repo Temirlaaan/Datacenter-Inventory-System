@@ -38,6 +38,12 @@ from app.services.shift_session import (
 )
 from tests.unit.api.v1.conftest import make_user
 
+
+def _noop_sessionmaker() -> object:
+    """Sentinel sessionmaker for direct-await tests where ``idempotency_key=None``
+    short-circuits the idempotency layer — the sessionmaker is never called."""
+    raise AssertionError("sessionmaker should not be touched when idempotency_key is None")
+
 pytestmark = pytest.mark.integration
 
 _USER_A = UUID("11111111-1111-1111-1111-111111111111")
@@ -149,13 +155,18 @@ async def test_start_session_handler_returns_session_on_happy_path(
         request=SessionStartRequest(tablet_id="tablet-42"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
-    assert isinstance(result, SessionResponse)
-    assert result.session is not None
-    assert result.session.id == started.id
-    assert result.session.tablet_id == "tablet-42"
-    assert result.session.shift_end_at is None
+    # Sprint 9 Task 0: handler now always returns JSONResponse (for idempotency
+    # cacheability), even on the happy path.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["session"]["id"] == str(started.id)
+    assert body["session"]["tablet_id"] == "tablet-42"
+    assert "shift_end_at" not in body["session"]
     # Service receives the user's identity + tablet.
     assert stub.start_calls == [
         {
@@ -176,6 +187,8 @@ async def test_start_session_handler_returns_409_when_session_already_active(
         request=SessionStartRequest(tablet_id="tablet-01"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
     assert isinstance(result, JSONResponse)
@@ -196,13 +209,16 @@ async def test_end_session_handler_returns_session_on_happy_path_manual(
         request=SessionEndRequest(end_reason="manual"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
-    assert isinstance(result, SessionResponse)
-    assert result.session is not None
-    assert result.session.id == ended.id
-    assert result.session.end_reason is ShiftEndReason.MANUAL
-    assert result.session.shift_end_at == _LATER
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["session"]["id"] == str(ended.id)
+    assert body["session"]["end_reason"] == "manual"
+    assert body["session"]["shift_end_at"] == _LATER.isoformat()
     assert stub.end_calls == [{"user_keycloak_id": _USER_A, "reason": ShiftEndReason.MANUAL}]
 
 
@@ -216,11 +232,14 @@ async def test_end_session_handler_returns_session_on_happy_path_auto_timeout(
         request=SessionEndRequest(end_reason="auto_timeout"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
-    assert isinstance(result, SessionResponse)
-    assert result.session is not None
-    assert result.session.end_reason is ShiftEndReason.AUTO_TIMEOUT
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["session"]["end_reason"] == "auto_timeout"
     assert stub.end_calls == [{"user_keycloak_id": _USER_A, "reason": ShiftEndReason.AUTO_TIMEOUT}]
 
 
@@ -233,6 +252,8 @@ async def test_end_session_handler_returns_409_when_no_active_shift(
         request=SessionEndRequest(end_reason="manual"),
         user=make_user("dcinv-mobile-user"),
         service=cast(ShiftSessionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
     assert isinstance(result, JSONResponse)
