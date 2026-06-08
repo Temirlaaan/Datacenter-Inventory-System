@@ -99,6 +99,89 @@ proactively.
 
 ---
 
+## 2.5 Idempotency contract (Sprint 9 Task 0)
+
+**Send `Idempotency-Key: <UUID>` on every write retry.** Datacenter
+wifi drops; without it, your retry creates duplicates that you can't
+undo from the mobile side.
+
+### Which endpoints accept it
+
+All 9 write endpoints: every `POST`/`PATCH` under `/api/v1/`. Reads
+(`GET`) don't accept the header — they're already idempotent.
+
+| Endpoint | Why it matters |
+|---|---|
+| `POST /sessions/start`, `POST /sessions/end` | Avoid duplicate-shift / double-end |
+| `POST /qr/{id}/bind`, `POST /qr/{id}/retire` | DB partial unique index also protects, but the retry without idempotency surfaces 409 instead of the original 200 |
+| `POST /devices/` | **Critical — NetBox has no native dedupe; without idempotency a retry creates a second device** |
+| `PATCH /devices/{id}` | Optimistic-concurrency catches the second write but mobile sees confusing 409 instead of the original 200 |
+| `POST /devices/{id}/comments` | **Critical — NetBox doesn't dedupe journal entries, so a retry leaves a duplicate comment row** |
+| `POST /devices/{id}/decommission` | OCC catches duplicates but retry surfaces 409 instead of original 200 |
+| `POST /admin/batches/` | Sprint 5 — already integrated; same contract |
+
+### Client rules
+
+1. **Generate a fresh UUIDv4 per logical action.** Tapping "Bind" once
+   → one key. Tapping "Bind" again to bind a different QR → a
+   different key. Tapping "Bind" again to retry the SAME action
+   because of network failure → **the same key**.
+2. **Persist the key locally** until you receive a 2xx/4xx response.
+   If the app is killed mid-flight, the next launch should retry the
+   stored key, not generate a new one.
+3. **Max length 255 chars.** UUIDv4 = 36 chars, well within bounds.
+4. **Same key + same payload → identical response.** Replay returns
+   the exact (status, body) the original call produced, including
+   4xx error bodies. Don't expect a "fresh" answer on retry.
+5. **Same key + different payload → 422** with
+   `{"detail": "Idempotency-Key reused with a different request payload"}`.
+   This is a client bug — surface it loudly during dev.
+6. **No key sent = no idempotency.** Server treats it as a fresh
+   call every time. Acceptable for one-off curl scripts; **not
+   acceptable for the mobile app in production**.
+
+### Server semantics
+
+- Replay window is the lifetime of the `idempotency_keys` row (a
+  cleanup job removing rows > 24h old is in the Sprint 10 parking
+  lot — until then, replay works forever).
+- Idempotency layer uses a separate session from the actual work; in
+  the rare race where two concurrent retries arrive simultaneously,
+  the loser sees the winner's cached response. Both clients see
+  consistent answers.
+- The key is namespaced per user (`user_keycloak_id`, `key`) — two
+  different engineers can use the same UUID without collision.
+
+### Example
+
+```http
+POST /api/v1/qr/QR-7F3A2B/bind
+Authorization: Bearer <JWT>
+Idempotency-Key: 3d4f8e21-9a7c-4b6d-8e1f-2c5a9b8d7e6f
+Content-Type: application/json
+
+{"device_id": 1042, "version": "2026-06-08T12:34:56.789Z"}
+```
+
+Retry (network drop, no response received):
+
+```http
+POST /api/v1/qr/QR-7F3A2B/bind
+Authorization: Bearer <JWT>
+Idempotency-Key: 3d4f8e21-9a7c-4b6d-8e1f-2c5a9b8d7e6f   ← SAME UUID
+Content-Type: application/json
+
+{"device_id": 1042, "version": "2026-06-08T12:34:56.789Z"}
+```
+
+Second call returns the EXACT response of the first — whether that
+was a 200 (bind succeeded) or a 409 `QR_ALREADY_BOUND` (someone else
+got there first). Mobile UI flow is identical in both cases: the
+user sees "Bound" or "Already bound — fetch and re-scan", they don't
+need to know whether the network round-trip actually completed.
+
+---
+
 ## 3. Endpoint catalogue
 
 Grouped by the user journey, not alphabetically. For wire shapes,

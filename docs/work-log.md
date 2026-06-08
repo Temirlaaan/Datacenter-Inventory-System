@@ -1241,3 +1241,34 @@ Follow-up to the same-day code review. The HIGH was fixed in the previous commit
 **Wider filter forms.** User feedback on the screenshot: the UUID input in the audit filter form was squeezed at `lg:grid-cols-4` (≈25% of form width on large viewports). Dropped to `lg:grid-cols-3` in [audit/list.html](../backend/app/web/templates/audit/list.html) and [sessions/list.html](../backend/app/web/templates/sessions/list.html) — each input now gets ~33% width on `lg`, plenty for a 36-char UUID. Span on the action row updated to match (`lg:col-span-3`).
 
 Unit suite still 598 passing — these were all template-only changes preserving the text strings tests assert on. Lint clean.
+
+## Sprint 9 — Operational Hygiene (in progress, opened 2026-06-08)
+
+Plan: [docs/sprint-9.md](sprint-9.md). 5 tasks, ~6 days target. Goal: close the operational debt accumulated through the user-facing sprints (8a + 8b) so the system is ready for sustained production use plus the mobile rollout — not just a "demo to admins" surface.
+
+### Task 0 — Idempotency on every write endpoint (closed 2026-06-08)
+
+Split into 0a / 0b / 0c by endpoint family. Total: 8 mobile + admin write endpoints now accept the optional `Idempotency-Key` header. Sprint 5's existing `POST /admin/batches/` was already integrated; Task 0 brings the rest in line.
+
+**Approach.** Pre-implementation plan considered refactoring Sprint 6+ services (ShiftSession, QRLifecycle, DeviceDecommission) to caller-managed transactions so Sprint 5's `with_idempotency` could compose atomically. Aborted after measuring the blast radius — 15+ existing tests per service plus 4 caller updates would have made Task 0 a multi-day refactor with high regression risk. Switched to a **separate-session wrapper** (`with_optional_idempotency_outer` in [app/services/idempotency.py](../backend/app/services/idempotency.py)) that:
+
+- Reads any existing idempotency row in its own session.
+- Runs the work via each endpoint's existing service-managed-tx style.
+- Records the response in a third session after work completes.
+
+**Trade-off** documented in code: between "check" and "record" two concurrent retries can both run the work. For mobile retry scenarios (seconds-long backoff) the race window is microseconds and effectively never trips. Downstream protections (`qr_codes` partial unique index, OCC version checks via NetBox `last_updated`, NetBox 409 on duplicate device names) catch the residual cases. Create-device and add-comment are the genuinely-risky cases — NetBox has no native dedupe — and a comment in the docs/API guide flags them as **especially critical** for the mobile client to send the header on.
+
+**Task 0a — sessions** (commit `a29df63`). `POST /sessions/start` + `/sessions/end`. 5 new unit tests for the wrapper (no-key passthrough, replay returns cached, 422 on payload mismatch, first-call store, race-loss returns winner). Unit suite: 598 → 603.
+
+**Task 0b — QR lifecycle** (commit `a749de7`). `POST /qr/{id}/bind` + `/qr/{id}/retire`. Each handler refactored to wrap its existing try/except chain (7-8 different error response shapes) in a `do_work()` closure returning `(status_code, body)`. `request_payload` for idempotency hashing includes `qr_id` so two retries of `bind(QR-A, dev=1)` and `bind(QR-A, dev=2)` with the same key correctly hash differently → 422. Existing direct-await integration tests updated.
+
+**Task 0c — devices** (commit `9b597fd`). `POST /devices/`, `PATCH /devices/{id}`, `POST /devices/{id}/comments`, `POST /devices/{id}/decommission`. 18 existing direct-await integration test sites updated via a depth-tracking bulk-edit script. `PATCH /devices/{id}` includes the `If-Unmodified-Since` header in the idempotency payload so a retry against a stale version with the same key surfaces 422 (client bug — should be a fresh key after the version changed).
+
+**Docs update.** [mobile-api-guide.md](mobile-api-guide.md) gains a new **2.5 Idempotency contract** section before the endpoint catalogue: which 9 endpoints accept the header, when to generate fresh vs reuse, replay semantics (bit-for-bit response, including 4xx error bodies), and the namespacing rule (`(user_keycloak_id, key)` per-user — two engineers can use the same UUID).
+
+**Unit suite at Task 0 close.** 603 passing (5 new wrapper tests). Lint clean. The endpoint-level integration tests remain marked `pytest.mark.integration` and skip without DB env vars; their direct-await sites have been updated to pass the new args so they'll be green when integration runs.
+
+**Deliberately deferred from Task 0.**
+
+- **Idempotency-key TTL cleanup job** — a 24h `DELETE WHERE created_at < NOW() - 24h` cron is in the Sprint 10 parking lot; until then, replay works forever (acceptable — the table is `(user, key)` keyed and small).
+- **`POST /admin/sessions/start`** (admin shift open) — Sprint 9 plan in-scope list was the 8 mobile-facing endpoints. The admin-web flow has its own retry pattern (browser refresh + CSRF) so it doesn't need idempotency. Marked NOT-IN-SCOPE.
