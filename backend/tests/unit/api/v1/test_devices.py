@@ -89,6 +89,11 @@ class _StubDeviceService:
 # ---------- handler logic (direct await) ----------
 
 
+def _noop_sessionmaker() -> object:
+    """Sentinel for direct-await tests where idempotency_key=None
+    short-circuits the wrapper before sessionmaker is ever called."""
+    raise AssertionError("sessionmaker should not be called when idempotency_key is None")
+
 async def test_read_device_handler_returns_device() -> None:
     stub = _StubDeviceService(response=_device_response())
     result = await read_device(
@@ -265,11 +270,16 @@ async def test_update_device_handler_returns_updated_device() -> None:
         if_unmodified_since=_VERSION,
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
-    assert isinstance(result, DeviceResponse)
-    assert result.version == _NEW_VERSION
-    assert result.data.name == "sw-01-new"
+    # Sprint 9 Task 0: handler always returns JSONResponse now.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["version"] == _NEW_VERSION
+    assert body["data"]["name"] == "sw-01-new"
 
 
 async def test_update_device_handler_returns_409_on_write_conflict() -> None:
@@ -284,6 +294,8 @@ async def test_update_device_handler_returns_409_on_write_conflict() -> None:
         if_unmodified_since=_VERSION,
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -306,6 +318,8 @@ async def test_update_device_handler_translates_netbox_validation_error_to_422()
         if_unmodified_since=_VERSION,
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -464,11 +478,16 @@ async def test_create_device_handler_returns_device_response_on_success() -> Non
         request=DeviceCreateRequest(**_create_body()),
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
-    assert isinstance(result, DeviceResponse)
-    assert result.data.id == 99
-    assert result.data.name == "sw-99"
-    assert result.version == _NEW_VERSION
+    # Sprint 9 Task 0: handler always returns JSONResponse now.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 201
+    body = json.loads(bytes(result.body))
+    assert body["data"]["id"] == 99
+    assert body["data"]["name"] == "sw-99"
+    assert body["version"] == _NEW_VERSION
 
 
 async def test_create_device_handler_passes_payload_through_post_with_attribution() -> None:
@@ -477,6 +496,8 @@ async def test_create_device_handler_passes_payload_through_post_with_attributio
         request=DeviceCreateRequest(**_create_body(), serial="ABC", asset_tag="A-9"),
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
     assert stub.last_post_kwargs is not None
     kwargs = stub.last_post_kwargs
@@ -506,6 +527,8 @@ async def test_create_device_handler_returns_422_on_netbox_validation_error() ->
         request=DeviceCreateRequest(**_create_body()),
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
 
     assert isinstance(result, JSONResponse)
@@ -526,6 +549,8 @@ async def test_create_device_handler_422_message_uses_str_detail_when_text_body(
         request=DeviceCreateRequest(**_create_body()),
         user=_user("dcinv-mobile-user"),
         write_service=cast(NetBoxWriteService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
     )
     body = json.loads(bytes(cast(JSONResponse, result).body))
     assert body["error"]["message"] == "Forbidden"

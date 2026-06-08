@@ -12,6 +12,7 @@ but reuses ``conftest.py`` so it picks up the standard skip-gate and the
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -108,6 +109,11 @@ def _decommissioned_device_response() -> DeviceResponse:
 # ---------- handler logic (direct await) ----------
 
 
+def _noop_sessionmaker() -> object:
+    """Sentinel for direct-await tests where idempotency_key=None
+    short-circuits the wrapper before sessionmaker is ever called."""
+    raise AssertionError("sessionmaker should not be called when idempotency_key is None")
+
 async def test_decommission_handler_returns_device_response_on_happy_path() -> None:
     stub = _StubDecommissionService(result=_decommissioned_device_response())
     result = await decommission_device(
@@ -115,9 +121,14 @@ async def test_decommission_handler_returns_device_response_on_happy_path() -> N
         request=DeviceDecommissionRequest(version=_VERSION, reason="EOL"),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
-    assert isinstance(result, DeviceResponse)
-    assert result.data.status.value == "decommissioning"
+    # Sprint 9 Task 0: handler always returns JSONResponse now.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["data"]["status"]["value"] == "decommissioning"
     # Service received the unpacked request fields.
     assert stub.last_kwargs is not None
     assert stub.last_kwargs["device_id"] == _DEVICE_ID
@@ -135,6 +146,8 @@ async def test_decommission_handler_returns_409_on_write_conflict() -> None:
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 409
@@ -154,6 +167,8 @@ async def test_decommission_handler_returns_409_on_qr_state_conflict() -> None:
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 409
@@ -171,6 +186,8 @@ async def test_decommission_handler_returns_500_on_qr_retire_rolled_back() -> No
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 500
@@ -194,6 +211,8 @@ async def test_decommission_handler_translates_netbox_validation_error_to_422() 
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 422
@@ -214,6 +233,8 @@ async def test_decommission_endpoint_returns_decommission_rolled_back_on_branch_
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 500
@@ -233,6 +254,8 @@ async def test_decommission_endpoint_returns_decommission_inconsistency_on_branc
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 500
@@ -254,6 +277,8 @@ async def test_decommission_endpoint_returns_qr_inconsistent_error_on_inconsiste
         request=DeviceDecommissionRequest(version=_VERSION),
         user=make_user("dcinv-admin"),
         service=cast(DeviceDecommissionService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert isinstance(result, JSONResponse)
     assert result.status_code == 500

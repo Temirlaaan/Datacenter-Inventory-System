@@ -7,14 +7,15 @@ touches no database — ``CommentService`` is stubbed.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, cast
 
 import httpx
+from fastapi.responses import JSONResponse
 
 from app.api.v1.devices import (
     AddCommentRequest,
-    AddCommentResponse,
     add_comment,
     get_comment_service,
 )
@@ -56,6 +57,11 @@ class _StubCommentService:
 # ---------- handler logic (direct await) ----------
 
 
+def _noop_sessionmaker() -> object:
+    """Sentinel for direct-await tests where idempotency_key=None
+    short-circuits the wrapper before sessionmaker is ever called."""
+    raise AssertionError("sessionmaker should not be called when idempotency_key is None")
+
 async def test_add_comment_handler_returns_201_with_journal_id() -> None:
     stub = _StubCommentService(created={"id": 42, "comments": "test"})
     result = await add_comment(
@@ -63,9 +69,14 @@ async def test_add_comment_handler_returns_201_with_journal_id() -> None:
         request=AddCommentRequest(comment="Replaced PSU 1"),
         user=_user("dcinv-mobile-user"),
         comment_service=cast(CommentService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
-    assert isinstance(result, AddCommentResponse)
-    assert result.id == 42
+    # Sprint 9 Task 0: handler always returns JSONResponse now.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 201
+    body = json.loads(bytes(result.body))
+    assert body["id"] == 42
 
 
 async def test_add_comment_handler_passes_device_id_comment_user_through() -> None:
@@ -75,6 +86,8 @@ async def test_add_comment_handler_passes_device_id_comment_user_through() -> No
         request=AddCommentRequest(comment="Replaced PSU 1"),
         user=_user("dcinv-mobile-user"),
         comment_service=cast(CommentService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
     assert stub.last_kwargs is not None
     assert stub.last_kwargs["device_id"] == 5
@@ -96,6 +109,8 @@ async def test_add_comment_handler_translates_netbox_validation_error_to_422() -
         request=AddCommentRequest(comment="x"),
         user=_user("dcinv-mobile-user"),
         comment_service=cast(CommentService, stub),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
