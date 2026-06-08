@@ -320,3 +320,61 @@ strips cookies), a per-session CSRF token becomes load-bearing.
 
 **Owner:** Sprint 9+ (pending security review).
 **Not a blocker for:** Sprint 8b's force-close UX shipping.
+
+
+---
+
+## Sprint 9 close-out (2026-06-08) — items still open after Sprint 9
+
+Sprint 9 closed with the following items remaining in the parking lot. None are
+blockers for production use; they're scheduled for Sprint 10+.
+
+### Idempotency-key TTL cleanup job (carried from Sprints 2-7, NOT closed by Sprint 9)
+
+Sprint 9 Task 0 added the optional `Idempotency-Key` header to 8 more
+write endpoints (now 9 total counting Sprint 5's batch creation). Each
+successful call writes a row to `idempotency_keys`. Without a TTL
+cleanup, the table grows unbounded. Acceptable short-term (rows are
+small, the unique constraint is `(user_keycloak_id, key)`) but a
+daily cron should land in Sprint 10 alongside the backup cron operational
+work:
+
+```sql
+DELETE FROM idempotency_keys WHERE created_at < NOW() - INTERVAL '24 hours';
+```
+
+Should run as a SQL-driven job at 03:30 UTC (after backup.sh at 03:00 has
+captured the rows). Sprint 10.
+
+### `/web/devices/{id}` write path
+
+Sprint 9 Task 2 shipped read-only device detail + comments. Field edits
+(name, status, asset_tag) and decommissioning stay mobile-only or have
+their own dedicated forms. If ToR feedback says admins actually need
+field edits from the web, this becomes its own form with CSRF + OCC
+version handling. Not in current scope.
+
+### WAL archiving / point-in-time recovery
+
+`scripts/backup.sh` + daily cron gives 24h RPO. For sub-second RPO,
+either WAL-G or pgbackrest with continuous WAL archiving to S3. Needs
+a different operational story (separate cron, restore-validation flow,
+extra storage cost). Sprint 11+ unless an incident forces it sooner.
+
+### Automated restore-validation cron
+
+Re-pulling the last dump weekly into a scratch postgres and running
+`pg_restore --schema-only` would catch silent corruption (bit rot,
+S3 truncation, etc.). Sprint 10+ ops polish.
+
+### Mobile offline-queue implementation
+
+Sprint 9 Task 0 laid the idempotency foundation. The mobile client now
+has a clear contract for retrying writes after network drops. Actually
+building the on-device queue (persistent storage, retry-with-backoff,
+conflict UX) is Sprint 11.
+
+### Dashboard activity feed, date-preset chips, bulk operations
+
+UX nice-to-haves from the late-Sprint-8b user feedback session. Not
+blocking, scheduled for Sprint 10.

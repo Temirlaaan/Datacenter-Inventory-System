@@ -1272,3 +1272,60 @@ Split into 0a / 0b / 0c by endpoint family. Total: 8 mobile + admin write endpoi
 
 - **Idempotency-key TTL cleanup job** — a 24h `DELETE WHERE created_at < NOW() - 24h` cron is in the Sprint 10 parking lot; until then, replay works forever (acceptable — the table is `(user, key)` keyed and small).
 - **`POST /admin/sessions/start`** (admin shift open) — Sprint 9 plan in-scope list was the 8 mobile-facing endpoints. The admin-web flow has its own retry pattern (browser refresh + CSRF) so it doesn't need idempotency. Marked NOT-IN-SCOPE.
+
+### Task 1 — Device search API (closed 2026-06-08, commit `e4af90e`)
+
+New `GET /api/v1/devices/search` with five filters (`name` → `?name__ic=`, `asset_tag` / `serial` exact, `site` / `rack` as NetBox ids). Pagination via `?page=` + `?page_size=` (default 20, cap 100); service requests `page_size + 1` from NetBox and trims to detect `has_more` without a separate COUNT call. 30-second TTL cache keyed on the full query string — stricter than the 60s device-data cap because search semantics shift faster than per-device state.
+
+Route registered BEFORE `/{device_id}` (regression test pins the order — same lesson as `/batches/new`). New `DeviceService.search()` + `DeviceSearchResponse` envelope shape `{results, page, page_size, has_more}` where each entry is the same `DeviceResponse` shape mobile already consumes from `GET /devices/{id}` — no schema gymnastics on the client.
+
+8 new service tests (happy + parametrized over the 4 non-name filters + multi-filter combo + empty + has_more trimming). 4 new endpoint tests (param pass-through, cache hit, distinct queries miss separately, route-order regression). [mobile-api-guide.md](mobile-api-guide.md) gains section 3.5b. Unit suite: 603 → 611.
+
+### Task 2 — `/web/devices/search` + `/web/devices/{id}` detail (closed 2026-06-08, commit `daf3dfd`)
+
+Three new web handlers + 2 new templates. `GET /web/devices/search` is a Tailwind-style filter form over Task 1's search API. `GET /web/devices/{device_id}` is a read-only detail page — kv block of identity + location fields, the 20 most recent audit rows for `entity_type=device` (via `AuditLogRepository.query` direct call, decision I), plus a CSRF-protected `<textarea>` comments form. `POST /web/devices/{device_id}/comments` delegates to the JSON `add_comment` handler via direct Python call (same delegation pattern as `web_force_close_session`). Web admin's `dcinv-admin` role bypasses the JSON handler's `dcinv-mobile-user` dep gate via direct delegation — they're authorised via their own auth path (`require_web_admin`).
+
+Top nav gains a "Devices" link between "QR search" and "Audit". `/devices/search` MUST register BEFORE `/devices/{device_id}` (regression test pins it).
+
+6 new direct-await tests: detail happy + 404, comments happy → 303 + flash, comments CSRF mismatch → 403, search empty form (asserts NetBox isn't touched), route-ordering regression. Unit suite: 611 → 617.
+
+**Deliberately out of scope.** Device EDIT path on the web (status change, field updates). Edits stay mobile-only per ToR — admin doesn't edit through web. If Sprint 10+ feedback says admins actually need this, it gets its own form + CSRF + OCC.
+
+### Task 3 — Backup strategy (closed 2026-06-08, commit `4036662`)
+
+PostgreSQL data lives in a docker volume; without this, disk failure = total loss of `qr_codes`, `qr_batches`, `audit_log`, `shift_sessions`, `idempotency_keys` (NetBox is **not** a backup for these — they hold history NetBox doesn't).
+
+[backend/scripts/backup.sh](../backend/scripts/backup.sh) runs `pg_dump --format=custom` inside the `dcinv-db` container, writes to local staging, uploads to S3 via `aws s3 cp`, touches a marker file on success. Keeps the last 3 dumps locally; older dumps live in S3 only. Runs on the HOST via cron (decision H — backups must survive an app crash). [backend/scripts/restore.sh](../backend/scripts/restore.sh) is the inverse with a "type 'restore' to proceed" confirmation gate. [docs/backup.md](backup.md) is the full operator guide (env vars, cron entry, restore walkthrough, suggested S3 bucket lifecycle, alert thresholds).
+
+`/health` gets a new informational `backups` sub-object reading the marker file's mtime. Returns one of three shapes: `{configured: false}`, `{configured: true, last_completed_at: null, age_seconds: null}` (set up but never ran), or `{configured: true, last_completed_at: <iso>, age_seconds: <int>}`. INFORMATIONAL ONLY (decision J): stale backups do NOT flip overall `/health` to degraded — mirrors NetBox circuit + auto-end-job patterns. External monitors alert on `age_seconds > <RPO threshold>`.
+
+3 pure-unit tests for `_backups_sub_object` (configured-false, marker-missing, mtime-driven) placed in [tests/unit/services/test_health_backups.py](../backend/tests/unit/services/test_health_backups.py) to dodge the api/v1 conftest's autouse alembic fixture. 1 integration-marked TestClient test in [tests/unit/api/v1/test_health.py](../backend/tests/unit/api/v1/test_health.py) confirms the sub-object doesn't flip overall status to degraded. Scripts validated by inspection + manual smoke test at deploy time (no shellcheck in CI yet). Unit suite: 617 → 620.
+
+**Deliberately out of scope.** Point-in-time recovery (WAL archiving), automated restore-validation cron, automated S3 lifecycle management — all noted in `docs/backup.md` "What's NOT in scope" + parked for Sprint 10+.
+
+### Sprint 9 close-out (2026-06-08)
+
+**Quality bar at close.**
+- 620 unit tests passing (598 → 620, +22 across the 4 tasks)
+- Lint clean (`ruff check`)
+- Integration tests still skip without DB env vars; their direct-await sites updated for Sprint 9 signatures so they'll be green when integration runs
+- No new Python dependencies (decision K from sprint plan)
+
+**Mobile workstream prerequisites complete.**
+- Idempotency contract is documented and live on 9 endpoints (Task 0)
+- Device search lets engineers find devices without a working QR sticker (Task 1)
+- Comments UI lets admins record observations from the web (Task 2)
+- Backup cron means a disk failure no longer = total loss (Task 3)
+
+**Deliberately deferred to Sprint 10+** (revised Sprint 10 scope, will land in its own plan):
+- **Dashboard activity feed** — last N audit rows as a live stream on `/web/`. UX nice-to-have, not blocking.
+- **Date-preset chips** ("Last 24h", "Today", "Last 7 days") on audit + sessions filter forms.
+- **Bulk operations** on `/web/batches/{id}` (multi-select FREE codes + retire all) and a future `/web/devices/` bulk-decommission.
+- **Real-time SSE/WebSocket dashboard updates** — Sprint 12+ (premature without observed cause).
+- **Mobile offline-queue implementation** — Sprint 11 (this sprint laid the idempotency foundation it needs).
+- **Cluster-wide rate-limit state** — carried since Sprint 8a; needs Redis.
+- **Phase 2 partial-failure alerting** — carried since Sprint 3.
+- **Idempotency-key TTL cleanup job** — 24h cron, will land alongside backup cron operationalisation in Sprint 10.
+- **`/web/devices/{id}` write path** (edit fields, change status) — admin web stays read-only until ToR feedback says otherwise.
+- **WAL archiving / point-in-time recovery** — backup.md Task 3 noted this; needs WAL-G or pgbackrest, separate operational story.
+- **Automated restore-validation cron** — Sprint 10+ ops polish.
