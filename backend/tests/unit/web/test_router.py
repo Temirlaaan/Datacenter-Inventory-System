@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import UUID
 
@@ -50,7 +50,10 @@ from app.web.router import (
     web_audit_csv,
     web_batches_create,
     web_batches_labels_pdf,
+    web_devices_add_comment,
     web_devices_decommission,
+    web_devices_detail,
+    web_devices_search,
     web_force_close_session,
     web_qr_retire,
     web_qr_search,
@@ -2361,6 +2364,276 @@ def test_batches_new_route_declared_before_batches_detail() -> None:
         f"/batches/new must be registered before /batches/{{batch_id}}; "
         f"got new at {new_idx}, detail at {detail_idx}"
     )
+
+# ---------- /web/devices/{id} detail + comments (Sprint 9 Task 2) -----------
+
+
+async def test_web_devices_detail_renders_device_with_audit_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: device fetch + audit query both succeed → page renders."""
+    _set_env(monkeypatch)
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+    from app.services.device import DeviceData, DeviceResponse, ObjectRef, StatusRef
+
+    device = DeviceResponse(
+        data=DeviceData(
+            id=42,
+            name="core-sw-01",
+            status=StatusRef(value="active", label="Active"),
+            site=ObjectRef(id=1, name="DC-1"),
+            rack=ObjectRef(id=7, name="R-14"),
+            position=10,
+            serial="ABC123",
+            asset_tag="A-9",
+            comments="",
+            custom_fields={},
+        ),
+        version="2026-06-08T12:00:00Z",
+    )
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            assert device_id == 42
+            return device
+
+    audit_row = AuditLogEntry(
+        request_id=UUID("11111111-1111-1111-1111-111111111111"),
+        timestamp=datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC),
+        user_email="alice@example.com",
+        user_keycloak_id=_USER_SUB,
+        session_id=None,
+        operation="device.update",
+        entity_type="device",
+        entity_id="42",
+        before_json={},
+        after_json={},
+        result=AuditResult.SUCCESS,
+        id=99,
+    )
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
+            return [audit_row], False
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/devices/42",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_devices_detail(
+        request=Request(scope),
+        device_id=42,
+        flash=None,
+        flash_kind=None,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"core-sw-01" in body
+    assert b"device.update" in body
+    assert b"Add a comment" in body
+
+
+async def test_web_devices_detail_returns_404_for_unknown_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NetBoxNotFound → 404 HTML page (mirrors batches/detail unknown-id)."""
+    _set_env(monkeypatch)
+    from app.netbox.errors import NetBoxNotFound
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, _device_id: int) -> Any:
+            raise NetBoxNotFound("device 999")
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/devices/999",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_devices_detail(
+        request=Request(scope),
+        device_id=999,
+        flash=None,
+        flash_kind=None,
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 404
+    assert b"Not found" in response.body
+
+
+async def test_web_devices_add_comment_redirects_with_flash_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CSRF-protected form post → delegates to add_comment → 303 to detail
+    page with success flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from contextlib import asynccontextmanager
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_add_comment(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("app.web.router.add_comment", _fake_add_comment)
+    monkeypatch.setattr("app.web.router.NetBoxWriteService", lambda *a, **kw: object())
+    monkeypatch.setattr("app.web.router.AuditLogRepository", lambda _s: object())
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+    monkeypatch.setattr(
+        "app.web.router.get_comment_service", lambda **_kw: object()
+    )
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: _fake_cm)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/web/devices/42/comments",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_devices_add_comment(
+        request=Request(scope),
+        device_id=42,
+        comment="PSU1 amber LED",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+        sessionmaker=cast(object, _fake_cm),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/web/devices/42?")
+    assert "flash=Comment+added" in response.headers["location"]
+    assert captured["device_id"] == 42
+    assert captured["request"].comment == "PSU1 amber LED"
+
+
+async def test_web_devices_add_comment_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong csrf token → HTTPException(403) before any side effects."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield object()
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/web/devices/42/comments",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    with pytest.raises(HTTPException) as exc:
+        await web_devices_add_comment(
+            request=Request(scope),
+            device_id=42,
+            comment="anything",
+            csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+            sessionmaker=cast(object, _fake_cm),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_devices_search_renders_empty_form_when_no_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No filters submitted → form-only page, no NetBox call."""
+    _set_env(monkeypatch)
+
+    netbox_called = False
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def search(self, **_kwargs: object) -> Any:
+            nonlocal netbox_called
+            netbox_called = True
+            raise AssertionError("search must not be called when no filters are set")
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/devices/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_devices_search(
+        request=Request(scope),
+        name=None,
+        asset_tag=None,
+        serial=None,
+        site_id=None,
+        rack_id=None,
+        page=1,
+        user=_admin_user(),
+    )
+    assert response.status_code == 200
+    assert b"Device search" in response.body
+    assert not netbox_called
+
+
+def test_web_devices_search_route_declared_before_web_devices_detail() -> None:
+    """Regression guard: ``/web/devices/search`` must come before the
+    int-typed ``/web/devices/{device_id}``. Otherwise FastAPI tries to
+    parse ``"search"`` as ``int`` and 422s.
+    """
+    from app.web.router import router
+
+    paths = [getattr(r, "path", None) for r in router.routes if getattr(r, "path", None)]
+    search_idx = paths.index("/devices/search")
+    detail_idx = paths.index("/devices/{device_id}")
+    assert search_idx < detail_idx, (
+        f"/devices/search must register before /devices/{{device_id}}; "
+        f"got search={search_idx}, detail={detail_idx}"
+    )
+
 
 # Suppress unused-import warnings for symbols only referenced inside scopes.
 _ = (Fernet, AsyncIterator, jwt, SESSION_COOKIE_NAME, Any)

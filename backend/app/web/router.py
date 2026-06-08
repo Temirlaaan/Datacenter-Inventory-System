@@ -19,6 +19,7 @@ import asyncio
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -28,10 +29,11 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Res
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from jose import jwt
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.admin.audit import query_audit_log_csv
 from app.api.v1.admin.sessions import ForceCloseRequest, force_close_session
+from app.api.v1.devices import AddCommentRequest, add_comment, get_comment_service
 from app.auth.dependencies import AuthUser
 from app.auth.keycloak_admin import (
     KeycloakAdminError,
@@ -1168,6 +1170,175 @@ async def web_devices_decommission(
     return _decommission_redirect(
         flash=f"Device {device_id} decommissioned", flash_kind="info"
     )
+
+
+# ---------- /web/devices/search + /web/devices/{id} (Sprint 9 Task 2) -------
+#
+# IMPORTANT: declared BEFORE /devices/{device_id} so FastAPI's order-based
+# dispatch matches /web/devices/search to this handler (not to the int-typed
+# detail route). Same pattern as /web/batches/new before /web/batches/{id}.
+
+_WEB_DEVICE_AUDIT_PAGE_SIZE = 20
+
+
+@router.get("/devices/search", response_class=HTMLResponse)
+async def web_devices_search(
+    request: Request,
+    name: str | None = Query(default=None, max_length=255),
+    asset_tag: str | None = Query(default=None, max_length=255),
+    serial: str | None = Query(default=None, max_length=255),
+    site_id: int | None = Query(default=None, ge=1, alias="site"),
+    rack_id: int | None = Query(default=None, ge=1, alias="rack"),
+    page: int = Query(default=1, ge=1),
+    user: WebAdminUser = Depends(require_web_admin),
+) -> HTMLResponse:
+    """Search NetBox devices via the same API the mobile app uses (Sprint
+    9 Task 1). Filter form at the top; results table below when any
+    filter is set. Read-only; no audit row."""
+    service = DeviceService(get_netbox_client())
+    submitted = any(
+        v is not None and v != ""
+        for v in (name, asset_tag, serial, site_id, rack_id)
+    )
+    results: list[Any] = []
+    has_more = False
+    error: str | None = None
+    if submitted:
+        try:
+            envelope = await service.search(
+                name=name,
+                asset_tag=asset_tag,
+                serial=serial,
+                site_id=site_id,
+                rack_id=rack_id,
+                page=page,
+                page_size=20,
+            )
+            results = envelope.results
+            has_more = envelope.has_more
+        except Exception as exc:  # NetBox transport / circuit / etc.
+            error = f"Could not search devices: {type(exc).__name__}"
+    return templates.TemplateResponse(
+        request,
+        "devices/search.html",
+        {
+            "user_email": user.email,
+            "submitted": submitted,
+            "filters": {
+                "name": name or "",
+                "asset_tag": asset_tag or "",
+                "serial": serial or "",
+                "site_id": site_id if site_id is not None else "",
+                "rack_id": rack_id if rack_id is not None else "",
+            },
+            "results": results,
+            "has_more": has_more,
+            "has_prev": page > 1,
+            "page": page,
+            "error": error,
+            "csrf_token": user.csrf_token,
+        },
+    )
+
+
+@router.get("/devices/{device_id}", response_class=HTMLResponse)
+async def web_devices_detail(
+    request: Request,
+    device_id: int,
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Read-only device detail page. Sprint 9 Task 2.
+
+    Shows device fields + a comments-add form (CSRF-protected) + the 20
+    most recent audit rows for ``entity_type=device, entity_id={id}``.
+    Does NOT expose edit / decommission controls — those are mobile-only
+    or have their own dedicated forms.
+    """
+    service = DeviceService(get_netbox_client())
+    try:
+        device = await service.get_device(device_id)
+    except NetBoxNotFound:
+        return templates.TemplateResponse(
+            request,
+            "_not_found.html",
+            {"user_email": user.email, "resource": f"device {device_id}"},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    audit_rows, audit_has_more = await AuditLogRepository(session).query(
+        filters=AuditLogQueryFilters(
+            entity_type="device", entity_id=str(device_id)
+        ),
+        page=1,
+        page_size=_WEB_DEVICE_AUDIT_PAGE_SIZE,
+    )
+    return templates.TemplateResponse(
+        request,
+        "devices/detail.html",
+        {
+            "user_email": user.email,
+            "device": device,
+            "audit_rows": audit_rows,
+            "audit_has_more": audit_has_more,
+            "csrf_token": user.csrf_token,
+            "flash": flash,
+            "flash_kind": flash_kind,
+        },
+    )
+
+
+@router.post("/devices/{device_id}/comments")
+async def web_devices_add_comment(
+    request: Request,
+    device_id: int,
+    comment: str = Form(min_length=1, max_length=2000),
+    csrf: str = Form(alias="_csrf"),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> RedirectResponse:
+    """CSRF-protected comments form post. Delegates to ``add_comment`` JSON
+    handler via direct Python call so the three-record-write apparatus
+    (NetBox journal + audit row) stays in one place — same decision-I
+    pattern as ``web_force_close_session``.
+
+    Web admin's ``dcinv-admin`` role bypasses the JSON handler's
+    ``dcinv-mobile-user`` dep gate because direct delegation skips dep
+    resolution; the admin is authorised via their own auth path
+    (``require_web_admin``).
+    """
+    _ = request  # FastAPI binds; unused
+    verify_csrf_token(csrf, user.csrf_token)
+    auth_user = await _build_auth_user_for_admin_action(user)
+    flash_target = (
+        f"/web/devices/{device_id}?{urlencode({'flash': 'Comment added', 'flash_kind': 'info'})}"
+    )
+    try:
+        await add_comment(
+            device_id=device_id,
+            request=AddCommentRequest(comment=comment),
+            user=auth_user,
+            comment_service=get_comment_service(
+                write_service=NetBoxWriteService(
+                    get_netbox_client(), session, AuditLogRepository(session)
+                )
+            ),
+            sessionmaker=sessionmaker,
+            idempotency_key=None,
+        )
+    except Exception as exc:  # NetBoxNotFound, NetBoxValidationError, transport
+        flash_target = (
+            f"/web/devices/{device_id}?"
+            + urlencode(
+                {
+                    "flash": f"Could not add comment: {type(exc).__name__}",
+                    "flash_kind": "error",
+                }
+            )
+        )
+    return RedirectResponse(url=flash_target, status_code=status.HTTP_303_SEE_OTHER)
 
 
 # ---------- /web/qr/search — QR lookup by id --------------------------------

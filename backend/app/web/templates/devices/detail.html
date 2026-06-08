@@ -1,0 +1,81 @@
+{% extends "_base.html" %}
+{% block title %}Device {{ device.data.id }} &middot; DC Inventory admin{% endblock %}
+
+{% macro result_badge(result) -%}
+{% if result == "success" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">success</span>
+{% elif result == "failure" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800">failure</span>
+{% elif result == "conflict" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">conflict</span>
+{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
+    <a class="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4" href="/web/devices/search">&laquo; Back to device search</a>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-6">Device <code class="font-mono text-xl text-gray-600">{{ device.data.id }}</code></h1>
+
+    {% if flash %}
+    {% if flash_kind == "error" %}
+    <div class="mb-6 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ flash }}</div>
+    {% else %}
+    <div class="mb-6 rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">{{ flash }}</div>
+    {% endif %}
+    {% endif %}
+
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6 mb-8">
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Name</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.name or "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Status</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.status.label if device.data.status else "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Site</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.site.name if device.data.site else "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Rack</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.rack.name if device.data.rack else "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Position</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.position if device.data.position is not none else "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Asset tag</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.asset_tag or "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Serial</dt><dd class="text-sm text-gray-900 mt-1">{{ device.data.serial or "—" }}</dd></div>
+        <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Version</dt><dd class="text-sm mt-1"><code class="font-mono text-gray-900">{{ device.version }}</code></dd></div>
+    </dl>
+
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Add a comment</h2>
+    <form method="post" action="/web/devices/{{ device.data.id }}/comments" class="space-y-3 max-w-2xl mb-8">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div>
+            <label for="comment" class="block text-sm font-medium text-gray-700 mb-1">Comment</label>
+            <textarea id="comment" name="comment" rows="3" minlength="1" maxlength="2000" required placeholder="Visible in NetBox journal + audit log" class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500"></textarea>
+        </div>
+        <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Add comment</button>
+    </form>
+
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Audit history</h2>
+    {% if audit_rows %}
+    <div class="overflow-x-auto -mx-6 sm:mx-0">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">When</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">User</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Operation</th>
+                    <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Result</th>
+                    <th class="px-3 py-2"></th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+                {% for r in audit_rows %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-3 py-3 text-sm text-gray-900">{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                    <td class="px-3 py-3 text-sm text-gray-900">{{ r.user_email }}</td>
+                    <td class="px-3 py-3 text-sm"><code class="font-mono text-gray-900">{{ r.operation }}</code></td>
+                    <td class="px-3 py-3 text-sm">{{ result_badge(r.result.value) }}</td>
+                    <td class="px-3 py-3 text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/audit/{{ r.id }}">Details</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if audit_has_more %}
+    <p class="mt-3 text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/audit/?entity_type=device&entity_id={{ device.data.id }}">See all audit rows for this device &raquo;</a></p>
+    {% endif %}
+    {% else %}
+    <p class="text-sm italic text-gray-500 py-6 text-center">No audit entries for this device yet.</p>
+    {% endif %}
+</section>
+{% endblock %}
