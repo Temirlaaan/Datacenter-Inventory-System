@@ -12,6 +12,7 @@ k8s) probe it without credentials.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -24,6 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.session import get_sessionmaker
 from app.netbox.client import get_netbox_circuit_state
+
+_BACKUP_MARKER_DEFAULT = "/var/lib/dcinv-backups/last-success-marker"
 
 _PER_CHECK_TIMEOUT_SECONDS = 2.0
 
@@ -95,6 +98,44 @@ async def _run_with_timeout(check: Callable[[], Awaitable[dict[str, str]]]) -> d
         return {"status": "timeout", "detail": "budget_exceeded"}
 
 
+def _backups_sub_object() -> dict[str, object]:
+    """Build the ``backups`` /health sub-object (Sprint 9 Task 3 decision J).
+
+    Reads the mtime of a marker file that ``scripts/backup.sh`` touches on
+    successful pg_dump + S3 upload. Returns:
+
+    - ``configured: True`` + ``last_completed_at`` + ``age_seconds`` when
+      the marker exists, or
+    - ``configured: True`` + ``last_completed_at: null`` when the marker
+      path is set but the file isn't present yet (cron hasn't run, or the
+      last attempt failed), or
+    - ``configured: False`` when no marker path is set in the env (this
+      deployment hasn't set up the backup cron).
+
+    INFORMATIONAL ONLY. Stale or missing backups do NOT flip the overall
+    ``/health`` to ``degraded`` — the application can't know whether
+    "stale" is acceptable for this deployment (test, staging, prod-with-
+    different-RPO). External monitors / Grafana alert on the sub-fields.
+    """
+    marker_path = os.environ.get("DCINV_BACKUP_MARKER_PATH", _BACKUP_MARKER_DEFAULT)
+    if not marker_path:
+        return {"configured": False}
+    try:
+        mtime = os.path.getmtime(marker_path)
+    except OSError:
+        # File missing or unreadable. Distinguishes from "no cron set up"
+        # via the configured=True flag — operator sees both: "yes, you
+        # configured it; no, it hasn't run successfully".
+        return {"configured": True, "last_completed_at": None, "age_seconds": None}
+    last_at = datetime.fromtimestamp(mtime, tz=UTC)
+    age = (datetime.now(UTC) - last_at).total_seconds()
+    return {
+        "configured": True,
+        "last_completed_at": last_at.isoformat(),
+        "age_seconds": int(age),
+    }
+
+
 def _auto_end_job_sub_object(request: Request) -> dict[str, object]:
     """Build the ``auto_end_job`` /health sub-object (Sprint 7 Task 1 decision A).
 
@@ -146,4 +187,5 @@ async def health(request: Request, response: Response) -> dict[str, object]:
         "checks": checks,
         "auto_end_job": _auto_end_job_sub_object(request),
         "netbox_circuit": get_netbox_circuit_state(),
+        "backups": _backups_sub_object(),
     }

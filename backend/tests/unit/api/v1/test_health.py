@@ -477,3 +477,32 @@ def test_health_netbox_circuit_open_does_not_make_overall_status_degraded(
     assert body["status"] == "ok"
     assert body["netbox_circuit"]["state"] == "open"
     assert isinstance(body["netbox_circuit"]["open_until"], str)
+
+
+# ---------- backups (Sprint 9 Task 3) — informational-only ------------------
+
+
+def test_health_backups_sub_object_is_informational_only(
+    clean_env: None, health_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing-marker (stale-backups) state does NOT flip /health
+    overall status to degraded — same informational-only treatment as
+    auto_end_job and netbox_circuit."""
+    from app.main import app
+
+    _stub_checks(monkeypatch)
+    _disable_auto_end(monkeypatch)
+    # Point at a path that surely doesn't exist.
+    monkeypatch.setenv("DCINV_BACKUP_MARKER_PATH", "/nonexistent/marker")
+
+    with TestClient(app) as client:
+        resp = client.get("/health")
+
+    assert resp.status_code == 200  # overall ok
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["backups"] == {
+        "configured": True,
+        "last_completed_at": None,
+        "age_seconds": None,
+    }
