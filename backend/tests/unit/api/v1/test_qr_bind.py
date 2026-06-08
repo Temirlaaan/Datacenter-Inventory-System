@@ -44,7 +44,6 @@ from app.services.qr.lifecycle import (
     QRNotFoundError,
     QRStateConflictError,
 )
-from app.services.qr.lookup import QRLookupResponse
 from tests.unit.api.v1.conftest import make_user
 
 pytestmark = pytest.mark.integration
@@ -152,6 +151,11 @@ class _StubLifecycleService:
 # ---------- handler logic (direct await) ----------
 
 
+def _noop_sessionmaker() -> object:
+    """Sentinel for direct-await tests where idempotency_key=None
+    short-circuits the wrapper before sessionmaker is ever called."""
+    raise AssertionError("sessionmaker should not be called when idempotency_key is None")
+
 async def test_bind_qr_handler_returns_combined_response_on_happy_path(
     session: AsyncSession,
 ) -> None:
@@ -168,17 +172,22 @@ async def test_bind_qr_handler_returns_combined_response_on_happy_path(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
-    assert isinstance(result, QRLookupResponse)
-    assert result.qr.id == _QR_ID
-    assert result.qr.status is QRStatus.BOUND
-    assert result.qr.bound_to_device_id == _DEVICE_ID
-    assert result.qr.batch.intended_site_id == 5
-    assert result.device is not None
-    assert result.device.id == _DEVICE_ID
-    assert result.device.name == "sw-01"
-    assert result.device_error is None
+    # Sprint 9 Task 0: handler always returns JSONResponse now (for
+    # idempotency cacheability), even on the happy path.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["qr"]["id"] == _QR_ID
+    assert body["qr"]["status"] == "bound"
+    assert body["qr"]["bound_to_device_id"] == _DEVICE_ID
+    assert body["qr"]["batch"]["intended_site_id"] == 5
+    assert body["device"]["id"] == _DEVICE_ID
+    assert body["device"]["name"] == "sw-01"
+    assert "device_error" not in body
 
 
 async def test_bind_qr_handler_returns_404_when_qr_not_found(
@@ -192,6 +201,8 @@ async def test_bind_qr_handler_returns_404_when_qr_not_found(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -211,6 +222,8 @@ async def test_bind_qr_handler_returns_409_on_qr_state_conflict(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -234,6 +247,8 @@ async def test_bind_qr_handler_returns_409_on_device_version_conflict(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -255,6 +270,8 @@ async def test_bind_qr_handler_returns_409_on_qr_already_bound(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -274,6 +291,8 @@ async def test_bind_qr_handler_returns_500_on_rolled_back(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -293,6 +312,8 @@ async def test_bind_qr_handler_returns_500_on_inconsistency(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -315,6 +336,8 @@ async def test_bind_qr_handler_translates_netbox_validation_error_to_422(
         user=make_user("dcinv-mobile-user"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)

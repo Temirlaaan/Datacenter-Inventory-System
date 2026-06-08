@@ -14,20 +14,23 @@ never sees NULL noise.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1._helpers import netbox_validation_error_response
 from app.auth.dependencies import AuthUser, require_role, require_role_with_active_shift
 from app.db.repositories.audit_log import AuditLogRepository
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
-from app.db.session import get_session
+from app.db.session import get_session, get_sessionmaker
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxValidationError
 from app.services.device import DeviceService, to_device_data
+from app.services.idempotency import with_optional_idempotency_outer
 from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 from app.services.qr.lifecycle import (
     MissingVersionError,
@@ -161,96 +164,98 @@ async def bind_qr(
     user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
     lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
     session: AsyncSession = Depends(get_session),
-) -> QRLookupResponse | JSONResponse:
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
     """Atomic free→bound transition with NetBox attribution. Architecture §4.
 
     On success returns the combined QR+device response. On any error returns a
     structured ``{"error": {"code": ...}}`` body — see the table in
     ``docs/sprint-4.md`` Task 1 step 8.
+
+    Sprint 9 Task 0: optional ``Idempotency-Key`` header — see
+    ``with_optional_idempotency_outer`` and the mobile-api-guide for the
+    contract.
     """
-    try:
-        bound_qr, device_dict = await lifecycle.bind(
-            qr_id=qr_id,
-            device_id=request.device_id,
-            expected_version=request.version,
-            user=user,
-        )
-    except QRNotFoundError:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}},
-        )
-    except QRStateConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            bound_qr, device_dict = await lifecycle.bind(
+                qr_id=qr_id,
+                device_id=request.device_id,
+                expected_version=request.version,
+                user=user,
+            )
+        except QRNotFoundError:
+            return status.HTTP_404_NOT_FOUND, {
+                "error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}
+            }
+        except QRStateConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "QR_STATE_CONFLICT",
                     "message": f"QR is in {exc.current_status.value} state — cannot bind",
                     "current_status": exc.current_status.value,
                 }
-            },
-        )
-    except WriteConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+            }
+        except WriteConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "DEVICE_CONFLICT",
                     "message": "Device was modified after you read it.",
                     "current_state": to_device_data(exc.current_object).model_dump(),
                     "current_version": exc.current_version,
                 }
-            },
-        )
-    except QRAlreadyBoundError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+            }
+        except QRAlreadyBoundError as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "QR_ALREADY_BOUND",
                     "message": f"Device {exc.device_id} already has a bound QR",
                 }
-            },
-        )
-    except QRBindRolledBackError:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
+            }
+        except QRBindRolledBackError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
                 "error": {
                     "code": "QR_BIND_ROLLED_BACK",
                     "message": "Bind failed (rolled back)",
                 }
-            },
-        )
-    except QRBindInconsistencyError:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
+            }
+        except QRBindInconsistencyError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
                 "error": {
                     "code": "QR_BIND_INCONSISTENCY",
                     "message": "Bind failed, manual cleanup required",
                 }
-            },
-        )
-    except NetBoxValidationError as exc:
-        # Sprint 7 Task 5: rare in practice (qr_one_per_device index +
-        # NetBoxNotFound handle the common conflicts), but if NetBox does
-        # reject the device PATCH with a 4xx, 502 is misleading.
-        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the bind")
+            }
+        except NetBoxValidationError as exc:
+            # Sprint 7 Task 5: rare in practice (qr_one_per_device index +
+            # NetBoxNotFound handle the common conflicts), but if NetBox does
+            # reject the device PATCH with a 4xx, 502 is misleading.
+            resp = netbox_validation_error_response(
+                exc, fallback_message="NetBox rejected the bind"
+            )
+            import json as _json
 
-    # Build the combined response: QR (with batch info) + device. Decision H:
-    # device.qr_id is sourced from the app DB (the QR we just bound), not from
-    # NetBox — must be passed explicitly so the bind response is consistent
-    # with what GET /api/v1/qr/{id} would return for the same now-bound QR.
-    batch = await QRBatchRepository(session).get_by_id(bound_qr.batch_id)
-    # The qr_codes.batch_id FK guarantees the batch row exists.
-    assert batch is not None
-    return QRLookupResponse(
-        qr=to_qr_info(bound_qr, batch),
-        device=to_device_data(device_dict, qr_id=bound_qr.id),
-        device_error=None,
+            return resp.status_code, _json.loads(bytes(resp.body))
+
+        # Build the combined response: QR (with batch info) + device.
+        batch = await QRBatchRepository(session).get_by_id(bound_qr.batch_id)
+        assert batch is not None
+        return status.HTTP_200_OK, QRLookupResponse(
+            qr=to_qr_info(bound_qr, batch),
+            device=to_device_data(device_dict, qr_id=bound_qr.id),
+            device_error=None,
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload={"qr_id": qr_id, **request.model_dump(mode="json")},
+        do_work=_do_work,
     )
+    return JSONResponse(body, status_code=status_code)
 
 
 @router.post(
@@ -264,84 +269,88 @@ async def retire_qr(
     user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
     session: AsyncSession = Depends(get_session),
-) -> QRRetireResponse | JSONResponse:
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
     """Retire a QR. FREE→RETIRED is DB-only; BOUND→RETIRED clears
     ``custom_fields.qr_id`` on the bound device with the same three-branch
     compensation as bind. Role ``dcinv-admin`` (decision I) — retire is
     destructive; safer default than ``dcinv-mobile-user``.
+
+    Sprint 9 Task 0: optional ``Idempotency-Key`` header.
     """
-    try:
-        # Endpoint only needs the retired QR; the updated-device dict is for
-        # Sprint 5 Task 4 (decommission OCC chain).
-        retired, _ = await lifecycle.retire(
-            qr_id=qr_id,
-            expected_version=request.version,
-            user=user,
-        )
-    except QRNotFoundError:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}},
-        )
-    except QRStateConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            # Endpoint only needs the retired QR; the updated-device dict is for
+            # Sprint 5 Task 4 (decommission OCC chain).
+            retired, _ = await lifecycle.retire(
+                qr_id=qr_id,
+                expected_version=request.version,
+                user=user,
+            )
+        except QRNotFoundError:
+            return status.HTTP_404_NOT_FOUND, {
+                "error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}
+            }
+        except QRStateConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "QR_STATE_CONFLICT",
                     "message": f"QR is in {exc.current_status.value} state — cannot retire",
                     "current_status": exc.current_status.value,
                 }
-            },
-        )
-    except MissingVersionError:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={
+            }
+        except MissingVersionError:
+            return status.HTTP_422_UNPROCESSABLE_ENTITY, {
                 "error": {
                     "code": "VERSION_REQUIRED",
                     "message": "BOUND QR retire requires the device's expected version",
                 }
-            },
-        )
-    except WriteConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
+            }
+        except WriteConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
                 "error": {
                     "code": "DEVICE_CONFLICT",
                     "message": "Device was modified after you read it.",
                     "current_state": to_device_data(exc.current_object).model_dump(),
                     "current_version": exc.current_version,
                 }
-            },
-        )
-    except QRRetireRolledBackError:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
+            }
+        except QRRetireRolledBackError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
                 "error": {
                     "code": "QR_RETIRE_ROLLED_BACK",
                     "message": "Retire failed (rolled back)",
                 }
-            },
-        )
-    except QRRetireInconsistencyError:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
+            }
+        except QRRetireInconsistencyError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
                 "error": {
                     "code": "QR_RETIRE_INCONSISTENCY",
                     "message": "Retire failed, manual cleanup required",
                 }
-            },
-        )
-    except NetBoxValidationError as exc:
-        # Sprint 7 Task 5: included for consistency — if NetBox rejects the
-        # device PATCH that clears custom_fields.qr_id on BOUND→RETIRED, 502
-        # is misleading.
-        return netbox_validation_error_response(exc, fallback_message="NetBox rejected the retire")
+            }
+        except NetBoxValidationError as exc:
+            # Sprint 7 Task 5: included for consistency.
+            resp = netbox_validation_error_response(
+                exc, fallback_message="NetBox rejected the retire"
+            )
+            import json as _json
 
-    batch = await QRBatchRepository(session).get_by_id(retired.batch_id)
-    assert batch is not None
-    return QRRetireResponse(qr=to_qr_info(retired, batch))
+            return resp.status_code, _json.loads(bytes(resp.body))
+
+        batch = await QRBatchRepository(session).get_by_id(retired.batch_id)
+        assert batch is not None
+        return status.HTTP_200_OK, QRRetireResponse(
+            qr=to_qr_info(retired, batch)
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload={"qr_id": qr_id, **request.model_dump(mode="json")},
+        do_work=_do_work,
+    )
+    return JSONResponse(body, status_code=status_code)

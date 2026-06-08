@@ -26,9 +26,6 @@ from app.api.v1.qr import (
     get_lifecycle_service,
     retire_qr,
 )
-
-# QRRetireResponse is endpoint-local (not in app.services.qr.lookup).
-from app.api.v1.qr import QRRetireResponse as _QRRetireResponse
 from app.auth.dependencies import AuthUser
 from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
@@ -149,6 +146,11 @@ class _StubLifecycleService:
 # ---------- handler logic (direct await) ----------
 
 
+def _noop_sessionmaker() -> object:
+    """Sentinel for direct-await tests where idempotency_key=None
+    short-circuits the wrapper before sessionmaker is ever called."""
+    raise AssertionError("sessionmaker should not be called when idempotency_key is None")
+
 async def test_retire_qr_handler_returns_qr_on_happy_path(
     session: AsyncSession,
 ) -> None:
@@ -162,13 +164,18 @@ async def test_retire_qr_handler_returns_qr_on_happy_path(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
-    assert isinstance(result, _QRRetireResponse)
-    assert result.qr.id == _QR_ID
-    assert result.qr.status is QRStatus.RETIRED
-    assert result.qr.retired_at == _NOW
-    assert result.qr.batch.intended_site_id == 5
+    # Sprint 9 Task 0: handler always returns JSONResponse now.
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
+    body = json.loads(bytes(result.body))
+    assert body["qr"]["id"] == _QR_ID
+    assert body["qr"]["status"] == "retired"
+    assert body["qr"]["retired_at"] == _NOW.isoformat()
+    assert body["qr"]["batch"]["intended_site_id"] == 5
 
 
 async def test_retire_qr_handler_returns_404_when_qr_not_found(
@@ -182,6 +189,8 @@ async def test_retire_qr_handler_returns_404_when_qr_not_found(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -201,6 +210,8 @@ async def test_retire_qr_handler_returns_409_on_qr_state_conflict(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -221,6 +232,8 @@ async def test_retire_qr_handler_returns_422_on_missing_version(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -243,6 +256,8 @@ async def test_retire_qr_handler_returns_409_on_device_version_conflict(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -263,6 +278,8 @@ async def test_retire_qr_handler_returns_500_on_rolled_back(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -282,6 +299,8 @@ async def test_retire_qr_handler_returns_500_on_inconsistency(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
@@ -305,6 +324,8 @@ async def test_retire_qr_handler_translates_netbox_validation_error_to_422(
         user=make_user("dcinv-admin"),
         lifecycle=cast(QRLifecycleService, stub),
         session=session,
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None
     )
 
     assert isinstance(result, JSONResponse)
