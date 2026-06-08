@@ -599,3 +599,111 @@ def test_to_netbox_create_payload_emits_all_fields_when_all_set() -> None:
         "comments": "core switch",
         "asset_tag": "A-9",
     }
+
+
+# ---------- DeviceService.search — Sprint 9 Task 1 ----------
+
+
+def _search_envelope(*devices: dict[str, Any]) -> dict[str, Any]:
+    """NetBox list-endpoint envelope shape: ``{count, next, previous, results}``."""
+    return {"count": len(devices), "next": None, "previous": None, "results": list(devices)}
+
+
+async def test_search_returns_paginated_devices_on_name_filter(
+    clean_env: None, netbox_env: None
+) -> None:
+    """``name`` maps to NetBox ``?name__ic`` (case-insensitive contains)."""
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_search_envelope(_device(id=5, name="sw-01"))
+            )
+            result = await DeviceService(client).search(name="sw", page=1, page_size=20)
+
+    assert result.page == 1
+    assert result.page_size == 20
+    assert result.has_more is False
+    assert [d.data.id for d in result.results] == [5]
+    # NetBox got the right query params: name__ic + limit/offset.
+    sent = route.calls.last.request
+    assert sent.url.params["name__ic"] == "sw"
+    assert sent.url.params["limit"] == "21"  # page_size + 1 for has_more probe
+    assert sent.url.params["offset"] == "0"
+
+
+@pytest.mark.parametrize(
+    "kwarg, netbox_param, value",
+    [
+        ("asset_tag", "asset_tag", "A-9"),
+        ("serial", "serial", "ABC123"),
+        ("site_id", "site_id", "1"),
+        ("rack_id", "rack_id", "7"),
+    ],
+)
+async def test_search_translates_each_filter_to_the_netbox_param(
+    clean_env: None,
+    netbox_env: None,
+    kwarg: str,
+    netbox_param: str,
+    value: str,
+) -> None:
+    typed_value: object = int(value) if kwarg.endswith("_id") else value
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_search_envelope(_device())
+            )
+            await DeviceService(client).search(**{kwarg: typed_value})  # type: ignore[arg-type]
+
+    assert route.calls.last.request.url.params[netbox_param] == value
+
+
+async def test_search_combines_multiple_filters(
+    clean_env: None, netbox_env: None
+) -> None:
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_search_envelope(_device())
+            )
+            await DeviceService(client).search(
+                name="sw", site_id=1, rack_id=7, page=2, page_size=10
+            )
+
+    p = route.calls.last.request.url.params
+    assert p["name__ic"] == "sw"
+    assert p["site_id"] == "1"
+    assert p["rack_id"] == "7"
+    assert p["limit"] == "11"
+    assert p["offset"] == "10"  # (page-1) * page_size
+
+
+async def test_search_returns_empty_when_netbox_results_empty(
+    clean_env: None, netbox_env: None
+) -> None:
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(json=_search_envelope())
+            result = await DeviceService(client).search(name="no-match")
+
+    assert result.results == []
+    assert result.has_more is False
+
+
+async def test_search_trims_to_page_size_and_sets_has_more_when_extra_returned(
+    clean_env: None, netbox_env: None
+) -> None:
+    """The service requests ``page_size + 1`` and trims; the extra row is
+    the signal that there is a next page."""
+    page_size = 2
+    devices = [_device(id=i, name=f"sw-{i:02}") for i in range(1, 5)]  # 4 devices
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_search_envelope(*devices[:page_size + 1])  # NetBox returns 3
+            )
+            result = await DeviceService(client).search(page=1, page_size=page_size)
+
+    assert len(result.results) == page_size  # trimmed
+    assert result.has_more is True
+    assert [d.data.id for d in result.results] == [1, 2]

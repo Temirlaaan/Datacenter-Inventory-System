@@ -291,6 +291,47 @@ field as part of the same atomic operation.
 GET /api/v1/devices/1042
 ```
 
+### 3.5b Search devices (Sprint 9 Task 1)
+
+```http
+GET /api/v1/devices/search?name=core-sw&page=1&page_size=20
+```
+
+When the engineer can't read a stuck QR sticker — or hasn't bound one
+yet — they need to locate the device manually. Use this endpoint to
+search by:
+
+| Query param | NetBox semantics |
+|---|---|
+| `name` | case-insensitive contains (`?name__ic=` upstream) |
+| `asset_tag` | exact match |
+| `serial` | exact match |
+| `site` | NetBox site id (integer) |
+| `rack` | NetBox rack id (integer) |
+
+Combine filters freely (`?site=1&rack=7&name=sw`). Each result has the
+same shape as `GET /devices/{id}` — your detail view can render the
+list directly without a second fetch.
+
+Pagination: `?page=` (1-indexed) + `?page_size=` (default 20, cap 100).
+The response carries `has_more: bool` so you know when to disable the
+"load more" button without a separate COUNT call.
+
+```json
+{
+  "results": [
+    { "data": { "id": 1042, "name": "core-sw-01", ... }, "version": "..." }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "has_more": false
+}
+```
+
+Server caches the result 30 seconds per query — retries within the
+window share one NetBox round-trip. Reads are NOT audited (operational
+read, mirrors `GET /devices/{id}`).
+
 Returns:
 
 ```json

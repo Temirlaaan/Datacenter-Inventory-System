@@ -284,6 +284,20 @@ def to_netbox_changes(request: DeviceUpdateRequest) -> dict[str, Any]:
     return changes
 
 
+class DeviceSearchResponse(BaseModel):
+    """``GET /api/v1/devices/search`` result envelope (Sprint 9 Task 1).
+
+    Each entry is the same ``DeviceResponse`` shape mobile already consumes
+    from ``GET /devices/{id}`` so the search-result list can feed directly
+    into the device-detail / edit flow without a re-fetch.
+    """
+
+    results: list[DeviceResponse]
+    page: int
+    page_size: int
+    has_more: bool
+
+
 class DeviceService:
     """Reads devices from NetBox."""
 
@@ -305,3 +319,61 @@ class DeviceService:
         """
         response = await self._netbox.get(f"/api/dcim/devices/{device_id}/")
         return response.json()  # type: ignore[no-any-return]
+
+    async def search(
+        self,
+        *,
+        name: str | None = None,
+        asset_tag: str | None = None,
+        serial: str | None = None,
+        site_id: int | None = None,
+        rack_id: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> DeviceSearchResponse:
+        """Search NetBox devices by name / asset_tag / serial / site / rack.
+
+        Sprint 9 Task 1. Mobile-driven: when an engineer can't read a stuck
+        QR sticker, they search by device name / serial / asset tag to
+        locate the row. The endpoint is read-only; no audit row.
+
+        Pagination is 1-indexed (``page=1`` is the first page); we request
+        ``page_size + 1`` from NetBox and trim to detect ``has_more``
+        without a separate COUNT call — mirrors the audit-log pagination
+        pattern from Sprint 7.
+
+        Filter mapping to NetBox query params:
+        - ``name`` → ``name__ic`` (case-insensitive contains)
+        - ``asset_tag`` → ``asset_tag`` (exact)
+        - ``serial`` → ``serial`` (exact)
+        - ``site_id`` → ``site_id``
+        - ``rack_id`` → ``rack_id``
+        """
+        params: dict[str, Any] = {
+            "limit": page_size + 1,
+            "offset": (page - 1) * page_size,
+        }
+        if name:
+            params["name__ic"] = name
+        if asset_tag:
+            params["asset_tag"] = asset_tag
+        if serial:
+            params["serial"] = serial
+        if site_id:
+            params["site_id"] = site_id
+        if rack_id:
+            params["rack_id"] = rack_id
+        response = await self._netbox.get("/api/dcim/devices/", params=params)
+        payload = response.json()
+        raw_devices: list[dict[str, Any]] = payload.get("results", [])
+        has_more = len(raw_devices) > page_size
+        trimmed = raw_devices[:page_size]
+        return DeviceSearchResponse(
+            results=[
+                DeviceResponse(data=to_device_data(d), version=d["last_updated"])
+                for d in trimmed
+            ],
+            page=page,
+            page_size=page_size,
+            has_more=has_more,
+        )

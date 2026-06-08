@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,10 +33,12 @@ from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session, get_sessionmaker
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxValidationError
+from app.services.cache import TTLCache
 from app.services.comment import CommentService
 from app.services.device import (
     DeviceCreateRequest,
     DeviceResponse,
+    DeviceSearchResponse,
     DeviceService,
     DeviceUpdateRequest,
     to_device_data,
@@ -351,6 +353,110 @@ async def decommission_device(
         do_work=_do_work,
     )
     return JSONResponse(body, status_code=status_code)
+
+
+# ---------- /api/v1/devices/search (Sprint 9 Task 1) -----------------------
+#
+# IMPORTANT: declared BEFORE /{device_id} so FastAPI's order-based dispatch
+# matches /devices/search to this handler and not to the parameterised read
+# route (which would try to parse "search" as an int and 422).
+
+_DEVICE_SEARCH_TTL_SECONDS = 30.0
+_device_search_cache: TTLCache | None = None
+
+
+def get_device_search_cache() -> TTLCache:
+    """Lazy singleton — one 30s cache per process.
+
+    Sprint 9 Task 1 decision E: stricter TTL than the 60s device-data cap
+    because search semantics shift faster than per-device state (a newly
+    racked device should appear without waiting a full minute). The cache
+    is keyed on the full query string, not per-result, so a search and
+    its retry within 30s share one NetBox round-trip.
+    """
+    global _device_search_cache
+    if _device_search_cache is None:
+        _device_search_cache = TTLCache(_DEVICE_SEARCH_TTL_SECONDS)
+    return _device_search_cache
+
+
+def reset_device_search_cache() -> None:
+    """Clear the cached singleton. Used by tests + by any future
+    runtime-invalidation path (e.g. after a device write)."""
+    global _device_search_cache
+    _device_search_cache = None
+
+
+@router.get("/search", response_model=DeviceSearchResponse)
+async def search_devices(
+    name: str | None = Query(default=None, max_length=255),
+    asset_tag: str | None = Query(default=None, max_length=255),
+    serial: str | None = Query(default=None, max_length=255),
+    site_id: int | None = Query(default=None, ge=1, alias="site"),
+    rack_id: int | None = Query(default=None, ge=1, alias="rack"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    service: DeviceService = Depends(get_device_service),
+    cache: TTLCache = Depends(get_device_search_cache),
+    _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
+) -> DeviceSearchResponse:
+    """Search NetBox devices. ToR §4.3.1 (find a device when the QR
+    sticker is unreadable / missing).
+
+    Cached 30s on the full query-param tuple — a retry of the same search
+    within the window shares the original NetBox round-trip.
+    """
+    cache_key = _search_cache_key(
+        name=name,
+        asset_tag=asset_tag,
+        serial=serial,
+        site_id=site_id,
+        rack_id=rack_id,
+        page=page,
+        page_size=page_size,
+    )
+
+    async def _fetch() -> DeviceSearchResponse:
+        return await service.search(
+            name=name,
+            asset_tag=asset_tag,
+            serial=serial,
+            site_id=site_id,
+            rack_id=rack_id,
+            page=page,
+            page_size=page_size,
+        )
+
+    return await cache.get_or_fetch(cache_key, _fetch)
+
+
+def _search_cache_key(
+    *,
+    name: str | None,
+    asset_tag: str | None,
+    serial: str | None,
+    site_id: int | None,
+    rack_id: int | None,
+    page: int,
+    page_size: int,
+) -> str:
+    """Stable cache key from the search params.
+
+    Pipe-separated so it's grep-friendly in logs; empty filters land as
+    empty fields (``||abc||||1|20``) rather than being dropped, which
+    keeps two distinct queries from colliding (`name=abc` vs
+    `asset_tag=abc`)."""
+    return "|".join(
+        [
+            name or "",
+            asset_tag or "",
+            serial or "",
+            str(site_id) if site_id is not None else "",
+            str(rack_id) if rack_id is not None else "",
+            str(page),
+            str(page_size),
+        ]
+    )
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
