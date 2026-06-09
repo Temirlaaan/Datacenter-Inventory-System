@@ -263,6 +263,17 @@ async def test_dashboard_handler_returns_html_response_with_snapshot(
 
     monkeypatch.setattr("app.web.router.DashboardRepository", _FakeRepo)
 
+    # Sprint 10 Task 1: dashboard also queries AuditLogRepository for the
+    # activity feed. Stub it with an empty page so this test stays focused
+    # on the snapshot rendering.
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
+            return [], False
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+
     scope = {
         "type": "http",
         "method": "GET",
@@ -290,6 +301,108 @@ async def test_dashboard_handler_returns_html_response_with_snapshot(
     assert b">22<" in body
     assert b">66<" in body
     assert b"alice@example.com" in body
+    # Empty activity feed → empty-state copy.
+    assert b"No recent activity" in body
+
+
+async def test_dashboard_handler_renders_activity_feed_with_audit_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 10 Task 1 — populated feed: audit rows render in a table
+    below the counter grid, each linking to its detail page."""
+    _set_env(monkeypatch)
+    from app.domain.audit import AuditLogEntry, AuditResult
+    from app.domain.dashboard import DashboardSnapshot
+
+    canned_snapshot = DashboardSnapshot(
+        qr_free_count=0,
+        qr_bound_count=0,
+        qr_retired_count=0,
+        batches_last_30_days=0,
+        active_shifts_count=0,
+        audit_rows_last_24h=2,
+        generated_at=datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC),
+    )
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def snapshot(self, *, now: datetime) -> DashboardSnapshot:
+            _ = now
+            return canned_snapshot
+
+    monkeypatch.setattr("app.web.router.DashboardRepository", _FakeRepo)
+
+    activity = [
+        AuditLogEntry(
+            request_id=UUID("11111111-1111-1111-1111-111111111111"),
+            timestamp=datetime(2026, 6, 8, 11, 30, 0, tzinfo=UTC),
+            user_email="engineer@example.com",
+            user_keycloak_id=_USER_SUB,
+            session_id=None,
+            operation="qr.bind",
+            entity_type="qr",
+            entity_id="QR-7F3A2B",
+            before_json={},
+            after_json={},
+            result=AuditResult.SUCCESS,
+            id=101,
+        ),
+        AuditLogEntry(
+            request_id=UUID("22222222-2222-2222-2222-222222222222"),
+            timestamp=datetime(2026, 6, 8, 11, 0, 0, tzinfo=UTC),
+            user_email="alice@example.com",
+            user_keycloak_id=_USER_SUB,
+            session_id=None,
+            operation="device.update",
+            entity_type="device",
+            entity_id="42",
+            before_json={},
+            after_json={},
+            result=AuditResult.CONFLICT,
+            id=102,
+        ),
+    ]
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
+            return activity, False
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    user = WebAdminUser(
+        sub=_USER_SUB,
+        email="alice@example.com",
+        roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1),
+        csrf_token="test-csrf-token",
+    )
+    response = await dashboard(
+        request=Request(scope), user=user, session=object()  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    # Both rows must render with their operation + entity + link.
+    assert b"qr.bind" in body
+    assert b"QR-7F3A2B" in body
+    assert b"device.update" in body
+    assert b"engineer@example.com" in body
+    # Each row links to its detail page.
+    assert b'href="/web/audit/101"' in body
+    assert b'href="/web/audit/102"' in body
+    # Conflict result badge text.
+    assert b"conflict" in body
 
 
 # ---------- batches list + detail handlers: direct-await returns ------------

@@ -317,6 +317,9 @@ def _render_admin_shift_needed(request: Request, user: WebAdminUser) -> HTMLResp
 # ---------- /web/ dashboard --------------------------------------------------
 
 
+_DASHBOARD_ACTIVITY_FEED_SIZE = 20
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
@@ -324,17 +327,27 @@ async def dashboard(
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     """Render the admin dashboard with the six counters from
-    :class:`DashboardRepository`. Same data source as
-    ``GET /api/v1/admin/dashboard`` — the page consumes the repo directly
-    via dep injection rather than self-HTTP-calling the JSON endpoint
-    (decision I)."""
+    :class:`DashboardRepository` plus the recent-activity audit feed
+    (Sprint 10 Task 1).
+
+    Two SQL round-trips: counter snapshot + the last 20 audit_log rows
+    (newest first). Both go through repos directly via dep injection
+    (decision I — no HTTP self-call). The activity feed is NOT audited
+    (read; mirrors ``/web/audit/`` GET — Sprint 7 decision 8).
+    """
     snap = await DashboardRepository(session).snapshot(now=datetime.now(UTC))
+    activity_rows, _ = await AuditLogRepository(session).query(
+        filters=AuditLogQueryFilters(),
+        page=1,
+        page_size=_DASHBOARD_ACTIVITY_FEED_SIZE,
+    )
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "user_email": user.email,
             "snapshot": snap,
+            "activity_rows": activity_rows,
         },
     )
 
