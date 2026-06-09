@@ -378,3 +378,29 @@ conflict UX) is Sprint 11.
 
 UX nice-to-haves from the late-Sprint-8b user feedback session. Not
 blocking, scheduled for Sprint 10.
+
+---
+
+## Sprint 10 close-out (2026-06-08) — Sprint 9+10 deferrals: status update
+
+Sprint 10 resolved several items that were carried out of Sprint 9 close-out.
+Status update:
+
+### RESOLVED in Sprint 10
+
+- **Idempotency-key TTL cleanup job** — `scripts/idempotency_cleanup.sh` (commit `2a246fd`). Runs daily at 03:30 UTC.
+- **Automated restore-validation cron** — `scripts/restore_validate.sh` + `/health.restore_validation` sub-object (commit `2a246fd`). Runs weekly Sunday 04:00 UTC.
+- **Dashboard activity feed** — last 20 audit rows under counter grid on `/web/` (commit `66d52de`).
+- **Date-preset chips** on `/web/audit/` + `/web/sessions/` filter forms (commit `a6bdcbf`).
+- **Bulk retire** on `/web/batches/{id}` (commit `682c960`). Single-row inline retire button preserved alongside the bulk form.
+
+### Still open after Sprint 10
+
+- **Mobile offline-queue implementation** — Sprint 11. Biggest next thing. Sprints 9+10 laid the idempotency contract + ops foundation. Sprint 11 builds the on-device Kotlin queue (persistent storage, retry-with-backoff, conflict UX).
+- **Bulk decommission on `/web/devices/`** — web-side counterpart to bulk retire. Lands in Sprint 11 if admins ask. NetBox makes this more delicate (per-device OCC version + status PATCH) so it's not the same pattern as bulk retire.
+- **Real-time SSE/WebSocket updates** — Sprint 12+ unless an incident forces it.
+- **Cluster-wide rate-limit state (Redis)** — Sprint 8a deferral; no HA pressure yet.
+- **Phase 2 partial-failure alerting** — carried since Sprint 3.
+- **`/web/devices/{id}` write path** (edit fields, change status) — admin web stays read-only unless ToR feedback says otherwise.
+- **WAL archiving / point-in-time recovery** — Sprint 11+. Daily backups + weekly restore validation are enough for current 24h RPO.
+- **Prometheus metric exporter** — Sprint 12+. `/health` sub-objects are scrape-able JSON for now; a proper exporter is its own piece of work.

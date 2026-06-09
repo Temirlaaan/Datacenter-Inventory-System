@@ -1329,3 +1329,71 @@ PostgreSQL data lives in a docker volume; without this, disk failure = total los
 - **`/web/devices/{id}` write path** (edit fields, change status) — admin web stays read-only until ToR feedback says otherwise.
 - **WAL archiving / point-in-time recovery** — backup.md Task 3 noted this; needs WAL-G or pgbackrest, separate operational story.
 - **Automated restore-validation cron** — Sprint 10+ ops polish.
+
+## Sprint 10 — UX Polish + Ops Maturation (closed 2026-06-08)
+
+Plan: [docs/sprint-10.md](sprint-10.md). 5 tasks, ~5 days target → delivered same-day after Sprint 9 close. Goal was to finish the operational maturity story Sprint 9 started (TTL cleanup, restore validation) AND make the admin UI feel less Spartan (activity feed, date presets, bulk retire). Every task came from the Sprint 9 close-out's "Sprint 10+ deferrals" list.
+
+### Task 0 — Cleanup + restore-validation crons (closed 2026-06-08, commit `2a246fd`)
+
+Two new host-cron scripts complete the Sprint 9 backup story.
+
+`scripts/idempotency_cleanup.sh`: daily 24h sweep of `idempotency_keys` via `docker exec dcinv-db psql -c "DELETE ... WHERE created_at < NOW() - INTERVAL '24 hours'"`. Configurable TTL via `IDEMPOTENCY_TTL_INTERVAL` env var. Logs the deleted count. Runs at 03:30 UTC, 30 min after `backup.sh` so the deleted rows are already in the day's dump. No marker file / `/health` field — table-size monitoring catches a stuck cleanup more cheaply than a third sub-object.
+
+`scripts/restore_validate.sh`: weekly proof that the latest dump actually restores. Spins up an ephemeral `postgres:15` container on `tmpfs` (decision B — NEVER touches production `dcinv-db`), downloads the most recent dump from S3, runs `pg_restore --schema-only --no-owner --no-acl`, asserts at least 5 of the expected tables (`qr_codes`, `qr_batches`, `audit_log`, `shift_sessions`, `idempotency_keys`) exist, touches a marker on success. Schema-only because we're validating archive integrity not data; completes in seconds even for prod-sized dumps and avoids tens-of-GB of tmpfs.
+
+New `/health.restore_validation` informational sub-object mirrors the `backups` field shape (`configured` / `last_completed_at` / `age_seconds`). Same INFORMATIONAL-ONLY treatment as `auto_end_job` and `netbox_circuit` (decision C). External monitors alert on `age_seconds > 8 days` (anything over 1 week running weekly means the last attempt failed).
+
+New [docs/cron.md](cron.md) consolidates all three cron entries (backup, cleanup, restore-validate) into one operator guide: shared env file, crontab snippets, verification procedure, suggested external monitor alert thresholds.
+
+2 new pure-unit tests for `_restore_validation_sub_object` (configured-false + mtime-driven), placed alongside the Sprint 9 backups tests in [tests/unit/services/test_health_backups.py](../backend/tests/unit/services/test_health_backups.py). Unit suite: 620 → 622.
+
+### Task 1 — Dashboard activity feed (closed 2026-06-08, commit `66d52de`)
+
+Below the existing counter card grid on `/web/`, render the last 20 audit_log rows newest-first. Same `AuditLogRepository.query` call as `/web/audit/` via direct Python (decision I — no HTTP self-call). Two SQL round-trips total per dashboard load (snapshot + activity feed). Each row shows timestamp / user / operation (monospace) / entity / result badge / Details link to `/web/audit/{id}`. Header carries a "See full audit log »" link. NOT audited (operational read; mirrors `/web/audit/` GET per Sprint 7 decision 8). No real-time / streaming / polling — page refresh is the refresh model (decision D).
+
+1 existing test gets a stubbed `AuditLogRepository` returning `[]` (asserts the empty-state copy renders). 1 new test exercises the populated-feed branch with two seeded audit rows. Unit suite: 622 → 623.
+
+### Task 2 — Date-preset chips on audit + sessions filter forms (closed 2026-06-08, commit `a6bdcbf`)
+
+Three buttons above each filter form on [audit/list.html](../backend/app/web/templates/audit/list.html) and [sessions/list.html](../backend/app/web/templates/sessions/list.html): **Today** / **Last 24h** / **Last 7 days**. Clicking pre-fills the `from` + `to` datetime-local inputs and submits the form via its existing GET action. Pure client-side (decision F): ~30-line inline `<script>` per page, CSP-safe (no eval, no innerHTML — dataset reads + form submit only). No new query params, no new backend code — the existing `?from=` + `?to=` flow handles everything.
+
+Two existing list-page tests get four extra assertions each: buttons render with the right `data-preset` attributes ("today" / "24h" / "7d") and the form has the id (`js-filter-form`) the JS reads. The click → submit chain is JS-only, exercised by manual browser smoke at deploy time.
+
+### Task 3 — Bulk retire on `/web/batches/{id}` (closed 2026-06-08, commit `682c960`)
+
+Multi-select checkboxes added next to each FREE row of the batch detail table. New `POST /web/batches/{batch_id}/bulk-retire` handler iterates calling `QRLifecycleService.retire` per QR — each retire keeps its three-record-write atomic semantics (decision G), NOT a bulk SQL UPDATE.
+
+The bulk form lives outside the per-row inline retire forms (HTML disallows nested forms); checkboxes inside the table reference the bulk form via their HTML5 `form=` attribute. The per-row inline retire button keeps working unchanged. Small inline JS: header "select-all" toggles every row's checkbox; a counter next to the submit button gives immediate feedback.
+
+Already-RETIRED codes (race with another tab / mobile retire) count as success in the aggregate per decision H — admin gets a consistent "done" view. Failed retires (not-found, bound-now, rolled-back) are tallied separately and surfaced via the flash: `Retired N of M — K failed (see audit log)`. Empty selection → `No QR codes selected` error flash, no work. CSRF-protected via the standard `verify_csrf_token` gate.
+
+NO new `POST /api/v1/qr/bulk-retire` (decision I) — bulk only makes sense for the admin sweeping unprinted/damaged FREE stock from the office; mobile scans one QR at a time.
+
+4 new direct-await tests: empty-selection no-op, all-success path, partial-failure mix (covers `QRNotFoundError` + `QRStateConflictError` both bound + retired branches), CSRF mismatch → 403. Unit suite: 623 → 627.
+
+### Sprint 10 close-out (2026-06-08)
+
+**Quality bar at close.**
+- 627 unit tests passing (620 → 627, +7 across the 4 tasks)
+- Lint clean (`ruff check`)
+- No new Python dependencies (decision K)
+- Integration tests still skip without DB env vars; their direct-await call sites continue to be updated as endpoints get new args
+
+**Visible payoff.**
+- Dashboard now answers "what's happening right now" in addition to the counter snapshot
+- Audit + sessions filtering is one click away for "today" / "last 24h" / "last 7d" instead of typing datetimes
+- Batch detail with 50 FREE codes goes from 50 button clicks to one "Retire selected"
+- Backup cron now provably runs (weekly schema-restore proves the dump can actually come back)
+- `idempotency_keys` no longer grows unbounded
+
+**Deliberately deferred to Sprint 11+:**
+
+- **Mobile offline-queue implementation** — biggest next thing. Sprints 9 + 10 laid the idempotency contract + ops foundation; Sprint 11 builds the on-device queue (persistent storage, retry-with-backoff, conflict UX) in Kotlin.
+- **Bulk decommission on `/web/devices/`** — Task 3 shipped bulk retire; if admins ask for the device-side counterpart it lands in Sprint 11.
+- **Real-time SSE/WebSocket dashboard updates** — Sprint 12+ unless an incident forces it. Page refresh is fine for one admin at a time.
+- **Cluster-wide rate-limit state (Redis-backed counters)** — Sprint 8a deferral; still no HA pressure.
+- **Phase 2 partial-failure alerting** — carried since Sprint 3.
+- **`/web/devices/{id}` write path** (edit fields, change status) — admin web stays read-only unless ToR feedback says otherwise.
+- **WAL archiving / point-in-time recovery** — daily backups + cleaner restore validation are enough for current RPO. WAL-G or pgbackrest if sub-second RPO becomes a requirement.
+- **Prometheus metric exporter** — `/health` sub-objects are scrape-able JSON; a proper exporter is Sprint 12+ work.
