@@ -2489,6 +2489,156 @@ def test_batches_new_route_declared_before_batches_detail() -> None:
         f"got new at {new_idx}, detail at {detail_idx}"
     )
 
+
+# ---------- /web/batches/{id}/bulk-retire (Sprint 10 Task 3) ----------------
+
+
+def _patch_lifecycle_for_bulk(
+    monkeypatch: pytest.MonkeyPatch, retire_impl: Any
+) -> None:
+    """Install a fake QRLifecycleService whose ``retire`` runs ``retire_impl(qr_id)``.
+    Wires in the netbox / write-service deps as no-ops since the handler
+    reaches them at call time."""
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+    class _FakeWriteService:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+    class _FakeLifecycle:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def retire(self, *, qr_id: str, **_kwargs: object) -> Any:
+            return await retire_impl(qr_id)
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
+    monkeypatch.setattr("app.web.router.NetBoxWriteService", _FakeWriteService)
+    monkeypatch.setattr("app.web.router.QRLifecycleService", _FakeLifecycle)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+
+async def test_web_batches_bulk_retire_empty_selection_returns_flash_no_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No qr_ids → flash banner "No QR codes selected", no service init."""
+    from uuid import uuid4
+
+    from app.web.router import web_batches_bulk_retire
+
+    _set_env(monkeypatch)
+    batch_id = uuid4()
+
+    response = await web_batches_bulk_retire(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        qr_ids=[],
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(f"/web/batches/{batch_id}?")
+    assert "flash=No+QR+codes+selected" in response.headers["location"]
+    assert "flash_kind=error" in response.headers["location"]
+
+
+async def test_web_batches_bulk_retire_all_success_flashes_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three FREE codes retired cleanly → "Retired 3 QR codes" info flash."""
+    from uuid import uuid4
+
+    from app.web.router import web_batches_bulk_retire
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    seen: list[str] = []
+
+    async def _retire(qr_id: str) -> Any:
+        seen.append(qr_id)
+        return None
+
+    _patch_lifecycle_for_bulk(monkeypatch, _retire)
+
+    batch_id = uuid4()
+    response = await web_batches_bulk_retire(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        qr_ids=["QR-A", "QR-B", "QR-C"],
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash=Retired+3+QR+codes" in response.headers["location"]
+    assert "flash_kind=info" in response.headers["location"]
+    assert seen == ["QR-A", "QR-B", "QR-C"]
+
+
+async def test_web_batches_bulk_retire_partial_failure_flashes_mix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some retires raise; aggregate flash says "N of M — K failed"."""
+    from uuid import uuid4
+
+    from app.domain.qr import QRStatus
+    from app.services.qr.lifecycle import QRNotFoundError, QRStateConflictError
+    from app.web.router import web_batches_bulk_retire
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _retire(qr_id: str) -> Any:
+        if qr_id == "QR-BAD":
+            raise QRNotFoundError(qr_id)
+        if qr_id == "QR-BOUND":
+            raise QRStateConflictError(current_status=QRStatus.BOUND)
+        # Already-retired counts as success (idempotent UX).
+        if qr_id == "QR-ALREADY":
+            raise QRStateConflictError(current_status=QRStatus.RETIRED)
+        return None
+
+    _patch_lifecycle_for_bulk(monkeypatch, _retire)
+
+    batch_id = uuid4()
+    response = await web_batches_bulk_retire(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        qr_ids=["QR-A", "QR-BAD", "QR-BOUND", "QR-ALREADY"],
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    # 2 succeeded (QR-A + QR-ALREADY), 2 failed (QR-BAD + QR-BOUND)
+    assert "Retired+2+of+4" in response.headers["location"]
+    assert "2+failed" in response.headers["location"]
+    assert "flash_kind=error" in response.headers["location"]
+
+
+async def test_web_batches_bulk_retire_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong csrf → HTTPException(403) before any service work."""
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from app.web.router import web_batches_bulk_retire
+
+    _set_env(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_batches_bulk_retire(
+            batch_id=uuid4(),
+            csrf="WRONG-TOKEN",
+            qr_ids=["QR-A"],
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
 # ---------- /web/devices/{id} detail + comments (Sprint 9 Task 2) -----------
 
 

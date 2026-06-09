@@ -53,6 +53,12 @@
         <table class="min-w-full divide-y divide-gray-200">
             <thead class="bg-gray-50">
                 <tr>
+                    {# Sprint 10 Task 3 — bulk select column. The
+                       checkboxes are visually inside the table but
+                       associated with `bulk-retire-form` below via the
+                       HTML5 `form=` attribute (so the row's existing
+                       inline retire form keeps working). #}
+                    <th class="px-3 py-2"><input type="checkbox" id="js-bulk-select-all" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"></th>
                     <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">QR id</th>
                     <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
                     <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Bound device</th>
@@ -64,6 +70,12 @@
             <tbody class="divide-y divide-gray-100 bg-white">
                 {% for c in codes %}
                 <tr class="hover:bg-gray-50">
+                    <td class="px-3 py-3 text-sm">
+                        {% if c.status.value == "free" %}
+                        <input type="checkbox" form="bulk-retire-form" name="qr_ids" value="{{ c.id }}"
+                               class="js-bulk-checkbox rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                        {% endif %}
+                    </td>
                     <td class="px-3 py-3 text-sm"><code class="font-mono text-gray-900">{{ c.id }}</code></td>
                     <td class="px-3 py-3 text-sm">{{ status_badge(c.status.value) }}</td>
                     <td class="px-3 py-3 text-sm text-gray-900">{{ c.bound_to_device_id or "" }}</td>
@@ -84,6 +96,17 @@
             </tbody>
         </table>
     </div>
+
+    {# Sprint 10 Task 3 — bulk retire form. Lives outside the per-row
+       inline retire forms (HTML doesn't allow nested forms); checkboxes
+       inside the table reference this form via their `form=` attribute. #}
+    <form id="bulk-retire-form" method="post" action="/web/batches/{{ batch.id }}/bulk-retire"
+          class="mt-4 flex items-center gap-3"
+          onsubmit="return confirm('Retire all selected QR codes? This cannot be undone.');">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">Retire selected</button>
+        <span id="js-bulk-count" class="text-sm text-gray-500"></span>
+    </form>
     {% else %}
     <p class="text-sm italic text-gray-500 py-6 text-center">This batch has no codes.</p>
     {% endif %}
@@ -103,5 +126,24 @@
       }
     });
   }
+
+  // Sprint 10 Task 3 — bulk-retire helpers: header select-all toggles
+  // every per-row checkbox, and the count next to the submit button
+  // gives the operator immediate feedback.
+  (function () {
+    const checkboxes = document.querySelectorAll(".js-bulk-checkbox");
+    const selectAll = document.getElementById("js-bulk-select-all");
+    const count = document.getElementById("js-bulk-count");
+    if (!selectAll || !count) return;
+    function updateCount() {
+      const n = Array.from(checkboxes).filter((cb) => cb.checked).length;
+      count.textContent = n === 0 ? "" : n + " selected";
+    }
+    selectAll.addEventListener("change", () => {
+      for (const cb of checkboxes) cb.checked = selectAll.checked;
+      updateCount();
+    });
+    for (const cb of checkboxes) cb.addEventListener("change", updateCount);
+  })();
 </script>
 {% endblock %}

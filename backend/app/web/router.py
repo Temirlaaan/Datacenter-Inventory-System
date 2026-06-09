@@ -995,6 +995,82 @@ async def _build_auth_user_for_admin_action(user: WebAdminUser) -> AuthUser:
     )
 
 
+# ---------- POST /web/batches/{batch_id}/bulk-retire (Sprint 10 Task 3) -----
+
+
+@router.post("/batches/{batch_id}/bulk-retire")
+async def web_batches_bulk_retire(
+    batch_id: UUID,
+    csrf: str = Form(alias="_csrf"),
+    qr_ids: list[str] = Form(default=[]),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Multi-select retire of FREE codes from the batch detail page.
+
+    Submits a checkbox list (`qr_ids`) to retire in one operator action.
+    Iterates calling ``QRLifecycleService.retire`` per QR — each retire
+    keeps its three-record-write atomic semantics (decision G). NOT a
+    bulk SQL UPDATE.
+
+    Aggregated flash: ``Retired N of M — K failed (see audit log)``.
+    Already-RETIRED codes (race with another tab / mobile retire) count
+    as success in the aggregate; the admin gets a consistent "done" view.
+    Empty selection → flash banner "No QR codes selected", no work.
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+
+    def _redirect(flash: str, flash_kind: str) -> RedirectResponse:
+        qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+        return RedirectResponse(
+            url=f"/web/batches/{batch_id}?{qs}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if not qr_ids:
+        return _redirect("No QR codes selected", "error")
+
+    auth_user = await _build_auth_user_for_admin_action(user)
+    lifecycle = QRLifecycleService(
+        netbox_client=get_netbox_client(),
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=AuditLogRepository(session),
+        write_service=NetBoxWriteService(
+            get_netbox_client(), session, AuditLogRepository(session)
+        ),
+    )
+
+    succeeded = 0
+    failed: list[str] = []
+    for qr_id in qr_ids:
+        try:
+            await lifecycle.retire(qr_id=qr_id, expected_version=None, user=auth_user)
+            succeeded += 1
+        except QRStateConflictError as exc:
+            # already-RETIRED → idempotent no-op; counts as success.
+            # bound-now / mid-state → real failure.
+            if exc.current_status.value == "retired":
+                succeeded += 1
+            else:
+                failed.append(qr_id)
+        except (
+            QRNotFoundError,
+            MissingVersionError,
+            QRRetireRolledBackError,
+            QRRetireInconsistencyError,
+        ):
+            failed.append(qr_id)
+
+    total = len(qr_ids)
+    if failed:
+        return _redirect(
+            f"Retired {succeeded} of {total} — {len(failed)} failed (see audit log)",
+            "error",
+        )
+    return _redirect(f"Retired {succeeded} QR codes", "info")
+
+
 # ---------- POST /web/qr/{qr_id}/retire — inline retire-QR form -------------
 
 
