@@ -26,7 +26,15 @@
 
     {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
     {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
-    <form method="get" action="/web/sessions/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
+
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+        <span class="text-xs text-gray-500 mr-1">Quick filter:</span>
+        <button type="button" data-preset="today" class="js-date-preset inline-flex items-center px-3 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Today</button>
+        <button type="button" data-preset="24h" class="js-date-preset inline-flex items-center px-3 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Last 24h</button>
+        <button type="button" data-preset="7d" class="js-date-preset inline-flex items-center px-3 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Last 7 days</button>
+    </div>
+
+    <form id="js-filter-form" method="get" action="/web/sessions/" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4 rounded-md bg-gray-50 border border-gray-200 mb-6">
         <div>
             <label class="{{ _label_cls }}" for="user_keycloak_id">User Keycloak ID</label>
             <input id="user_keycloak_id" name="user_keycloak_id" value="{{ filters.user_keycloak_id }}" placeholder="UUID" class="{{ _input_cls }}">
@@ -112,4 +120,35 @@
         </div>
     </nav>
 </section>
+
+{# Sprint 10 Task 2 — date-preset chips. Same vanilla-JS pattern as
+   /web/audit/; see that template for inline rationale. #}
+<script>
+  (function () {
+    function toDatetimeLocal(d) {
+      return d.toISOString().slice(0, 16);
+    }
+    function setPreset(preset) {
+      const now = new Date();
+      let from;
+      if (preset === "today") {
+        from = new Date(now);
+        from.setUTCHours(0, 0, 0, 0);
+      } else if (preset === "24h") {
+        from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      } else if (preset === "7d") {
+        from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      } else {
+        return;
+      }
+      const form = document.getElementById("js-filter-form");
+      form.querySelector('input[name="from"]').value = toDatetimeLocal(from);
+      form.querySelector('input[name="to"]').value = toDatetimeLocal(now);
+      form.submit();
+    }
+    for (const btn of document.querySelectorAll(".js-date-preset")) {
+      btn.addEventListener("click", () => setPreset(btn.dataset.preset));
+    }
+  })();
+</script>
 {% endblock %}

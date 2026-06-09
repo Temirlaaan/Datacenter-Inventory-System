@@ -620,6 +620,12 @@ async def test_audit_list_handler_returns_html_response_with_seeded_rows(
     body = bytes(response.body)
     assert b"DCQR-UNIT001" in body
     assert b"alice@example.com" in body
+    # Sprint 10 Task 2 — date-preset chips render with the right
+    # data-preset attributes so the inline JS can read them.
+    assert b'data-preset="today"' in body
+    assert b'data-preset="24h"' in body
+    assert b'data-preset="7d"' in body
+    assert b'id="js-filter-form"' in body
 
 
 async def test_audit_detail_handler_returns_html_response_for_existing_row(
@@ -773,6 +779,11 @@ async def test_sessions_list_handler_returns_html_response_with_rows(
     body = bytes(response.body)
     assert b"canned-tablet" in body
     assert b"alice@example.com" in body
+    # Sprint 10 Task 2 — same date-preset chips as audit/list.
+    assert b'data-preset="today"' in body
+    assert b'data-preset="24h"' in body
+    assert b'data-preset="7d"' in body
+    assert b'id="js-filter-form"' in body
 
 
 async def test_web_force_close_session_returns_303_on_success(
