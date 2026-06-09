@@ -27,6 +27,7 @@ from app.db.session import get_sessionmaker
 from app.netbox.client import get_netbox_circuit_state
 
 _BACKUP_MARKER_DEFAULT = "/var/lib/dcinv-backups/last-success-marker"
+_RESTORE_VALIDATE_MARKER_DEFAULT = "/var/lib/dcinv-backups/last-restore-validate"
 
 _PER_CHECK_TIMEOUT_SECONDS = 2.0
 
@@ -136,6 +137,45 @@ def _backups_sub_object() -> dict[str, object]:
     }
 
 
+def _restore_validation_sub_object() -> dict[str, object]:
+    """Build the ``restore_validation`` /health sub-object (Sprint 10 Task 0
+    decision C).
+
+    Mirrors :func:`_backups_sub_object` exactly — reads the mtime of a
+    marker file that ``scripts/restore_validate.sh`` touches on a
+    successful ephemeral-postgres restore. Same three return shapes:
+
+    - ``configured: False`` — the marker env var is unset, so no
+      restore-validation cron is wired up yet.
+    - ``configured: True`` + ``last_completed_at: None`` — set up but
+      the cron either hasn't run yet or every attempt has failed.
+    - ``configured: True`` + ``last_completed_at: <iso>`` + ``age_seconds`` —
+      most recent successful run was N seconds ago.
+
+    INFORMATIONAL ONLY (decision C, mirrors decision J from backups +
+    auto_end_job + netbox_circuit). Stale restore-validation does NOT
+    flip ``/health`` overall status. External monitors alert when
+    ``age_seconds > 8 days`` (anything over 1 week running weekly means
+    the last attempt failed).
+    """
+    marker_path = os.environ.get(
+        "DCINV_RESTORE_MARKER_PATH", _RESTORE_VALIDATE_MARKER_DEFAULT
+    )
+    if not marker_path:
+        return {"configured": False}
+    try:
+        mtime = os.path.getmtime(marker_path)
+    except OSError:
+        return {"configured": True, "last_completed_at": None, "age_seconds": None}
+    last_at = datetime.fromtimestamp(mtime, tz=UTC)
+    age = (datetime.now(UTC) - last_at).total_seconds()
+    return {
+        "configured": True,
+        "last_completed_at": last_at.isoformat(),
+        "age_seconds": int(age),
+    }
+
+
 def _auto_end_job_sub_object(request: Request) -> dict[str, object]:
     """Build the ``auto_end_job`` /health sub-object (Sprint 7 Task 1 decision A).
 
@@ -188,4 +228,5 @@ async def health(request: Request, response: Response) -> dict[str, object]:
         "auto_end_job": _auto_end_job_sub_object(request),
         "netbox_circuit": get_netbox_circuit_state(),
         "backups": _backups_sub_object(),
+        "restore_validation": _restore_validation_sub_object(),
     }

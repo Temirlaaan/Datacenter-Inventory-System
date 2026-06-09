@@ -61,3 +61,40 @@ def test_backups_sub_object_returns_age_from_marker_mtime(
     age = result["age_seconds"]
     assert isinstance(age, int)
     assert 3590 <= age <= 3700
+
+
+# ---------- restore_validation sub-object (Sprint 10 Task 0) ----------------
+
+
+def test_restore_validation_sub_object_returns_configured_false_when_marker_path_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty ``DCINV_RESTORE_MARKER_PATH`` → ``configured: False``."""
+    monkeypatch.setenv("DCINV_RESTORE_MARKER_PATH", "")
+    from app.api.v1.health import _restore_validation_sub_object
+
+    assert _restore_validation_sub_object() == {"configured": False}
+
+
+def test_restore_validation_sub_object_returns_age_from_marker_mtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Marker present → ISO timestamp + age_seconds. Same shape as the
+    backups sub-object — operators can grep on one field name across
+    both."""
+    marker = tmp_path / "last-restore-validate"
+    marker.write_text("")
+    # 6 days ago — well under the recommended 8-day alert threshold.
+    past = time.time() - 6 * 24 * 3600
+    os.utime(marker, (past, past))
+
+    monkeypatch.setenv("DCINV_RESTORE_MARKER_PATH", str(marker))
+    from app.api.v1.health import _restore_validation_sub_object
+
+    result = _restore_validation_sub_object()
+    assert result["configured"] is True
+    assert isinstance(result["last_completed_at"], str)
+    age = result["age_seconds"]
+    assert isinstance(age, int)
+    # 6 days ± a few seconds for test-scheduling jitter.
+    assert 6 * 24 * 3600 - 10 <= age <= 6 * 24 * 3600 + 60
