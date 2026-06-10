@@ -94,6 +94,13 @@
     if (!tbody || !status) return;
 
     const baseWatermark = {{ highest_audit_id|default(0) }};
+    // Dedupe set: EventSource auto-reconnects on TCP blips with the same
+    // URL → server replays anything since baseWatermark, including rows
+    // we've already rendered. Track ids client-side so re-arrivals are
+    // dropped silently. Memory bound: one int per audit row seen in
+    // session — millions of rows = a few MB, well within budget for an
+    // admin tab.
+    const seenIds = new Set();
     const stream = new EventSource("/web/dashboard/stream?last_id=" + baseWatermark);
 
     function setStatus(text, color) {
@@ -169,7 +176,10 @@
     stream.addEventListener("error", () => setStatus("reconnecting&hellip;", "bg-amber-400"));
     stream.addEventListener("audit", (event) => {
       try {
-        prependRow(JSON.parse(event.data));
+        const row = JSON.parse(event.data);
+        if (seenIds.has(row.id)) return;  // reconnect replay — drop
+        seenIds.add(row.id);
+        prependRow(row);
       } catch (_) { /* malformed payload — drop silently */ }
     });
     // `ping` events are heartbeats; no UI action.

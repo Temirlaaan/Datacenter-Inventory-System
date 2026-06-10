@@ -375,12 +375,25 @@ async def dashboard(
 _SSE_TICK_INTERVAL_SECONDS = 5.0
 _SSE_HEARTBEAT_EVERY_TICKS = 3  # 15s — beats nginx's default 60s idle timeout
 _SSE_PAGE_SIZE = 20
+# Cap pages walked per tick so a runaway burst (or an attacker mass-
+# triggering audit rows) can't make one tick allocate unbounded memory.
+# 10 pages * 20 = 200 rows per tick is way above any realistic admin-action burst.
+_SSE_MAX_PAGES_PER_TICK = 10
+# On a tick that raised, back off proportionally so a sustained DB outage
+# doesn't spam logs at 5s cadence.
+_SSE_ERROR_BACKOFF_SECONDS = 30.0
 
 
 def _format_sse_event(*, event: str, data: str) -> bytes:
-    """Serialise one SSE message. ``data:`` lines must be \\n-prefixed each;
-    the trailing blank line terminates the event per spec."""
-    return f"event: {event}\ndata: {data}\n\n".encode()
+    """Serialise one SSE message.
+
+    SSE spec: each newline in the payload must start a fresh ``data:``
+    line, and a single blank line terminates the event. Single-line JSON
+    means we don't normally hit this, but defensive split-and-rejoin so a
+    future field with an embedded ``\\n`` doesn't corrupt the frame.
+    """
+    data_lines = "\n".join(f"data: {part}" for part in data.split("\n"))
+    return f"event: {event}\n{data_lines}\n\n".encode()
 
 
 def _activity_row_to_json(row: AuditLogEntry) -> dict[str, object]:
@@ -403,26 +416,42 @@ async def _dashboard_stream_generator(
     last_seen_id: int,
 ) -> AsyncIterator[bytes]:
     """Yield SSE bytes: ``audit`` events for new rows, ``ping`` heartbeats
-    every ``_SSE_HEARTBEAT_EVERY_TICKS`` ticks."""
+    every ``_SSE_HEARTBEAT_EVERY_TICKS`` ticks.
+
+    Each tick paginates from page 1 until a page contains a row at-or-below
+    ``watermark`` or the page cap is hit (``_SSE_MAX_PAGES_PER_TICK``).
+    This catches bursts larger than a single ``_SSE_PAGE_SIZE`` page (e.g.
+    bulk-decommissioning 50 devices generates ~50 audit rows inside one
+    5s tick window) without unbounded memory.
+
+    DB / network errors are caught per-tick: the generator logs and backs
+    off ``_SSE_ERROR_BACKOFF_SECONDS`` rather than unwinding and forcing
+    EventSource to reconnect (which produces 5xx noise on sustained
+    outages).
+    """
     import json
 
     tick = 0
     watermark = last_seen_id
     while True:
-        async with sessionmaker() as db:
-            rows, _ = await AuditLogRepository(db).query(
-                filters=AuditLogQueryFilters(),
-                page=1,
-                page_size=_SSE_PAGE_SIZE,
+        try:
+            new_rows = await _collect_new_audit_rows(sessionmaker, watermark)
+        except Exception as exc:
+            logger.warning(
+                "dashboard_stream_tick_failed",
+                error=type(exc).__name__,
+                watermark=watermark,
             )
-        new_rows = [r for r in rows if r.id is not None and r.id > watermark]
-        # Emit oldest-first so the client can prepend in order — query
-        # returned newest-first, so reverse.
+            await asyncio.sleep(_SSE_ERROR_BACKOFF_SECONDS)
+            continue
+
+        # Emit oldest-first so the client can prepend in order — pages
+        # returned newest-first, so reverse the accumulated list.
         for row in reversed(new_rows):
             yield _format_sse_event(
                 event="audit", data=json.dumps(_activity_row_to_json(row))
             )
-            assert row.id is not None  # narrowed above; quiets mypy
+            assert row.id is not None  # narrowed by the collector; quiets mypy
             watermark = row.id
 
         tick += 1
@@ -430,6 +459,35 @@ async def _dashboard_stream_generator(
             yield _format_sse_event(event="ping", data="")
 
         await asyncio.sleep(_SSE_TICK_INTERVAL_SECONDS)
+
+
+async def _collect_new_audit_rows(
+    sessionmaker: async_sessionmaker[AsyncSession], watermark: int
+) -> list[AuditLogEntry]:
+    """Page through ``audit_log`` newest-first, collecting rows with
+    ``id > watermark``. Stops at the first page containing a row at-or-below
+    the watermark (we've covered every new row) or at the page cap."""
+    async with sessionmaker() as db:
+        repo = AuditLogRepository(db)
+        accumulated: list[AuditLogEntry] = []
+        for page in range(1, _SSE_MAX_PAGES_PER_TICK + 1):
+            rows, has_more = await repo.query(
+                filters=AuditLogQueryFilters(),
+                page=page,
+                page_size=_SSE_PAGE_SIZE,
+            )
+            if not rows:
+                break
+            new_on_page = [
+                r for r in rows if r.id is not None and r.id > watermark
+            ]
+            accumulated.extend(new_on_page)
+            # Page held some row at-or-below watermark → we've seen everything new.
+            if len(new_on_page) < len(rows):
+                break
+            if not has_more:
+                break
+        return accumulated
 
 
 @router.get("/dashboard/stream")
@@ -1433,19 +1491,36 @@ async def web_devices_bulk_decommission(
     rather than silently-success — the admin should know which ids were
     no-ops, since the audit log won't have a row for them.
 
+    Asymmetry vs bulk retire (which counts already-RETIRED as success): an
+    already-RETIRED QR is a "clean" idempotent no-op (the QR's terminal
+    state matches the requested action). An already-decommissioned device
+    raises ``QRStateConflictError`` because its bound QR is by then in
+    some inconsistent intermediate state — that's a real signal worth
+    surfacing, not a no-op.
+
     ``return_to`` lets the search page round-trip its filter querystring so
     the admin lands back on the same result set. Defaults to the bare search
     URL when the form omits it (curl / hand-rolled POST).
     """
     verify_csrf_token(csrf, user.csrf_token)
 
+    # Defense-in-depth: validate ``return_to`` is an internal search URL.
+    # CSRF + uvicorn header sanitisation already guard against the obvious
+    # open-redirect / CRLF-injection attacks, but the one-line allow-list
+    # closes the chain in case any future CSRF bypass surfaces.
+    safe_return_to = (
+        return_to
+        if return_to.startswith("/web/devices/")
+        else "/web/devices/search"
+    )
+
     def _redirect(flash: str, flash_kind: str) -> RedirectResponse:
-        # Append flash to return_to. return_to may already have a `?` from
+        # Append flash to safe_return_to. The URL may already have a `?` from
         # the round-tripped filter qs; in that case use `&`.
-        sep = "&" if "?" in return_to else "?"
+        sep = "&" if "?" in safe_return_to else "?"
         qs = urlencode({"flash": flash, "flash_kind": flash_kind})
         return RedirectResponse(
-            url=f"{return_to}{sep}{qs}",
+            url=f"{safe_return_to}{sep}{qs}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 

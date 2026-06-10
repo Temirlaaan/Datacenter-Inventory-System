@@ -569,6 +569,148 @@ async def test_dashboard_stream_endpoint_returns_event_stream_response(
     assert response.headers["x-accel-buffering"] == "no"
 
 
+async def test_dashboard_stream_generator_paginates_through_burst_above_page_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If 25 audit rows landed since last_seen_id, the generator must walk
+    page 2 — emitting 20 from page 1 alone would silently drop rows 21-25."""
+    _set_env(monkeypatch)
+    import json
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+    from app.web.router import _dashboard_stream_generator
+
+    # 25 new rows newest-first, ids 600..576. Watermark 575 → all new.
+    page1 = [
+        AuditLogEntry(
+            request_id=UUID("11111111-1111-1111-1111-111111111111"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 0, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="qr.bind", entity_type="qr", entity_id=f"QR-{i}",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS,
+            id=600 - i,
+        )
+        for i in range(20)
+    ]
+    page2 = [
+        AuditLogEntry(
+            request_id=UUID("22222222-2222-2222-2222-222222222222"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 0, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="qr.bind", entity_type="qr", entity_id=f"QR-{i + 20}",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS,
+            id=580 - i,
+        )
+        for i in range(5)
+    ]
+
+    class _FakeAuditRepo:
+        def __init__(self, _db: object) -> None: ...
+
+        async def query(
+            self, *, filters: object, page: int, page_size: int
+        ) -> tuple[list[Any], bool]:
+            _ = filters, page_size
+            if page == 1:
+                return page1, True
+            if page == 2:
+                return page2, False
+            return [], False
+
+    class _FakeSessionCtx:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+    def _fake_sessionmaker() -> _FakeSessionCtx:
+        return _FakeSessionCtx()
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+
+    gen = _dashboard_stream_generator(
+        sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
+        last_seen_id=575,
+    )
+    # Pull 25 events; the 25th must be the newest (id 600).
+    payloads: list[dict[str, Any]] = []
+    for _ in range(25):
+        event = await anext(gen)
+        payload = json.loads(event.split(b"data: ", 1)[1].rstrip(b"\n\n"))
+        payloads.append(payload)
+
+    ids = [p["id"] for p in payloads]
+    # Oldest-first emission of all 25 rows across both pages.
+    assert ids == list(range(576, 601))
+
+
+async def test_dashboard_stream_generator_logs_and_backs_off_on_tick_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB error inside ``_collect_new_audit_rows`` must not unwind the
+    generator. It logs ``dashboard_stream_tick_failed`` and sleeps the
+    error-backoff window, then continues."""
+    _set_env(monkeypatch)
+    import asyncio as _asyncio
+
+    from app.web.router import _dashboard_stream_generator
+
+    # Capture the REAL sleep before monkey-patching so the recorder can yield
+    # control back to the event loop. Without that yield the generator's
+    # tight retry loop starves wait_for's timeout task.
+    real_sleep = _asyncio.sleep
+    sleeps: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)  # let other tasks (wait_for timer) run
+
+    async def _failing_collector(
+        _sessionmaker: object, _watermark: int
+    ) -> list[Any]:
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr("app.web.router._collect_new_audit_rows", _failing_collector)
+    monkeypatch.setattr("app.web.router.asyncio.sleep", _record_sleep)
+
+    gen = _dashboard_stream_generator(
+        sessionmaker=object(),  # type: ignore[arg-type]
+        last_seen_id=0,
+    )
+    # Failing collector → generator never yields a value. wait_for hits
+    # timeout, but by then sleep was recorded with the back-off duration.
+    with pytest.raises(_asyncio.TimeoutError):
+        await _asyncio.wait_for(anext(gen), timeout=0.3)
+    await gen.aclose()  # type: ignore[attr-defined]  # AsyncIterator return — actually an async generator
+    # First recorded sleep is the error-backoff window (30s).
+    assert sleeps and sleeps[0] == pytest.approx(30.0)
+
+
+async def test_bulk_decommission_rejects_external_return_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth: a ``return_to`` that doesn't start with
+    ``/web/devices/`` falls back to the bare search URL, blocking the
+    open-redirect / CRLF-injection chain."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    response = await web_devices_bulk_decommission(
+        csrf="test-csrf-token",
+        device_ids=[],  # short-circuits before any DB work
+        reason="x",
+        return_to="https://evil.example.com/phish",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    # Location must be the safe default, NOT the attacker-supplied URL.
+    assert response.headers["location"].startswith("/web/devices/search?")
+    assert "evil.example.com" not in response.headers["location"]
+
+
 # ---------- batches list + detail handlers: direct-await returns ------------
 
 
