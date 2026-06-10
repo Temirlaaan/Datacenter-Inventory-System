@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -348,7 +349,117 @@ async def dashboard(
             "user_email": user.email,
             "snapshot": snap,
             "activity_rows": activity_rows,
+            # Highest id rendered server-side — the SSE stream uses this
+            # as the starting watermark so the first delivered event is
+            # something the client doesn't already have in the feed.
+            "highest_audit_id": (
+                max((r.id for r in activity_rows if r.id is not None), default=0)
+            ),
         },
+    )
+
+
+# ---------- GET /web/dashboard/stream — SSE activity feed (2026-06-10) ------
+#
+# Push new audit_log rows to the dashboard so the operator doesn't have to F5.
+# Mechanism: poll-and-push at 5s cadence; each tick queries the last 20 rows,
+# emits those with id > last_sent_id. PG LISTEN/NOTIFY would be tighter but
+# needs a DB trigger + long-lived asyncpg connection per client; polling is
+# multi-replica safe with zero schema change. Swap is internal-only if/when
+# we want true realtime.
+#
+# The endpoint is cookie-auth (require_web_admin) and /web/* is already in
+# the rate-limit UNLIMITED prefix list, so long-lived connections don't
+# burn a per-minute budget.
+
+_SSE_TICK_INTERVAL_SECONDS = 5.0
+_SSE_HEARTBEAT_EVERY_TICKS = 3  # 15s — beats nginx's default 60s idle timeout
+_SSE_PAGE_SIZE = 20
+
+
+def _format_sse_event(*, event: str, data: str) -> bytes:
+    """Serialise one SSE message. ``data:`` lines must be \\n-prefixed each;
+    the trailing blank line terminates the event per spec."""
+    return f"event: {event}\ndata: {data}\n\n".encode()
+
+
+def _activity_row_to_json(row: AuditLogEntry) -> dict[str, object]:
+    """Serialise one audit row for the SSE payload — same shape the dashboard
+    template renders, minus the JSONB diffs (kept compact for the stream)."""
+    return {
+        "id": row.id,
+        "timestamp": row.timestamp.isoformat(),
+        "user_email": row.user_email,
+        "operation": row.operation,
+        "entity_type": row.entity_type,
+        "entity_id": row.entity_id,
+        "result": row.result.value,
+    }
+
+
+async def _dashboard_stream_generator(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    last_seen_id: int,
+) -> AsyncIterator[bytes]:
+    """Yield SSE bytes: ``audit`` events for new rows, ``ping`` heartbeats
+    every ``_SSE_HEARTBEAT_EVERY_TICKS`` ticks."""
+    import json
+
+    tick = 0
+    watermark = last_seen_id
+    while True:
+        async with sessionmaker() as db:
+            rows, _ = await AuditLogRepository(db).query(
+                filters=AuditLogQueryFilters(),
+                page=1,
+                page_size=_SSE_PAGE_SIZE,
+            )
+        new_rows = [r for r in rows if r.id is not None and r.id > watermark]
+        # Emit oldest-first so the client can prepend in order — query
+        # returned newest-first, so reverse.
+        for row in reversed(new_rows):
+            yield _format_sse_event(
+                event="audit", data=json.dumps(_activity_row_to_json(row))
+            )
+            assert row.id is not None  # narrowed above; quiets mypy
+            watermark = row.id
+
+        tick += 1
+        if tick % _SSE_HEARTBEAT_EVERY_TICKS == 0:
+            yield _format_sse_event(event="ping", data="")
+
+        await asyncio.sleep(_SSE_TICK_INTERVAL_SECONDS)
+
+
+@router.get("/dashboard/stream")
+async def dashboard_stream(
+    last_event_id: int = Query(default=0, ge=0, alias="last_id"),
+    user: WebAdminUser = Depends(require_web_admin),
+) -> StreamingResponse:
+    """``text/event-stream`` of new audit_log rows for the dashboard feed.
+
+    ``last_id`` query param (set by the template from the highest id of the
+    server-rendered feed) prevents re-delivering rows the user already sees.
+    The browser's native ``Last-Event-ID`` reconnect header is not honoured
+    here — too easy to confuse with the dashboard's server-side watermark;
+    use the explicit query param.
+    """
+    _ = user  # role-gating side-effect only
+    headers = {
+        # Disable buffering everywhere — nginx default buffers SSE into 4k
+        # chunks which destroys the realtime UX.
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Content-Type": "text/event-stream",
+    }
+    return StreamingResponse(
+        _dashboard_stream_generator(
+            sessionmaker=get_sessionmaker(),
+            last_seen_id=last_event_id,
+        ),
+        media_type="text/event-stream",
+        headers=headers,
     )
 
 
@@ -1290,6 +1401,118 @@ async def web_devices_decommission(
     )
 
 
+# ---------- POST /web/devices/bulk-decommission (2026-06-10) -----------------
+#
+# Mirror of /web/batches/{id}/bulk-retire. Multi-select on the device search
+# results page lets admin decommission a rack of servers in one click. Each
+# device is decommissioned via a separate ``DeviceDecommissionService.decommission``
+# call — three-record-write atomic semantics preserved per device. NOT a
+# bulk PATCH (would lose journal entries + audit rows per device + QR-retire
+# compensation).
+
+
+@router.post("/devices/bulk-decommission")
+async def web_devices_bulk_decommission(
+    csrf: str = Form(alias="_csrf"),
+    device_ids: list[int] = Form(default=[]),
+    reason: str = Form(min_length=1, max_length=2000),
+    return_to: str = Form(default="/web/devices/search"),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Decommission a list of devices with one shared ``reason``.
+
+    Iterates per-id: fetch device → call ``DeviceDecommissionService.decommission``
+    with the device's own ``last_updated`` as the OCC version. Each call is
+    independent — a 409 on device #3 doesn't roll back the successful first
+    two. Aggregated flash: ``Decommissioned N of M — K failed (see audit log)``.
+
+    Already-decommissioned devices: NetBox will refuse the status PATCH (the
+    decommissioned status is idempotent on the data side, but the service
+    raises if the QR-bound state doesn't match). We count those as failed
+    rather than silently-success — the admin should know which ids were
+    no-ops, since the audit log won't have a row for them.
+
+    ``return_to`` lets the search page round-trip its filter querystring so
+    the admin lands back on the same result set. Defaults to the bare search
+    URL when the form omits it (curl / hand-rolled POST).
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+
+    def _redirect(flash: str, flash_kind: str) -> RedirectResponse:
+        # Append flash to return_to. return_to may already have a `?` from
+        # the round-tripped filter qs; in that case use `&`.
+        sep = "&" if "?" in return_to else "?"
+        qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+        return RedirectResponse(
+            url=f"{return_to}{sep}{qs}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if not device_ids:
+        return _redirect("No devices selected", "error")
+
+    auth_user = await _build_auth_user_for_admin_action(user)
+    netbox = get_netbox_client()
+    device_service = DeviceService(netbox)
+    succeeded = 0
+    failed: list[int] = []
+
+    for device_id in device_ids:
+        try:
+            current = await device_service.get_device(device_id)
+        except NetBoxNotFound:
+            failed.append(device_id)
+            continue
+
+        # New repos / write_service per iteration: each decommission opens
+        # its own session.begin() and we don't want shared state across
+        # rows. Cheap — these are thin objects, no I/O at construction.
+        audit_repo = AuditLogRepository(session)
+        qr_code_repo = QRCodeRepository(session)
+        write_service = NetBoxWriteService(netbox, session, audit_repo)
+        lifecycle_service = QRLifecycleService(
+            netbox_client=netbox,
+            session=session,
+            qr_code_repo=qr_code_repo,
+            audit_log_repo=audit_repo,
+            write_service=write_service,
+        )
+        decom_service = DeviceDecommissionService(
+            netbox_client=netbox,
+            session=session,
+            qr_code_repo=qr_code_repo,
+            write_service=write_service,
+            lifecycle_service=lifecycle_service,
+        )
+        try:
+            await decom_service.decommission(
+                device_id=device_id,
+                expected_version=current.version,
+                reason=reason,
+                user=auth_user,
+            )
+            succeeded += 1
+        except (
+            NetBoxNotFound,
+            WriteConflictError,
+            QRStateConflictError,
+            QRRetireRolledBackError,
+            DeviceDecommissionRolledBackError,
+            DeviceDecommissionInconsistencyError,
+        ):
+            failed.append(device_id)
+
+    total = len(device_ids)
+    if failed:
+        return _redirect(
+            f"Decommissioned {succeeded} of {total} — {len(failed)} failed "
+            "(see audit log)",
+            "error",
+        )
+    return _redirect(f"Decommissioned {succeeded} devices", "info")
+
+
 # ---------- /web/devices/search + /web/devices/{id} (Sprint 9 Task 2) -------
 #
 # IMPORTANT: declared BEFORE /devices/{device_id} so FastAPI's order-based
@@ -1308,11 +1531,17 @@ async def web_devices_search(
     site_id: int | None = Query(default=None, ge=1, alias="site"),
     rack_id: int | None = Query(default=None, ge=1, alias="rack"),
     page: int = Query(default=1, ge=1),
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
     user: WebAdminUser = Depends(require_web_admin),
 ) -> HTMLResponse:
     """Search NetBox devices via the same API the mobile app uses (Sprint
     9 Task 1). Filter form at the top; results table below when any
-    filter is set. Read-only; no audit row."""
+    filter is set. Read-only; no audit row.
+
+    ``flash`` / ``flash_kind`` surface the bulk-decommission redirect
+    banner so the admin sees aggregated success/failure right where they
+    selected the rows."""
     service = DeviceService(get_netbox_client())
     submitted = any(
         v is not None and v != ""
@@ -1354,6 +1583,8 @@ async def web_devices_search(
             "has_prev": page > 1,
             "page": page,
             "error": error,
+            "flash": flash,
+            "flash_kind": flash_kind,
             "csrf_token": user.csrf_token,
         },
     )

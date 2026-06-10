@@ -3,7 +3,15 @@
 {% block content %}
 <section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
     <h1 class="text-2xl font-semibold text-gray-900 mb-1">Device search</h1>
-    <p class="text-sm text-gray-500 mb-6">Find a device by name / asset-tag / serial / site / rack. Click a row to see its detail page (with comments form + audit history).</p>
+    <p class="text-sm text-gray-500 mb-6">Find a device by name / asset-tag / serial / site / rack. Click a row to see its detail page (with comments form + audit history). Use the checkboxes to bulk-decommission a rack of servers in one action.</p>
+
+    {% if flash %}
+    <div class="mb-6 rounded-md border px-4 py-3 text-sm
+        {% if flash_kind == 'error' %}border-rose-200 bg-rose-50 text-rose-800
+        {% else %}border-emerald-200 bg-emerald-50 text-emerald-800{% endif %}">
+        {{ flash }}
+    </div>
+    {% endif %}
 
     {% set _input_cls = "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500" %}
     {% set _label_cls = "block text-xs font-medium uppercase tracking-wider text-gray-500 mb-1" %}
@@ -39,10 +47,19 @@
 
     {% if submitted and not error %}
         {% if results %}
+        {# Round-trip the current filter qs back to the bulk handler so its
+           303 redirect lands the admin on the same result set. Also used
+           for the prev/next pagination links below. #}
+        {% set _filter_qs %}name={{ filters.name }}&asset_tag={{ filters.asset_tag }}&serial={{ filters.serial }}&site={{ filters.site_id }}&rack={{ filters.rack_id }}&page={{ page }}{% endset %}
         <div class="overflow-x-auto -mx-6 sm:mx-0">
             <table class="min-w-full divide-y divide-gray-200">
                 <thead class="bg-gray-50">
                     <tr>
+                        {# Bulk-select column — checkboxes are associated
+                           with the bulk-decommission form below via the
+                           HTML5 `form=` attribute (so the row's link to
+                           the detail page keeps working). #}
+                        <th class="px-3 py-2"><input type="checkbox" id="js-bulk-select-all" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"></th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Id</th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Name</th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
@@ -54,6 +71,10 @@
                 <tbody class="divide-y divide-gray-100 bg-white">
                     {% for d in results %}
                     <tr class="hover:bg-gray-50">
+                        <td class="px-3 py-3 text-sm">
+                            <input type="checkbox" form="bulk-decommission-form" name="device_ids" value="{{ d.data.id }}"
+                                   class="js-bulk-checkbox rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                        </td>
                         <td class="px-3 py-3 text-sm"><a class="text-indigo-600 hover:text-indigo-500 font-medium" href="/web/devices/{{ d.data.id }}">{{ d.data.id }}</a></td>
                         <td class="px-3 py-3 text-sm text-gray-900">{{ d.data.name or "—" }}</td>
                         <td class="px-3 py-3 text-sm text-gray-900">{{ d.data.status.label if d.data.status else "—" }}</td>
@@ -65,24 +86,63 @@
                 </tbody>
             </table>
         </div>
+
+        {# Bulk decommission form. Lives outside the table (HTML disallows
+           nested forms); checkboxes inside the table reference it via the
+           `form=` attribute. Reason is required (mirrors the per-device
+           contract) — empty submit fails server-side validation. #}
+        <form id="bulk-decommission-form" method="post" action="/web/devices/bulk-decommission"
+              class="mt-4 p-4 rounded-md bg-gray-50 border border-gray-200"
+              onsubmit="return confirm('Decommission all selected devices? This will retire their bound QR codes too and cannot be undone.');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="return_to" value="/web/devices/search?{{ _filter_qs }}">
+            <label for="bulk-reason" class="{{ _label_cls }}">Reason (applied to every selected device)</label>
+            <textarea id="bulk-reason" name="reason" required minlength="1" maxlength="2000" rows="2"
+                      placeholder="Rack R-12 decommissioned; hardware EOL'd"
+                      class="{{ _input_cls }} mb-3"></textarea>
+            <div class="flex items-center gap-3">
+                <button type="submit" class="inline-flex items-center px-4 py-2 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium shadow-sm">Decommission selected</button>
+                <span id="js-bulk-count" class="text-sm text-gray-500"></span>
+            </div>
+        </form>
         {% else %}
         <p class="text-sm italic text-gray-500 py-6 text-center">No devices match these filters.</p>
         {% endif %}
 
-        {% set _filter_qs %}name={{ filters.name }}&asset_tag={{ filters.asset_tag }}&serial={{ filters.serial }}&site={{ filters.site_id }}&rack={{ filters.rack_id }}{% endset %}
+        {% set _pagination_qs %}name={{ filters.name }}&asset_tag={{ filters.asset_tag }}&serial={{ filters.serial }}&site={{ filters.site_id }}&rack={{ filters.rack_id }}{% endset %}
         <nav class="mt-6 flex items-center justify-between gap-4 text-sm">
             <div>
                 {% if has_prev %}
-                <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/devices/search?{{ _filter_qs }}&page={{ page - 1 }}">&laquo; Prev</a>
+                <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/devices/search?{{ _pagination_qs }}&page={{ page - 1 }}">&laquo; Prev</a>
                 {% endif %}
             </div>
             <span class="text-gray-500">Page {{ page }}</span>
             <div>
                 {% if has_more %}
-                <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/devices/search?{{ _filter_qs }}&page={{ page + 1 }}">Next &raquo;</a>
+                <a class="px-3 py-1.5 rounded-md border border-gray-200 text-indigo-600 hover:bg-gray-50" href="/web/devices/search?{{ _pagination_qs }}&page={{ page + 1 }}">Next &raquo;</a>
                 {% endif %}
             </div>
         </nav>
     {% endif %}
 </section>
+
+<script>
+  // Bulk-select helpers: header select-all toggles every row checkbox,
+  // count next to the submit button gives operator immediate feedback.
+  (function () {
+    const checkboxes = document.querySelectorAll(".js-bulk-checkbox");
+    const selectAll = document.getElementById("js-bulk-select-all");
+    const count = document.getElementById("js-bulk-count");
+    if (!selectAll || !count) return;
+    function updateCount() {
+      const n = Array.from(checkboxes).filter((cb) => cb.checked).length;
+      count.textContent = n === 0 ? "" : n + " selected";
+    }
+    selectAll.addEventListener("change", () => {
+      for (const cb of checkboxes) cb.checked = selectAll.checked;
+      updateCount();
+    });
+    for (const cb of checkboxes) cb.addEventListener("change", updateCount);
+  })();
+</script>
 {% endblock %}

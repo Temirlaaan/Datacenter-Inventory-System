@@ -51,6 +51,7 @@ from app.web.router import (
     web_batches_create,
     web_batches_labels_pdf,
     web_devices_add_comment,
+    web_devices_bulk_decommission,
     web_devices_decommission,
     web_devices_detail,
     web_devices_search,
@@ -63,6 +64,12 @@ from app.web.router import (
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
 _FERNET_KEY = "VAMsIWGaHXesGIhCmHI6GQsRNdLwMuZA3Aw95EO1JBo="
+
+
+async def _noop_sleep(_seconds: float) -> None:
+    """Replacement for ``asyncio.sleep`` in SSE generator tests — without it
+    each ``anext()`` would block for the real 5s tick interval."""
+    return None
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,6 +410,163 @@ async def test_dashboard_handler_renders_activity_feed_with_audit_rows(
     assert b'href="/web/audit/102"' in body
     # Conflict result badge text.
     assert b"conflict" in body
+
+
+# ---------- SSE dashboard stream (2026-06-10) -------------------------------
+
+
+async def test_dashboard_stream_generator_emits_new_rows_oldest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One tick: repo returns three new rows (newest-first); the generator
+    must emit them as ``audit`` SSE events in oldest-first order so the
+    client can prepend in correct chronological sequence."""
+    _set_env(monkeypatch)
+    import json
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+    from app.web.router import _dashboard_stream_generator
+
+    rows = [
+        AuditLogEntry(
+            request_id=UUID("11111111-1111-1111-1111-111111111111"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 30, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="qr.bind", entity_type="qr", entity_id="QR-3",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS, id=503,
+        ),
+        AuditLogEntry(
+            request_id=UUID("22222222-2222-2222-2222-222222222222"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 20, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="qr.bind", entity_type="qr", entity_id="QR-2",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS, id=502,
+        ),
+        AuditLogEntry(
+            request_id=UUID("33333333-3333-3333-3333-333333333333"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 10, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="qr.bind", entity_type="qr", entity_id="QR-1",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS, id=501,
+        ),
+    ]
+
+    class _FakeAuditRepo:
+        def __init__(self, _db: object) -> None: ...
+
+        async def query(self, **_kw: object) -> tuple[list[Any], bool]:
+            return rows, False
+
+    class _FakeSessionCtx:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+    def _fake_sessionmaker() -> _FakeSessionCtx:  # async_sessionmaker call shape
+        return _FakeSessionCtx()
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    # Skip the 5s sleep between ticks; we'll stop after consuming N events.
+    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+
+    gen = _dashboard_stream_generator(
+        sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
+        last_seen_id=500,  # all three rows are new
+    )
+    # Three audit events from this tick, then the generator hits sleep.
+    e1 = await anext(gen)
+    e2 = await anext(gen)
+    e3 = await anext(gen)
+
+    assert e1.startswith(b"event: audit\n")
+    payload1 = json.loads(e1.split(b"data: ", 1)[1].rstrip(b"\n\n"))
+    payload2 = json.loads(e2.split(b"data: ", 1)[1].rstrip(b"\n\n"))
+    payload3 = json.loads(e3.split(b"data: ", 1)[1].rstrip(b"\n\n"))
+    # Oldest first.
+    assert [payload1["id"], payload2["id"], payload3["id"]] == [501, 502, 503]
+    assert payload1["operation"] == "qr.bind"
+    assert payload1["result"] == "success"
+
+
+async def test_dashboard_stream_generator_skips_rows_at_or_below_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``last_seen_id=502`` — only row 503 is newer; row 501/502 must be
+    filtered out. After the single audit event the generator emits the
+    heartbeat after 3 ticks."""
+    _set_env(monkeypatch)
+    import json
+
+    from app.domain.audit import AuditLogEntry, AuditResult
+    from app.web.router import _dashboard_stream_generator
+
+    rows = [
+        AuditLogEntry(
+            request_id=UUID("11111111-1111-1111-1111-111111111111"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 30, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="device.update", entity_type="device", entity_id="42",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS, id=503,
+        ),
+        AuditLogEntry(
+            request_id=UUID("22222222-2222-2222-2222-222222222222"),
+            timestamp=datetime(2026, 6, 10, 9, 0, 20, tzinfo=UTC),
+            user_email="a@x", user_keycloak_id=_USER_SUB, session_id=None,
+            operation="device.update", entity_type="device", entity_id="41",
+            before_json={}, after_json={}, result=AuditResult.SUCCESS, id=502,
+        ),
+    ]
+
+    class _FakeAuditRepo:
+        def __init__(self, _db: object) -> None: ...
+
+        async def query(self, **_kw: object) -> tuple[list[Any], bool]:
+            return rows, False
+
+    class _FakeSessionCtx:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+    def _fake_sessionmaker() -> _FakeSessionCtx:
+        return _FakeSessionCtx()
+
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+
+    gen = _dashboard_stream_generator(
+        sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
+        last_seen_id=502,
+    )
+    first = await anext(gen)
+    payload = json.loads(first.split(b"data: ", 1)[1].rstrip(b"\n\n"))
+    assert payload["id"] == 503
+    # Tick 1 done with one event; ticks 2 + 3 emit nothing, tick 3 emits ping.
+    # After tick 1 the next yield is at tick 3 (heartbeat).
+    second = await anext(gen)
+    assert second.startswith(b"event: ping\n")
+
+
+async def test_dashboard_stream_endpoint_returns_event_stream_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Endpoint glue: returns ``StreamingResponse`` with ``text/event-stream``
+    media type + the no-buffering headers nginx + browsers need."""
+    _set_env(monkeypatch)
+    from app.web.router import dashboard_stream
+
+    # Patch sessionmaker so we don't open a real DB connection if the
+    # underlying generator is exercised by the caller.
+    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: object())
+
+    response = await dashboard_stream(last_event_id=0, user=_admin_user())
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
 
 
 # ---------- batches list + detail handlers: direct-await returns ------------
@@ -1788,6 +1952,134 @@ async def test_web_devices_decommission_rejects_csrf_mismatch(
             device_id=42,
             reason="any",
             csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+# --- web_devices_bulk_decommission (2026-06-10) -----------------------------
+
+
+async def test_bulk_decommission_empty_selection_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty checkbox list → 303 with ``No devices selected``, no services called."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    response = await web_devices_bulk_decommission(
+        csrf="test-csrf-token",
+        device_ids=[],
+        reason="anything",
+        return_to="/web/devices/search?name=x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/devices/search?name=x&")
+    assert "flash_kind=error" in loc
+    assert "No+devices+selected" in loc
+
+
+async def test_bulk_decommission_all_succeed_redirects_with_info_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three decommissions succeed → 303 info, ``Decommissioned 3 devices``."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    class _DeviceStub:
+        version = "2026-06-10T09:00:00Z"
+
+    async def _get_device(_device_id: int) -> Any:
+        return _DeviceStub()
+
+    seen_ids: list[int] = []
+
+    async def _decommission(**kwargs: Any) -> Any:
+        seen_ids.append(int(kwargs["device_id"]))
+        return object()
+
+    _patch_decommission_pipeline(
+        monkeypatch, get_device_impl=_get_device, decommission_impl=_decommission
+    )
+
+    response = await web_devices_bulk_decommission(
+        csrf="test-csrf-token",
+        device_ids=[10, 20, 30],
+        reason="rack EOL",
+        return_to="/web/devices/search",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=info" in loc
+    assert "Decommissioned+3+devices" in loc
+    assert seen_ids == [10, 20, 30]
+
+
+async def test_bulk_decommission_partial_failure_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed: 10 succeeds, 20 unknown (NetBoxNotFound), 30 conflict → 303 error
+    with ``Decommissioned 1 of 3 — 2 failed``. First success not rolled back."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.netbox.errors import NetBoxNotFound
+    from app.services.netbox_write import WriteConflictError
+
+    class _DeviceStub:
+        version = "2026-06-10T09:00:00Z"
+
+    async def _get_device(device_id: int) -> Any:
+        if device_id == 20:
+            raise NetBoxNotFound(f"device {device_id}")
+        return _DeviceStub()
+
+    async def _decommission(**kwargs: Any) -> Any:
+        if int(kwargs["device_id"]) == 30:
+            raise WriteConflictError(
+                current_version="2026-06-10T09:00:05Z", current_object={"id": 30}
+            )
+        return object()
+
+    _patch_decommission_pipeline(
+        monkeypatch, get_device_impl=_get_device, decommission_impl=_decommission
+    )
+
+    response = await web_devices_bulk_decommission(
+        csrf="test-csrf-token",
+        device_ids=[10, 20, 30],
+        reason="rack EOL",
+        return_to="/web/devices/search?name=x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "Decommissioned+1+of+3" in loc
+    assert "2+failed" in loc
+
+
+async def test_bulk_decommission_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad CSRF → 403, no services touched."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_devices_bulk_decommission(
+            csrf="WRONG-TOKEN",
+            device_ids=[1, 2],
+            reason="x",
+            return_to="/web/devices/search",
             user=_admin_user(),
             session=object(),  # type: ignore[arg-type]
         )

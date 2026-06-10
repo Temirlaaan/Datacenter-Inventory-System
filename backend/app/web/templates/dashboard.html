@@ -46,10 +46,13 @@
     </div>
 
     <div class="mt-8 flex items-baseline justify-between flex-wrap gap-2 mb-3">
-        <h2 class="text-lg font-semibold text-gray-900">Recent activity</h2>
+        <h2 class="text-lg font-semibold text-gray-900">Recent activity
+            <span id="js-stream-status" class="ml-2 inline-flex items-center text-xs font-normal text-gray-400">
+                <span class="inline-block h-2 w-2 rounded-full bg-gray-300 mr-1.5"></span>connecting&hellip;
+            </span>
+        </h2>
         <a class="text-sm text-indigo-600 hover:text-indigo-500" href="/web/audit/">See full audit log &raquo;</a>
     </div>
-    {% if activity_rows %}
     <div class="overflow-x-auto -mx-6 sm:mx-0">
         <table class="min-w-full divide-y divide-gray-200">
             <thead class="bg-gray-50">
@@ -62,7 +65,7 @@
                     <th class="px-3 py-2"></th>
                 </tr>
             </thead>
-            <tbody class="divide-y divide-gray-100 bg-white">
+            <tbody id="js-activity-tbody" class="divide-y divide-gray-100 bg-white">
                 {% for r in activity_rows %}
                 <tr class="hover:bg-gray-50">
                     <td class="px-3 py-3 text-sm text-gray-900 whitespace-nowrap">{{ r.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
@@ -73,11 +76,103 @@
                     <td class="px-3 py-3 text-sm"><a class="text-indigo-600 hover:text-indigo-500" href="/web/audit/{{ r.id }}">Details</a></td>
                 </tr>
                 {% endfor %}
+                {% if not activity_rows %}
+                <tr id="js-activity-empty"><td colspan="6" class="px-3 py-6 text-sm italic text-gray-500 text-center">No recent activity.</td></tr>
+                {% endif %}
             </tbody>
         </table>
     </div>
-    {% else %}
-    <p class="text-sm italic text-gray-500 py-6 text-center">No recent activity.</p>
-    {% endif %}
 </section>
+
+<script>
+  // SSE activity feed (2026-06-10). Server polls audit_log every 5s and
+  // emits new rows as `audit` events. We prepend them to the table so the
+  // newest row stays at the top, matching the server-rendered order.
+  (function () {
+    const tbody = document.getElementById("js-activity-tbody");
+    const status = document.getElementById("js-stream-status");
+    if (!tbody || !status) return;
+
+    const baseWatermark = {{ highest_audit_id|default(0) }};
+    const stream = new EventSource("/web/dashboard/stream?last_id=" + baseWatermark);
+
+    function setStatus(text, color) {
+      status.innerHTML = '<span class="inline-block h-2 w-2 rounded-full ' + color + ' mr-1.5"></span>' + text;
+    }
+
+    function fmtCell(text) {
+      // textContent assignment keeps user data inert; the wrapping span
+      // is built via document.createElement to keep this CSP-friendly.
+      const span = document.createElement("span");
+      span.textContent = text == null ? "" : String(text);
+      return span;
+    }
+
+    function resultBadge(result) {
+      const span = document.createElement("span");
+      const palette = result === "success"
+        ? "bg-emerald-100 text-emerald-800"
+        : result === "failure"
+        ? "bg-rose-100 text-rose-800"
+        : "bg-amber-100 text-amber-800";
+      span.className = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium " + palette;
+      span.textContent = result;
+      return span;
+    }
+
+    function prependRow(row) {
+      const empty = document.getElementById("js-activity-empty");
+      if (empty) empty.remove();
+
+      const tr = document.createElement("tr");
+      tr.className = "hover:bg-gray-50 bg-amber-50";  // brief highlight on arrival
+      setTimeout(() => tr.classList.remove("bg-amber-50"), 1500);
+
+      function cell(child, cls) {
+        const td = document.createElement("td");
+        td.className = "px-3 py-3 text-sm " + (cls || "");
+        td.appendChild(child);
+        return td;
+      }
+
+      tr.appendChild(cell(fmtCell(new Date(row.timestamp).toISOString().replace("T", " ").substring(0, 19) + " UTC"), "text-gray-900 whitespace-nowrap"));
+      tr.appendChild(cell(fmtCell(row.user_email), "text-gray-900"));
+
+      const opCode = document.createElement("code");
+      opCode.className = "font-mono text-gray-900";
+      opCode.textContent = row.operation;
+      tr.appendChild(cell(opCode, ""));
+
+      const entFrag = document.createDocumentFragment();
+      entFrag.appendChild(fmtCell(row.entity_type + " / "));
+      const idCode = document.createElement("code");
+      idCode.className = "font-mono text-gray-900";
+      idCode.textContent = row.entity_id;
+      entFrag.appendChild(idCode);
+      const entTd = document.createElement("td");
+      entTd.className = "px-3 py-3 text-sm text-gray-500";
+      entTd.appendChild(entFrag);
+      tr.appendChild(entTd);
+
+      tr.appendChild(cell(resultBadge(row.result), ""));
+
+      const detailsLink = document.createElement("a");
+      detailsLink.className = "text-indigo-600 hover:text-indigo-500";
+      detailsLink.href = "/web/audit/" + encodeURIComponent(String(row.id));
+      detailsLink.textContent = "Details";
+      tr.appendChild(cell(detailsLink, ""));
+
+      tbody.insertBefore(tr, tbody.firstChild);
+    }
+
+    stream.addEventListener("open", () => setStatus("live", "bg-emerald-500"));
+    stream.addEventListener("error", () => setStatus("reconnecting&hellip;", "bg-amber-400"));
+    stream.addEventListener("audit", (event) => {
+      try {
+        prependRow(JSON.parse(event.data));
+      } catch (_) { /* malformed payload — drop silently */ }
+    });
+    // `ping` events are heartbeats; no UI action.
+  })();
+</script>
 {% endblock %}
