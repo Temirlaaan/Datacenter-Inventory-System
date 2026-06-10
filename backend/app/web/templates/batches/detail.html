@@ -45,7 +45,13 @@
         <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">Free: {{ status_counts.free }}</span>
         <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">Bound: {{ status_counts.bound }}</span>
         <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">Retired: {{ status_counts.retired }}</span>
-        <a class="ml-auto inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm" href="/web/batches/{{ batch.id }}/labels.pdf">Download labels (PDF)</a>
+        {% if show_retired %}
+        <a class="inline-flex items-center px-3 py-1.5 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium" href="/web/batches/{{ batch.id }}">Hide retired</a>
+        {% elif retired_hidden_count %}
+        <a class="inline-flex items-center px-3 py-1.5 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium" href="/web/batches/{{ batch.id }}?show_retired=1">Show retired ({{ retired_hidden_count }} hidden)</a>
+        {% endif %}
+        <a class="ml-auto inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm" href="/web/batches/{{ batch.id }}/labels.pdf">Download labels (FREE only)</a>
+        <a class="inline-flex items-center px-3 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/batches/{{ batch.id }}/labels.pdf?include=all" title="Includes BOUND + RETIRED codes — archival view">All labels</a>
     </div>
 
     {% if codes %}

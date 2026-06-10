@@ -1077,8 +1077,9 @@ def _non_admin_cookie_value(monkeypatch: pytest.MonkeyPatch) -> str:
 async def test_web_admin_shift_start_returns_303_to_dashboard_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Happy path: valid admin cookie + workstation_id → service.start
-    succeeds → 303 to /web/."""
+    """Happy path: valid admin cookie + Start button → service.start
+    succeeds → 303 to /web/. As of 2026-06-10 the form has no fields;
+    tablet_id is hardcoded to "web-admin" for shift_sessions attribution."""
     cookie = _admin_cookie_value(monkeypatch)
 
     class _FakeRepo:
@@ -1090,14 +1091,13 @@ async def test_web_admin_shift_start_returns_303_to_dashboard_on_success(
         async def start(self, *, user_email: str, user_keycloak_id: UUID, tablet_id: str) -> None:
             assert user_email == "alice@example.com"
             assert user_keycloak_id == _USER_SUB
-            assert tablet_id == "admin-laptop-01"
+            assert tablet_id == "web-admin"
 
     monkeypatch.setattr("app.web.router.ShiftSessionRepository", _FakeRepo)
     monkeypatch.setattr("app.web.router.ShiftSessionService", _FakeService)
 
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
-        workstation_id="admin-laptop-01",
         csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
@@ -1141,7 +1141,6 @@ async def test_web_admin_shift_start_returns_303_to_dashboard_when_already_activ
 
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
-        workstation_id="admin-laptop-01",
         csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
@@ -1156,7 +1155,6 @@ async def test_web_admin_shift_start_returns_303_to_login_without_cookie(
     _set_env(monkeypatch)
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=None),
-        workstation_id="admin-laptop-01",
         csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
@@ -1172,7 +1170,6 @@ async def test_web_admin_shift_start_returns_303_to_login_when_role_missing(
     cookie = _non_admin_cookie_value(monkeypatch)
     response = await web_admin_shift_start(
         request=_build_shift_start_request(cookie_value=cookie),
-        workstation_id="admin-laptop-01",
         csrf="test-csrf-token",
         session=object(),  # type: ignore[arg-type]
     )
@@ -1844,8 +1841,7 @@ async def test_web_admin_shift_start_rejects_csrf_mismatch(
     with pytest.raises(HTTPException) as exc:
         await web_admin_shift_start(
             request=_build_shift_start_request(cookie_value=cookie),
-            workstation_id="admin-laptop-01",
-            csrf="WRONG-TOKEN",
+                csrf="WRONG-TOKEN",
             session=object(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 403
@@ -2391,6 +2387,258 @@ async def test_web_batches_labels_pdf_returns_404_for_unknown_batch(
             session=object(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 404
+
+
+# --- 2026-06-10: PDF FREE-only filter + batch detail show_retired toggle ---
+
+
+async def test_web_batches_labels_pdf_renders_only_free_codes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``include="free"`` drops BOUND + RETIRED before the
+    reportlab worker — admin re-prints leftover stickers, not used ones."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id,
+        created_at=datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=3,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment=None,
+    )
+    codes = [
+        QR(id="DCQR-FREE0001", batch_id=batch_id, status=QRStatus.FREE,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=None, retired_reason=None),
+        QR(id="DCQR-BOUND001", batch_id=batch_id, status=QRStatus.BOUND,
+           bound_to_device_id=42, bound_at=datetime(2026, 6, 9, tzinfo=UTC),
+           bound_by_email="b@x", retired_at=None, retired_reason=None),
+        QR(id="DCQR-RETIRED1", batch_id=batch_id, status=QRStatus.RETIRED,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=datetime(2026, 6, 9, tzinfo=UTC), retired_reason="damaged"),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _bid: UUID) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _bid: UUID) -> list[QR]:
+            return codes
+
+    captured: dict[str, list[QR]] = {}
+
+    def _fake_render(batch: object, codes: list[QR]) -> bytes:
+        captured["codes"] = codes
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr("app.services.pdf_labels.render_batch_labels_pdf", _fake_render)
+
+    response = await web_batches_labels_pdf(
+        batch_id=batch_id,
+        include="free",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert [c.id for c in captured["codes"]] == ["DCQR-FREE0001"]
+
+
+async def test_web_batches_labels_pdf_with_include_all_renders_every_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``?include=all`` is the archival escape hatch — reprint everything."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id,
+        created_at=datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=2,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment=None,
+    )
+    codes = [
+        QR(id="DCQR-FREE0001", batch_id=batch_id, status=QRStatus.FREE,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=None, retired_reason=None),
+        QR(id="DCQR-RETIRED1", batch_id=batch_id, status=QRStatus.RETIRED,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=datetime(2026, 6, 9, tzinfo=UTC), retired_reason="damaged"),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _bid: UUID) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _bid: UUID) -> list[QR]:
+            return codes
+
+    captured: dict[str, list[QR]] = {}
+
+    def _fake_render(batch: object, codes: list[QR]) -> bytes:
+        captured["codes"] = codes
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr("app.services.pdf_labels.render_batch_labels_pdf", _fake_render)
+
+    response = await web_batches_labels_pdf(
+        batch_id=batch_id,
+        include="all",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert [c.id for c in captured["codes"]] == ["DCQR-FREE0001", "DCQR-RETIRED1"]
+
+
+async def test_batches_detail_hides_retired_rows_by_default_and_shows_hidden_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``show_retired=False`` strips RETIRED from the table but the
+    status_counts chips still show the full retired count, and a
+    ``Show retired`` link advertises the hidden count."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id, created_at=datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com", created_by_keycloak_id=_USER_SUB,
+        count=2, intended_site_id=None, intended_location_id=None,
+        intended_rack_id=None, comment=None,
+    )
+    codes = [
+        QR(id="DCQR-FREEAAA1", batch_id=batch_id, status=QRStatus.FREE,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=None, retired_reason=None),
+        QR(id="DCQR-RETIREDB", batch_id=batch_id, status=QRStatus.RETIRED,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=datetime(2026, 6, 9, tzinfo=UTC), retired_reason="damaged"),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _id: object) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _id: object) -> list[QR]:
+            return codes
+        async def count_by_status_for_batch(self, _id: object) -> dict[QRStatus, int]:
+            return {QRStatus.FREE: 1, QRStatus.BOUND: 0, QRStatus.RETIRED: 1}
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+
+    scope = {
+        "type": "http", "method": "GET", "path": f"/web/batches/{batch_id}",
+        "scheme": "http", "server": ("test", 80), "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1), csrf_token="test-csrf-token",
+    )
+
+    response = await batches_detail(
+        request=request, batch_id=batch_id, show_retired=False,
+        user=user, session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"DCQR-FREEAAA1" in body
+    assert b"DCQR-RETIREDB" not in body  # filtered out of the table
+    assert b"Retired: 1" in body  # chip still reflects the truth
+    assert b"Show retired (1 hidden)" in body
+
+
+async def test_batches_detail_with_show_retired_renders_retired_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``?show_retired=1`` brings RETIRED rows back into the table and the
+    toggle link inverts to ``Hide retired``."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id, created_at=datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com", created_by_keycloak_id=_USER_SUB,
+        count=1, intended_site_id=None, intended_location_id=None,
+        intended_rack_id=None, comment=None,
+    )
+    codes = [
+        QR(id="DCQR-RETIREDB", batch_id=batch_id, status=QRStatus.RETIRED,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=datetime(2026, 6, 9, tzinfo=UTC), retired_reason="damaged"),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _id: object) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _id: object) -> list[QR]:
+            return codes
+        async def count_by_status_for_batch(self, _id: object) -> dict[QRStatus, int]:
+            return {QRStatus.FREE: 0, QRStatus.BOUND: 0, QRStatus.RETIRED: 1}
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+
+    scope = {
+        "type": "http", "method": "GET",
+        "path": f"/web/batches/{batch_id}?show_retired=1",
+        "scheme": "http", "server": ("test", 80), "query_string": b"show_retired=1",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1), csrf_token="test-csrf-token",
+    )
+
+    response = await batches_detail(
+        request=request, batch_id=batch_id, show_retired=True,
+        user=user, session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"DCQR-RETIREDB" in body
+    assert b"Hide retired" in body
 
 
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).

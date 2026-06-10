@@ -492,12 +492,25 @@ async def web_batches_create(
 async def batches_detail(
     request: Request,
     batch_id: UUID,
+    show_retired: bool = Query(default=False),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     """Render one batch's detail page: metadata + status counts + QR table +
-    Download Labels link. Unknown ``batch_id`` → 404 + custom HTML page
-    (decision 9 — web flows render HTML, not JSON)."""
+    Download Labels link.
+
+    ``?show_retired=1`` (default off, 2026-06-10): toggle visibility of
+    RETIRED rows in the codes table. Retired stickers stay in the DB
+    forever for audit purposes (Architecture §4 — state-machine final
+    state, audit_log references depend on the row), but day-to-day the
+    admin doesn't need to scroll past them. The status_counts chips
+    always include all states regardless of the toggle.
+
+    Unknown ``batch_id`` → 404 + custom HTML page (decision 9 — web
+    flows render HTML, not JSON).
+    """
+    from app.domain.qr import QRStatus
+
     batch_repo = QRBatchRepository(session)
     code_repo = QRCodeRepository(session)
     batch = await batch_repo.get_by_id(batch_id)
@@ -508,8 +521,14 @@ async def batches_detail(
             {"user_email": user.email, "resource": f"batch {batch_id}"},
             status_code=status.HTTP_404_NOT_FOUND,
         )
-    codes = await code_repo.find_by_batch_id(batch_id)
+    all_codes = await code_repo.find_by_batch_id(batch_id)
     status_counts = await code_repo.count_by_status_for_batch(batch_id)
+    codes = (
+        all_codes
+        if show_retired
+        else [c for c in all_codes if c.status is not QRStatus.RETIRED]
+    )
+    retired_count = sum(1 for c in all_codes if c.status is QRStatus.RETIRED)
     return templates.TemplateResponse(
         request,
         "batches/detail.html",
@@ -519,6 +538,8 @@ async def batches_detail(
             "codes": codes,
             "status_counts": status_counts,
             "csrf_token": user.csrf_token,
+            "show_retired": show_retired,
+            "retired_hidden_count": 0 if show_retired else retired_count,
         },
     )
 
@@ -526,18 +547,19 @@ async def batches_detail(
 @router.get("/batches/{batch_id}/labels.pdf")
 async def web_batches_labels_pdf(
     batch_id: UUID,
+    include: str = Query(default="free", pattern="^(free|all)$"),
     user: WebAdminUser = Depends(require_web_admin),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Cookie-authed PDF download for the batch detail page.
 
-    The original Sprint 8b link pointed at ``/api/v1/admin/batches/{id}/labels.pdf``,
-    but that endpoint is JWT-bearer-gated. Browsers only carry the
-    Fernet session cookie, so clicking "Download labels" 401'd. This
-    handler does the same PDF render with cookie auth (delegates to the
-    same ``render_batch_labels_pdf`` worker, ran in a thread).
+    ``?include=free`` (default, 2026-06-10): render only QR codes still
+    in FREE state. Avoids reprinting labels for stickers already used
+    (BOUND) or discarded (RETIRED). ``?include=all`` returns every code
+    regardless of state.
     """
     _ = user  # role-gating side-effect only
+    from app.domain.qr import QRStatus
     from app.services.pdf_labels import render_batch_labels_pdf
 
     batch = await QRBatchRepository(session).get_by_id(batch_id)
@@ -546,6 +568,8 @@ async def web_batches_labels_pdf(
             status_code=status.HTTP_404_NOT_FOUND, detail="batch not found"
         )
     codes = await QRCodeRepository(session).find_by_batch_id(batch_id)
+    if include == "free":
+        codes = [c for c in codes if c.status is QRStatus.FREE]
     pdf_bytes = await asyncio.to_thread(
         render_batch_labels_pdf, batch=batch, codes=codes
     )
@@ -931,21 +955,26 @@ def _resolve_web_admin_cookie(request: Request) -> WebAdminUser | None:
     return user
 
 
+_WEB_ADMIN_TABLET_ID = "web-admin"
+"""Hardcoded ``shift_sessions.tablet_id`` value for web-driven admin shifts
+(2026-06-10 simplification). The column is shared with mobile (which uses
+the physical tablet's id); admins all log in from browsers where typing a
+"workstation id" added no audit value beyond "web". Mobile flow unchanged.
+"""
+
+
 @router.post("/admin/shift/start")
 async def web_admin_shift_start(
     request: Request,
-    workstation_id: str = Form(min_length=1, max_length=255),
     csrf: str = Form(alias="_csrf"),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
     """Open an admin shift from the ``_admin_shift_needed.html`` form.
 
     The intermediate page renders when an admin has a valid cookie but no
-    active shift. This handler accepts the form post (urlencoded — browsers
-    ignore ``enctype="application/json"``, which was the original bug) and
-    delegates to ``ShiftSessionService.start`` directly so the shift-open
-    apparatus stays in one place — same decision-I pattern as
-    ``web_force_close_session`` above.
+    active shift. The form has no fields anymore (2026-06-10) — just the
+    CSRF token and a Start button; the underlying ``tablet_id`` column is
+    populated with the hardcoded ``"web-admin"`` sentinel.
 
     Idempotent: if ``SessionAlreadyActive`` fires (concurrent shift opened
     in another tab), the user is already in the state the page wanted, so
@@ -960,7 +989,7 @@ async def web_admin_shift_start(
         await service.start(
             user_email=user.email,
             user_keycloak_id=user.sub,
-            tablet_id=workstation_id,
+            tablet_id=_WEB_ADMIN_TABLET_ID,
         )
     except SessionAlreadyActive:
         pass

@@ -172,10 +172,18 @@ async def list_batches(
 )
 async def get_batch_labels_pdf(
     batch_id: UUID,
+    include: str = Query(default="free", pattern="^(free|all)$"),
     user: AuthUser = Depends(require_role_with_active_shift("dcinv-admin")),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """A4-landscape PDF with the batch's QR codes laid out 32 per page.
+
+    ``?include=free`` (default, 2026-06-10): render only QR codes still
+    in FREE state. Use case: admin re-downloads the PDF after some
+    stickers were stuck on devices (now BOUND) or damaged (now RETIRED) —
+    no reason to reprint labels for codes already used or discarded.
+    ``?include=all`` returns every code regardless of state — archival
+    view of the batch as originally printed.
 
     No audit row: the contents are the same as the JSON detail endpoint
     (admin already saw the codes), and ToR §5.4.6 covers sensitive reads
@@ -189,6 +197,8 @@ async def get_batch_labels_pdf(
     if batch is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="batch not found")
     codes = await QRCodeRepository(session).find_by_batch_id(batch_id)
+    if include == "free":
+        codes = [c for c in codes if c.status is QRStatus.FREE]
     pdf_bytes = await asyncio.to_thread(render_batch_labels_pdf, batch=batch, codes=codes)
     return Response(
         content=pdf_bytes,
