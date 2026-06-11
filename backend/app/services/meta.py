@@ -125,7 +125,18 @@ class MetaLookupService:
     async def _fetch_statuses(self) -> list[MetaStatus]:
         response = await self._netbox.options("/api/dcim/devices/")
         choices: list[dict[str, Any]] = response.json()["actions"]["POST"]["status"]["choices"]
-        return [MetaStatus(value=choice["value"], label=choice["display"]) for choice in choices]
+        # NetBox 4.x renamed the human-readable key in choice serializers from
+        # ``display`` (3.x) to ``label`` (4.x). Real 2026-06-11 prod incident:
+        # the 3.x-only ``choice["display"]`` access blew up with KeyError on a
+        # NetBox 4.x upstream. Fall through label → display → value so the
+        # mobile picker never breaks on a NetBox upgrade.
+        return [
+            MetaStatus(
+                value=choice["value"],
+                label=choice.get("label") or choice.get("display") or choice["value"],
+            )
+            for choice in choices
+        ]
 
     async def _fetch_device_types(self) -> list[MetaDeviceType]:
         response = await self._netbox.get("/api/dcim/device-types/", params={"limit": 0})

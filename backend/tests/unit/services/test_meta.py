@@ -168,6 +168,48 @@ async def test_get_statuses_returns_empty_list_when_no_choices(
     assert statuses == []
 
 
+async def test_get_statuses_accepts_netbox_4x_label_key(
+    clean_env: None, netbox_env: None
+) -> None:
+    """NetBox 4.x choice serializer uses ``label`` where 3.x used ``display``.
+    Real 2026-06-11 prod incident: a NetBox upgrade silently broke the mobile
+    Edit/Create flows because the handler hard-coded ``choice["display"]``."""
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.options(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_options_payload(
+                    [
+                        {"value": "active", "label": "Active"},
+                        {"value": "offline", "label": "Offline"},
+                    ]
+                )
+            )
+            statuses = await MetaLookupService(client, cache).get_statuses()
+
+    assert statuses == [
+        MetaStatus(value="active", label="Active"),
+        MetaStatus(value="offline", label="Offline"),
+    ]
+
+
+async def test_get_statuses_falls_back_to_value_when_no_label_or_display(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Defense in depth: if a future NetBox version drops human-readable text
+    altogether, fall back to the slug rather than 500-ing. UI is uglier but
+    the picker still works."""
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.options(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json=_options_payload([{"value": "active"}])
+            )
+            statuses = await MetaLookupService(client, cache).get_statuses()
+
+    assert statuses == [MetaStatus(value="active", label="active")]
+
+
 # ---------- cache singleton ----------
 
 

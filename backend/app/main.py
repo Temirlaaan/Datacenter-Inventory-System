@@ -31,6 +31,7 @@ from app.middleware.rate_limit import rate_limit_middleware
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxCircuitOpenError, NetBoxClientError, NetBoxNotFound
 from app.observability.logging import configure_logging
+from app.observability.request_id import current_request_id
 from app.services.auto_end_job import AutoEndJobStatus, auto_end_loop
 from app.web.auth import AdminShiftNeeded, WebAdminAuthRequired
 from app.web.router import _redirect_to_login, _render_admin_shift_needed
@@ -207,6 +208,39 @@ async def handle_no_active_shift(_request: Request, _exc: NoActiveShiftError) ->
             "error": {
                 "code": "NO_ACTIVE_SHIFT",
                 "message": "No active shift — start a shift before performing this action.",
+            }
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def handle_unhandled_exception(_request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler: any exception not caught by a more specific
+    handler above lands here.
+
+    Without this, FastAPI's default is a ``text/plain "Internal Server
+    Error"`` body with no X-Request-ID — mobile clients can't parse it,
+    operators can't correlate it to a server-side log line. Real
+    2026-06-11 incident on ``GET /api/v1/meta/statuses`` exposed this
+    gap: a ``KeyError`` in the upstream-NetBox parser surfaced as
+    opaque text/plain instead of the structured envelope every other
+    error path returns.
+
+    Body matches the shape the other handlers emit. X-Request-ID echoes
+    the id that ``request_id_middleware`` bound to contextvars (so the
+    mobile client can quote it in bug reports). Full traceback is
+    logged at error level — already done by ``request_id_middleware``
+    via ``logger.exception('request_failed')``, so we keep this one
+    quiet to avoid duplicate stacks.
+    """
+    _ = exc  # already logged with traceback by request_id_middleware
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers={"X-Request-ID": current_request_id()},
+        content={
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Internal server error — see audit log",
             }
         },
     )

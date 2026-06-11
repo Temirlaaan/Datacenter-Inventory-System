@@ -204,6 +204,37 @@ async def test_handle_no_active_shift_returns_409_with_structured_body() -> None
     assert body["error"]["code"] == "NO_ACTIVE_SHIFT"
 
 
+async def test_handle_unhandled_exception_returns_500_with_envelope_and_request_id() -> None:
+    """Last-resort handler: any uncaught exception returns the structured
+    JSON envelope mobile clients can parse, NOT FastAPI's text/plain default.
+
+    Real 2026-06-11 incident: a KeyError in ``_fetch_statuses`` surfaced as
+    text/plain ``"Internal Server Error"`` with no X-Request-ID — mobile
+    couldn't correlate to a server log line. This handler closes that gap."""
+    import json
+
+    import structlog
+
+    from app.main import handle_unhandled_exception
+
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        request_id="11111111-1111-1111-1111-111111111111"
+    )
+    try:
+        resp = await handle_unhandled_exception(
+            cast(Request, None), KeyError("display")
+        )
+    finally:
+        structlog.contextvars.clear_contextvars()
+
+    assert resp.status_code == 500
+    assert resp.headers["X-Request-ID"] == "11111111-1111-1111-1111-111111111111"
+    body = json.loads(bytes(resp.body))
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert "message" in body["error"]
+
+
 # ---------- PATCH /devices/{id} ----------
 
 
