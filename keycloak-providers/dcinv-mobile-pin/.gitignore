@@ -1,0 +1,7 @@
+# Maven build artifacts — built via Docker per docs/keycloak-pin-flow.md.
+target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
