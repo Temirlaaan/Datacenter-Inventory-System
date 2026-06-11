@@ -1,0 +1,679 @@
+/* ==========================================================================
+   KEYCLOAK CUSTOM THEME - COMPLETE STYLES
+   ========================================================================== */
+
+/* Шрифты */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* Сброс стилей.
+   ВНИМАНИЕ: глобальный `* { margin: 0; padding: 0; }` ломал страницы которые
+   фолбэкают в parent-тему (`keycloak/base`) — например logout-confirm рендерил
+   "Logging out" сырым текстом в левом-верхнем углу без отступов. Теперь сброс
+   скоупнут на наши карточки, а box-sizing остаётся глобальным. */
+* {
+    box-sizing: border-box;
+}
+
+.card *,
+.card-3 *,
+.card-reset *,
+.kc-totp-card * {
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #333;
+}
+
+/* Скрываем стандартные элементы Keycloak */
+.login-pf body {
+    background: none !important;
+}
+
+#kc-header,
+#kc-header-wrapper,
+.pf-c-page__header {
+    display: none !important;
+}
+
+/* Дефолтные h1/p на унаследованных страницах (если когда-то .ftl вернётся в
+   фолбэк) — чтобы не лезли в верхний-левый угол сырым текстом. */
+body > h1,
+.login-pf-page > h1 {
+    margin: 16px 24px;
+    font-size: 18px;
+    color: #6b7280;
+}
+
+/* Основной контейнер с градиентом */
+.page-wrapper {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Градиент от бело-зеленого к светло-зеленому */
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 25%, #dcfce7 75%, #bbf7d0 100%);
+    padding: 20px;
+}
+
+.wrapper {
+    margin: 0 auto;
+    width: 100%;
+}
+
+.wrapper--w780 {
+    max-width: 900px;
+}
+
+.wrapper--w680 {
+    max-width: 680px;
+}
+
+.wrapper--w960 {
+    max-width: 960px;
+}
+
+/* Карточка */
+.card {
+    overflow: hidden;
+    border-radius: 20px;
+    background: #fff;
+}
+
+.card-3 {
+    background: #ffffff;
+    border-radius: 20px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+    width: 100%;
+    display: flex;
+    min-height: 600px;
+    overflow: hidden;
+}
+
+/* Левая часть с изображением */
+.card-3 .card-heading {
+    flex: 1.2;
+    min-height: 100%;
+    position: relative;
+    background-color: #f3f4f6;
+}
+
+.card-3 .card-heading::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.3) 100%);
+    pointer-events: none;
+}
+
+/* Правая часть с формой */
+.card-3 .card-body {
+    flex: 1;
+    padding: 60px 50px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+/* Стили для страницы сброса пароля и других вспомогательных страниц */
+.card-reset {
+    max-width: 500px;
+    margin: 0 auto;
+    padding: 40px;
+    background: white;
+    border-radius: 20px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+/* Заголовки внутри карточек — наш сброс убирает дефолтные отступы,
+   поэтому возвращаем минимальные margin'ы для читаемости. */
+.card-reset h1,
+.card-reset h2,
+.card-3 h2 {
+    margin: 0;
+}
+
+.card-reset p,
+.card-3 p {
+    margin: 0;
+}
+
+/* Логотип — 180px (увеличенный по запросу 2026-06-11) */
+.logo img {
+    height: 180px !important;
+    width: auto;
+    object-fit: contain;
+}
+
+/* Заголовок */
+.title {
+    font-size: 28px;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 30px;
+    text-align: center;
+}
+
+/* Группы полей */
+.input-group {
+    margin-bottom: 20px;
+}
+
+.input-group-register {
+    margin-bottom: 15px;
+}
+
+.input-reset {
+    position: relative;
+    width: 100%;
+    margin-top: 10px;
+}
+
+.input-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #4b5563;
+}
+
+/* Поля ввода */
+.input--style-3 {
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 15px;
+    color: #1f2937;
+    background: #f9fafb;
+    border: 2px solid #e5e7eb;
+    border-radius: 10px;
+    transition: all 0.3s ease;
+    outline: none;
+}
+
+.input--style-3:focus {
+    background: #ffffff;
+    border-color: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+}
+
+.input--style-3::placeholder {
+    color: #9ca3af;
+}
+
+.input-width {
+    width: 100%;
+}
+
+/* Стили для полей Keycloak по умолчанию */
+input[type="text"],
+input[type="password"],
+input[type="email"],
+.pf-c-form-control {
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 15px;
+    color: #1f2937;
+    background: #f9fafb;
+    border: 2px solid #e5e7eb;
+    border-radius: 10px;
+    transition: all 0.3s ease;
+    outline: none;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="email"]:focus,
+.pf-c-form-control:focus {
+    background: #ffffff;
+    border-color: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+}
+
+/* Кнопка показать/скрыть пароль */
+.toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 5px;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 10;
+}
+
+.toggle:hover {
+    opacity: 0.7;
+}
+
+/* Checkbox */
+.checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-right: 8px;
+    cursor: pointer;
+}
+
+.checkbox label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Основная кнопка Submit.
+   ВНИМАНИЕ: раньше тут была строчка `.pf-c-button { background: none !important; }`
+   — она убивала фон у всех кнопок которые рендерил parent-theme (например LOGOUT
+   на logout-confirm.ftl-фолбэке), оставляя белый текст на пустом фоне.
+   Убрали. Теперь .pf-c-button подхватывается через `.pf-c-button.pf-m-primary`. */
+.submit-btn,
+.submit,
+.btn-primary,
+.pf-c-button.pf-m-primary,
+input[type="submit"] {
+    width: 100%;
+    padding: 14px 24px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    box-shadow: 0 4px 6px rgba(16, 185, 129, 0.2);
+}
+
+.submit-btn:hover,
+.submit:hover,
+.btn-primary:hover,
+input[type="submit"]:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 12px rgba(16, 185, 129, 0.3);
+    background: linear-gradient(135deg, #059669 0%, #047857 100%);
+}
+
+.submit-btn:active,
+.submit:active,
+input[type="submit"]:active {
+    transform: translateY(0);
+}
+
+.submit-btn:disabled,
+input[type="submit"]:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Карточки выбора способа аутентификации (select-authenticator.ftl) */
+.select-auth-btn:hover {
+    background: #ffffff !important;
+    border-color: #10b981 !important;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15);
+    transform: translateY(-1px);
+}
+
+/* Сообщения об ошибках и успехе */
+.alert {
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    font-size: 14px;
+}
+
+.alert-error {
+    background: #fef2f2;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+}
+
+.alert-success {
+    background: #f0fdf4;
+    color: #166534;
+    border: 1px solid #bbf7d0;
+}
+
+.alert-warning {
+    background: #fff7ed;
+    color: #9a3412;
+    border: 1px solid #fed7aa;
+}
+
+.alert-info {
+    background: #eff6ff;
+    color: #1e40af;
+    border: 1px solid #bfdbfe;
+}
+
+/* Сообщения для OTP и других страниц */
+.instruction {
+    width: 100%;
+    text-align: center;
+    margin: 20px 0;
+    font-size: 16px;
+    color: #4b5563;
+    line-height: 1.6;
+}
+
+.message-text {
+    padding: 0% 10%;
+    text-align: center;
+}
+
+/* Ссылки */
+a {
+    color: #10b981;
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+a:hover {
+    color: #059669;
+    text-decoration: underline;
+}
+
+/* Разделительная линия с текстом */
+p {
+    width: 100%;
+    text-align: center;
+    position: relative;
+    margin: 20px 0;
+}
+
+p span {
+    background: #fff;
+    padding: 0 15px;
+    position: relative;
+    z-index: 1;
+}
+
+/* OTP страница стили */
+.limiter {
+    width: 100%;
+    margin: 0 auto;
+}
+
+.container-vf {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    padding: 15px;
+}
+
+.wrap-vf {
+    width: 670px;
+    background: #fff;
+    border-radius: 20px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+.vf-form-title {
+    width: 100%;
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: center;
+    background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
+    padding: 70px 15px 74px 15px;
+}
+
+.vf-form-title-1 {
+    font-size: 30px;
+    color: #1f2937;
+    text-transform: uppercase;
+    line-height: 1.2;
+    text-align: center;
+    padding-top: 15px;
+    font-weight: 600;
+}
+
+.vf-form {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    padding: 43px 88px 93px 190px;
+}
+
+.container-vf-form-btn {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    padding: 20px 0;
+}
+
+.vf-form-btn {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 0 20px;
+    min-width: 160px;
+    height: 50px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border-radius: 25px;
+    font-size: 16px;
+    color: #fff;
+    line-height: 1.2;
+    transition: all 0.4s;
+    border: none;
+    cursor: pointer;
+}
+
+.vf-form-btn:hover {
+    background: linear-gradient(135deg, #059669 0%, #047857 100%);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 12px rgba(16, 185, 129, 0.3);
+}
+
+/* Страница Update Password */
+.p-t-20 {
+    padding-top: 20px;
+}
+
+.p-b-20 {
+    padding-bottom: 20px;
+}
+
+.p-t-100 {
+    padding-top: 100px;
+}
+
+/* Адаптивный дизайн */
+@media (max-width: 768px) {
+    .card-3 {
+        flex-direction: column;
+        min-height: auto;
+    }
+
+    .card-3 .card-heading {
+        height: 200px;
+        flex: none;
+    }
+
+    .card-3 .card-body {
+        padding: 40px 30px;
+    }
+
+    .title {
+        font-size: 24px;
+    }
+
+    .wrapper--w780 {
+        max-width: 100%;
+    }
+
+    .vf-form {
+        padding: 43px 15px 57px 15px;
+    }
+
+    .logo img {
+        height: 100px !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .card-3 .card-body {
+        padding: 30px 20px;
+    }
+
+    .submit-btn,
+    .submit,
+    input[type="submit"] {
+        padding: 12px 20px;
+        font-size: 14px;
+    }
+
+    .social-btn {
+        min-width: 120px;
+        padding: 8px 16px;
+        font-size: 13px;
+    }
+
+    .container-vf-form-btn {
+        padding: 0% 0% 10% 20%;
+    }
+
+    .logo img {
+        height: 90px !important;
+    }
+}
+
+/* Анимации */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.card {
+    animation: fadeIn 0.5s ease-out;
+}
+
+/* Улучшения производительности */
+.card-3 .card-heading {
+    will-change: transform;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+}
+
+/* Дополнительные стили для Keycloak форм */
+.form-group,
+.pf-c-form__group {
+    margin-bottom: 20px;
+}
+
+label,
+.pf-c-form__label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #4b5563;
+}
+
+/* Фикс для форм OTP */
+#kc-otp-login-form input[type="text"] {
+    text-align: center;
+    font-size: 20px;
+    letter-spacing: 5px;
+}
+
+/* ===== CONFIGURE TOTP (OTP SETUP) polish ===== */
+.kc-totp-wrap {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.kc-totp-card {
+  background: #ffffff;
+  border-radius: 20px;
+  box-shadow: 0 25px 50px -12px rgba(0,0,0,.25);
+  padding: 40px 32px;
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 32px;
+}
+
+.kc-totp-steps {
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  gap: 18px;
+  padding: 0;
+  margin: 0;
+}
+
+.kc-totp-steps li {
+  position: relative;
+  padding-left: 48px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  color: #374151;
+}
+.kc-totp-steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  position: absolute;
+  left: 0; top: 0;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg,#10b981 0%,#059669 100%);
+  color: #fff;
+  font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.kc-totp-qr {
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+}
+.kc-totp-qr img {
+  background: #fff;
+  padding: 12px;
+  border-radius: 12px;
+  box-shadow: 0 10px 24px -12px rgba(0,0,0,.35);
+  width: 220px; height: 220px; object-fit: contain;
+}
+
+.kc-totp-form .input-group { margin-bottom: 16px; }
+.kc-totp-form label { color: #4b5563; font-weight: 500; margin-bottom: 6px; display:block; }
+.kc-totp-form .submit-btn { margin-top: 8px; }
+
+.kc-totp-title {
+  font-size: 26px; font-weight: 600; color:#1f2937; text-align:center; margin-bottom: 16px;
+}
+.kc-totp-sub {
+  text-align:center; color:#6b7280; margin-bottom: 24px;
+}
+
+@media (max-width: 900px) {
+  .kc-totp-card { grid-template-columns: 1fr; padding: 28px 20px; }
+  .kc-totp-qr img { width: 180px; height: 180px; }
+}

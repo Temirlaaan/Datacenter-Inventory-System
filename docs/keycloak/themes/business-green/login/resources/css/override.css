@@ -1,0 +1,24 @@
+/* Форсированное исправление layout */
+.login-pf-page {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    height: 100vh !important;
+    width: 100vw !important;
+}
+
+.login-pf-page > *:first-child {
+    grid-column: 1 !important;
+    background: white !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 2rem !important;
+}
+
+.login-pf-page::after {
+    grid-column: 2 !important;
+    content: "" !important;
+    background-image: url('../img/mountain.jpg') !important;
+    background-size: cover !important;
+    background-position: center !important;
+}
