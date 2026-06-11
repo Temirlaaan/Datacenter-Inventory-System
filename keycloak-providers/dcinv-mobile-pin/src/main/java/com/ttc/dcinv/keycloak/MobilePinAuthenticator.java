@@ -118,7 +118,11 @@ public class MobilePinAuthenticator implements Authenticator {
 
         // Success — clear any pending brute-force counter and let the flow advance.
         if (bruteForceEnabled) {
-            bruteForce.successfulLogin(realm, user, session.getContext().getConnection());
+            bruteForce.successfulLogin(
+                    realm,
+                    user,
+                    session.getContext().getConnection(),
+                    context.getUriInfo());
         }
         context.success();
     }
@@ -132,7 +136,8 @@ public class MobilePinAuthenticator implements Authenticator {
             bruteForce.failedLogin(
                     context.getRealm(),
                     user,
-                    context.getSession().getContext().getConnection());
+                    context.getSession().getContext().getConnection(),
+                    context.getUriInfo());
         }
         context.getEvent().user(user).error(Errors.INVALID_USER_CREDENTIALS);
         Response challenge = buildChallenge(context, ERROR_MESSAGE_KEY);
