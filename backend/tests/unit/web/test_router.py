@@ -3075,6 +3075,147 @@ async def test_batches_detail_with_show_retired_renders_retired_rows(
     assert b"Hide retired" in body
 
 
+async def test_batches_detail_renders_bound_device_name_via_netbox_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BOUND row should show the device name (resolved via DeviceService.
+    get_device_names_by_ids) instead of the raw NetBox id. Admin sees
+    'sw-01' rather than '42'. Fall back to id when name lookup fails."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id, created_at=datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com", created_by_keycloak_id=_USER_SUB,
+        count=2, intended_site_id=None, intended_location_id=None,
+        intended_rack_id=None, comment=None,
+    )
+    codes = [
+        QR(id="DCQR-BOUNDAAA", batch_id=batch_id, status=QRStatus.BOUND,
+           bound_to_device_id=42, bound_at=datetime(2026, 6, 10, tzinfo=UTC),
+           bound_by_email="b@x", retired_at=None, retired_reason=None),
+        QR(id="DCQR-BOUNDBBB", batch_id=batch_id, status=QRStatus.BOUND,
+           bound_to_device_id=99, bound_at=datetime(2026, 6, 10, tzinfo=UTC),
+           bound_by_email="b@x", retired_at=None, retired_reason=None),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _id: object) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _id: object) -> list[QR]:
+            return codes
+        async def count_by_status_for_batch(self, _id: object) -> dict[QRStatus, int]:
+            return {QRStatus.FREE: 0, QRStatus.BOUND: 2, QRStatus.RETIRED: 0}
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+        async def get_device_names_by_ids(self, ids: set[int]) -> dict[int, str]:
+            # Device 42 resolves to a name; device 99 doesn't (deleted in NetBox)
+            # — exercises both happy and fall-back template branches.
+            assert ids == {42, 99}
+            return {42: "sw-01"}
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http", "method": "GET", "path": f"/web/batches/{batch_id}",
+        "scheme": "http", "server": ("test", 80), "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1), csrf_token="test-csrf-token",
+    )
+    response = await batches_detail(
+        request=request, batch_id=batch_id, show_retired=False,
+        user=user, session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    # Resolved device 42 → rendered as "sw-01" (with link).
+    assert b"sw-01" in body
+    # Unresolved device 99 → falls back to raw id "99".
+    assert b">99<" in body or b"/web/devices/99" in body
+
+
+async def test_batches_detail_survives_netbox_name_lookup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If NetBox is down / circuit is open, the page should still render with
+    raw device ids in the bound column, NOT 500. Defensive against the kind
+    of upstream failure that took down /meta/statuses in the 2026-06-11
+    incident."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRBatch, QRStatus
+
+    batch_id = uuid4()
+    batch = QRBatch(
+        id=batch_id, created_at=datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com", created_by_keycloak_id=_USER_SUB,
+        count=1, intended_site_id=None, intended_location_id=None,
+        intended_rack_id=None, comment=None,
+    )
+    codes = [
+        QR(id="DCQR-BOUNDAAA", batch_id=batch_id, status=QRStatus.BOUND,
+           bound_to_device_id=42, bound_at=datetime(2026, 6, 10, tzinfo=UTC),
+           bound_by_email="b@x", retired_at=None, retired_reason=None),
+    ]
+
+    class _FakeBatchRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def get_by_id(self, _id: object) -> QRBatch:
+            return batch
+
+    class _FakeCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+        async def find_by_batch_id(self, _id: object) -> list[QR]:
+            return codes
+        async def count_by_status_for_batch(self, _id: object) -> dict[QRStatus, int]:
+            return {QRStatus.FREE: 0, QRStatus.BOUND: 1, QRStatus.RETIRED: 0}
+
+    class _FailingDeviceService:
+        def __init__(self, _client: object) -> None: ...
+        async def get_device_names_by_ids(self, _ids: set[int]) -> dict[int, str]:
+            raise RuntimeError("netbox unavailable")
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FailingDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http", "method": "GET", "path": f"/web/batches/{batch_id}",
+        "scheme": "http", "server": ("test", 80), "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    user = WebAdminUser(
+        sub=_USER_SUB, email="alice@example.com", roles=("dcinv-admin",),
+        exp=datetime.now(UTC) + timedelta(hours=1), csrf_token="test-csrf-token",
+    )
+    response = await batches_detail(
+        request=request, batch_id=batch_id, show_retired=False,
+        user=user, session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    # Raw id surfaces in the bound column when lookup failed.
+    assert b"/web/devices/42" in body
+
+
 # Use _admin_action_request so the helper isn't dead code (CI-side flake guard).
 _ = _admin_action_request
 

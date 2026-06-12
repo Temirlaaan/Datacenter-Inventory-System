@@ -645,6 +645,48 @@ def _search_envelope(*devices: dict[str, Any]) -> dict[str, Any]:
     return {"count": len(devices), "next": None, "previous": None, "results": list(devices)}
 
 
+async def test_get_device_names_by_ids_returns_mapping_in_one_call(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Batch detail page resolves bound device ids to names via a single
+    ``id__in=...`` call. Missing ids (NetBox returns fewer rows than asked
+    for) are absent from the returned dict — caller falls back to raw id."""
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(
+                json={
+                    "count": 2,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {"id": 5, "name": "sw-01"},
+                        {"id": 7, "name": "sw-03"},
+                        # Device 99 was asked for but NetBox doesn't return it
+                        # (deleted upstream). Caller must tolerate this.
+                    ],
+                }
+            )
+            mapping = await DeviceService(client).get_device_names_by_ids({5, 7, 99})
+
+    assert mapping == {5: "sw-01", 7: "sw-03"}
+    sent = route.calls.last.request
+    # Ids sent CSV-encoded, sorted for stable URL caching.
+    assert sent.url.params["id__in"] == "5,7,99"
+    assert sent.url.params["limit"] == "0"
+
+
+async def test_get_device_names_by_ids_short_circuits_on_empty_input(
+    clean_env: None, netbox_env: None
+) -> None:
+    """No ids → no NetBox call, empty dict back. Saves a round-trip on the
+    common case of a batch page with no BOUND rows yet."""
+    async with NetBoxClient.from_settings() as client:
+        # No respx route registered — any HTTP call would raise.
+        mapping = await DeviceService(client).get_device_names_by_ids(set())
+
+    assert mapping == {}
+
+
 async def test_search_returns_paginated_devices_on_name_filter(
     clean_env: None, netbox_env: None
 ) -> None:

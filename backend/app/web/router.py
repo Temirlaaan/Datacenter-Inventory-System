@@ -698,6 +698,21 @@ async def batches_detail(
         else [c for c in all_codes if c.status is not QRStatus.RETIRED]
     )
     retired_count = sum(1 for c in all_codes if c.status is QRStatus.RETIRED)
+    # Resolve bound device ids → human-readable names for the table.
+    # One NetBox round-trip per page render covers all ids; admin sees
+    # "sw-01" instead of "5". Devices deleted in NetBox after binding
+    # fall back to the raw id (rare).
+    bound_ids = {c.bound_to_device_id for c in codes if c.bound_to_device_id is not None}
+    device_names: dict[int, str] = {}
+    if bound_ids:
+        try:
+            device_names = await DeviceService(get_netbox_client()).get_device_names_by_ids(
+                bound_ids
+            )
+        except Exception as exc:
+            # NetBox blip shouldn't break the batch detail page — log + fall back
+            # to raw ids. Admin still sees everything, just not pretty names.
+            logger.warning("batch_detail_device_name_lookup_failed", error=repr(exc))
     return templates.TemplateResponse(
         request,
         "batches/detail.html",
@@ -709,6 +724,7 @@ async def batches_detail(
             "csrf_token": user.csrf_token,
             "show_retired": show_retired,
             "retired_hidden_count": 0 if show_retired else retired_count,
+            "device_names": device_names,
         },
     )
 

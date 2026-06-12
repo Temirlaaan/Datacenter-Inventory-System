@@ -328,6 +328,30 @@ class DeviceService:
         response = await self._netbox.get(f"/api/dcim/devices/{device_id}/")
         return response.json()  # type: ignore[no-any-return]
 
+    async def get_device_names_by_ids(self, ids: set[int]) -> dict[int, str]:
+        """Bulk-fetch device names for ``ids``. Returns ``{device_id: name}``.
+
+        Used by the batch detail page to render human-readable bound-device
+        labels instead of raw NetBox ids. One round-trip via NetBox's
+        ``id__in`` filter, regardless of how many ids the page lists.
+
+        Missing ids (deleted in NetBox after a QR was bound to them) are
+        absent from the returned dict — callers fall back to the raw id.
+        Empty input ``set()`` short-circuits, no NetBox call.
+        """
+        if not ids:
+            return {}
+        # NetBox accepts ``id__in=1&id__in=2`` OR ``id__in=1,2``; the
+        # CSV form keeps the URL shorter for ~32 ids on a batch page.
+        # ``limit=0`` returns all matches without pagination.
+        params: dict[str, Any] = {
+            "id__in": ",".join(str(i) for i in sorted(ids)),
+            "limit": 0,
+        }
+        response = await self._netbox.get("/api/dcim/devices/", params=params)
+        results: list[dict[str, Any]] = response.json().get("results", [])
+        return {row["id"]: row["name"] for row in results if "id" in row and "name" in row}
+
     async def search(
         self,
         *,

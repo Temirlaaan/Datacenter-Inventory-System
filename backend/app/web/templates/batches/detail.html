@@ -84,7 +84,16 @@
                     </td>
                     <td class="px-3 py-3 text-sm"><code class="font-mono text-gray-900">{{ c.id }}</code></td>
                     <td class="px-3 py-3 text-sm">{{ status_badge(c.status.value) }}</td>
-                    <td class="px-3 py-3 text-sm text-gray-900">{{ c.bound_to_device_id or "" }}</td>
+                    <td class="px-3 py-3 text-sm text-gray-900">
+                        {%- if c.bound_to_device_id -%}
+                            {%- set device_name = device_names.get(c.bound_to_device_id) -%}
+                            {%- if device_name -%}
+                                <a class="text-indigo-600 hover:text-indigo-500" href="/web/devices/{{ c.bound_to_device_id }}" title="NetBox id: {{ c.bound_to_device_id }}">{{ device_name }}</a>
+                            {%- else -%}
+                                <a class="text-indigo-600 hover:text-indigo-500" href="/web/devices/{{ c.bound_to_device_id }}">{{ c.bound_to_device_id }}</a>
+                            {%- endif -%}
+                        {%- endif -%}
+                    </td>
                     <td class="px-3 py-3 text-sm text-gray-500">{{ c.bound_at.strftime("%Y-%m-%d %H:%M") if c.bound_at else "" }}</td>
                     <td class="px-3 py-3 text-sm text-gray-500">{{ c.retired_at.strftime("%Y-%m-%d %H:%M") if c.retired_at else "" }}</td>
                     <td class="px-3 py-3 text-sm">
