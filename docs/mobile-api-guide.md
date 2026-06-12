@@ -445,6 +445,49 @@ GET /api/v1/meta/statuses          ← cache 5 min
 
 These come from NetBox via a 5-min server-side cache (cheap).
 
+### 3.10b Rack elevation (phase-2 rack visualisation, 2026-06-11)
+
+```http
+GET /api/v1/racks/{rack_id}/elevation
+```
+
+Replaces the phase-1 client-side assembly from `/devices/search?rack=N`.
+Fixes the three known phase-1 defects: per-device `face` (front/rear),
+honest `u_height` (resolved from device_type when the device serializer
+omits it — always an int ≥ 1, fractional 0.5U rounds up), and rack
+reservations.
+
+```jsonc
+{
+  "rack": { "id": 4, "name": "Server-Rack-1.12", "site_id": 1, "u_height": 42 },
+  "devices": [
+    {
+      "id": 238,
+      "name": "dc01-ast-comp-gen-srv51.t-cloud.kz",
+      "status": { "value": "active", "label": "Active" },
+      "role_name": "Server",            // may be null
+      "device_type_model": "PowerEdge R640",  // may be null
+      "position": 34,                   // lowest unit; never null here
+      "u_height": 1,                    // int >= 1, never null
+      "face": "front"                   // "front" | "rear"
+    }
+  ],
+  "reservations": [
+    { "units": [10, 11, 12], "description": "Под новый SAN, заявка №123" }
+  ],
+  "unpositioned_count": 2,   // assigned to the rack, no position — NOT in devices[]
+  "occupied_units": 28       // distinct units (front+rear overlap counts once)
+}
+```
+
+- Role: `dcinv-mobile-user`, read-only, **no active shift needed**.
+- Unknown rack → `404` with `{"error": {"code": "RACK_NOT_FOUND", ...}}`.
+- Server-side cache: **60 seconds** (not the 5-min meta TTL the TZ asked
+  for — elevation embeds device positions, and the backend's device-data
+  caching policy caps those at 60s; an engineer who moves a server then
+  opens the rack view sees the truth within a minute). Don't add a
+  client-side cache on top.
+
 ### 3.11 Generate QR batch (admin only)
 
 ```http

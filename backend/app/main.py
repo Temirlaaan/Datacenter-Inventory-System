@@ -23,6 +23,7 @@ from app.api.v1.devices import router as devices_router
 from app.api.v1.health import router as health_router
 from app.api.v1.meta import router as meta_router
 from app.api.v1.qr import router as qr_router
+from app.api.v1.racks import router as racks_router
 from app.api.v1.sessions import router as sessions_router
 from app.auth.dependencies import NoActiveShiftError
 from app.config import get_settings
@@ -106,6 +107,7 @@ app.include_router(
 )
 app.include_router(admin_sessions_router, prefix="/api/v1/admin/sessions", tags=["admin-sessions"])
 app.include_router(qr_router, prefix="/api/v1/qr", tags=["qr"])
+app.include_router(racks_router, prefix="/api/v1/racks", tags=["racks"])
 app.include_router(meta_router, prefix="/api/v1/meta", tags=["meta"])
 app.include_router(devices_router, prefix="/api/v1/devices", tags=["devices"])
 app.include_router(sessions_router, prefix="/api/v1/sessions", tags=["sessions"])
