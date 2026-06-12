@@ -104,6 +104,19 @@
                             <input type="hidden" name="batch_id" value="{{ batch.id }}">
                             <button type="submit" class="inline-flex items-center px-2.5 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Retire</button>
                         </form>
+                        {% elif c.status.value == "retired" %}
+                        {# Restore-from-retired (2026-06-11): undo button for
+                           accidentally-retired stickers. Only rendered when
+                           show_retired=1, so the operator is already in
+                           "looking at retired rows" mode. Confirm dialog
+                           required since the action changes a terminal-feeling
+                           state. #}
+                        <form method="post" action="/web/qr/{{ c.id }}/restore"
+                              class="js-restore-form" data-qr-id="{{ c.id }}">
+                            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                            <input type="hidden" name="batch_id" value="{{ batch.id }}">
+                            <button type="submit" class="inline-flex items-center px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-medium">Restore</button>
+                        </form>
                         {% endif %}
                     </td>
                 </tr>
@@ -136,7 +149,17 @@
   for (const form of document.querySelectorAll(".js-retire-form")) {
     form.addEventListener("submit", (event) => {
       const qrId = form.dataset.qrId;
-      if (!confirm("Retire QR " + qrId + "? This cannot be undone.")) {
+      if (!confirm("Retire QR " + qrId + "? Use Restore if you change your mind.")) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  // Restore-from-retired confirm (mirrors retire-form pattern).
+  for (const form of document.querySelectorAll(".js-restore-form")) {
+    form.addEventListener("submit", (event) => {
+      const qrId = form.dataset.qrId;
+      if (!confirm("Restore QR " + qrId + " to FREE? It will become available for binding again.")) {
         event.preventDefault();
       }
     });

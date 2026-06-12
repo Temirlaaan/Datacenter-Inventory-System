@@ -1357,6 +1357,71 @@ async def web_qr_retire(
     )
 
 
+# ---------- POST /web/qr/{qr_id}/restore — undo an accidental retire --------
+
+
+@router.post("/qr/{qr_id}/restore")
+async def web_qr_restore(
+    qr_id: str,
+    csrf: str = Form(alias="_csrf"),
+    batch_id: UUID | None = Form(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Restore a RETIRED QR back to FREE.
+
+    Added 2026-06-11 after admins reported retiring working stickers by
+    mistake. RETIRED → FREE has no NetBox side-effect; the historical
+    ``bound_*`` fields on the QR are NOT auto-restored (see
+    ``QR.restore`` docstring for the rationale), so a restored QR can
+    be re-bound to any device via the normal mobile flow.
+
+    Web-only operation — the mobile app never undoes a retire (any
+    field-side mistakes are mediated by an admin reviewing the audit
+    log). The batch detail template renders this button on RETIRED
+    rows only when ``?show_retired=1`` is on, so the action is at most
+    one extra click for a deliberate operator.
+
+    Idempotent flash: already-FREE/BOUND comes back as a 409-shaped
+    info banner ("QR ... is FREE, nothing to restore") so re-submission
+    doesn't surface as a scary error.
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+    auth_user = await _build_auth_user_for_admin_action(user)
+    lifecycle = QRLifecycleService(
+        netbox_client=get_netbox_client(),
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=AuditLogRepository(session),
+        write_service=NetBoxWriteService(
+            get_netbox_client(), session, AuditLogRepository(session)
+        ),
+    )
+    # Always preserve ?show_retired=1 on the return URL — operator is
+    # likely batch-restoring several rows from the same view.
+    target_path = (
+        f"/web/batches/{batch_id}?show_retired=1"
+        if batch_id is not None
+        else "/web/batches/"
+    )
+    try:
+        await lifecycle.restore(qr_id=qr_id, user=auth_user)
+    except QRNotFoundError:
+        flash, kind = f"QR {qr_id} not registered", "error"
+    except QRStateConflictError as exc:
+        flash, kind = (
+            f"QR {qr_id} is {exc.current_status.value} — nothing to restore",
+            "info",
+        )
+    else:
+        flash, kind = f"QR {qr_id} restored to FREE", "info"
+    sep = "&" if "?" in target_path else "?"
+    return RedirectResponse(
+        url=f"{target_path}{sep}{urlencode({'flash': flash, 'flash_kind': kind})}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 # ---------- /web/devices/decommission GET + POST — decommission form --------
 
 

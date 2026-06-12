@@ -265,6 +265,74 @@ def test_qr_retire_from_retired_raises_illegal_qr_transition() -> None:
     assert "retired" in str(exc.value)
 
 
+# Restore (RETIRED → FREE) -------------------------------------------------------
+
+
+def test_qr_restore_from_retired_returns_clean_free_qr() -> None:
+    """RETIRED → FREE clears retired_at, retired_reason. State invariants are
+    satisfied (free => null bound + null retired_at)."""
+    retired = _retired()
+
+    restored = retired.restore()
+
+    assert restored.status is QRStatus.FREE
+    assert restored.bound_to_device_id is None
+    assert restored.bound_at is None
+    assert restored.bound_by_email is None
+    assert restored.retired_at is None
+    assert restored.retired_reason is None
+    # Same id / batch_id so the row maps to itself.
+    assert restored.id == retired.id
+    assert restored.batch_id == retired.batch_id
+
+
+def test_qr_restore_does_not_resurrect_prior_binding() -> None:
+    """If the QR was BOUND → RETIRED, restore() returns FREE — historical
+    bound_to_device_id is NOT auto-rebound. Safer default: don't recreate
+    a binding that might collide with another QR captured by that device
+    in the meantime."""
+    # Manually construct a retired-with-historical-binding case. The domain
+    # invariant allows RETIRED to carry residual bound_to_device_id from a
+    # BOUND → RETIRED transition (see QR.__post_init__).
+    retired_was_bound = QR(
+        id="DCQR-WASBOUND",
+        batch_id=_BATCH_ID,
+        status=QRStatus.RETIRED,
+        bound_to_device_id=42,  # residual from prior binding
+        bound_at=_BOUND_AT,
+        bound_by_email="engineer@example.com",
+        retired_at=_RETIRED_AT,
+        retired_reason="decommissioned",
+    )
+
+    restored = retired_was_bound.restore()
+
+    assert restored.status is QRStatus.FREE
+    # The historical binding is NOT carried over.
+    assert restored.bound_to_device_id is None
+    assert restored.bound_at is None
+    assert restored.bound_by_email is None
+
+
+def test_qr_restore_from_free_raises_illegal_qr_transition() -> None:
+    """restore() is RETIRED-only; FREE/BOUND → FREE is meaningless."""
+    qr = _free()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.restore()
+
+    assert "free" in str(exc.value)
+
+
+def test_qr_restore_from_bound_raises_illegal_qr_transition() -> None:
+    qr = _bound()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.restore()
+
+    assert "bound" in str(exc.value)
+
+
 def test_illegal_qr_transition_message_contains_from_and_to_states() -> None:
     qr = _retired()
 

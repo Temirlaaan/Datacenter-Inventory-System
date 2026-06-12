@@ -467,6 +467,72 @@ class QRLifecycleService:
         assert retired is not None
         return retired
 
+    async def restore(self, qr_id: str, user: AuthUser) -> QR:
+        """Transition RETIRED → FREE. Pure app-DB write — no NetBox call,
+        no compensation. Use case: admin retired a working sticker by
+        mistake (wrong row, fat-fingered the bulk-retire button) and
+        wants it back in the FREE pool.
+
+        Symmetric to ``_retire_free``: lock, re-check state, transition,
+        atomic SUCCESS audit row. The new row carries the prior status
+        in ``before_json`` so an auditor can pair restore with the
+        original retire by request_id / entity_id.
+
+        Historical ``bound_*`` fields on the QR are NOT auto-restored —
+        an accidentally-retired-while-BOUND QR comes back as FREE, and
+        admin must explicitly ``bind`` it again. Safer default: don't
+        recreate a binding that might collide with another QR that
+        captured the device in the meantime.
+
+        Raises ``QRNotFoundError`` (unknown id) or ``QRStateConflictError``
+        (QR is currently FREE or BOUND — restoring a non-retired QR is a
+        UX error, surface it to the caller).
+        """
+        if self._session.in_transaction():
+            raise RuntimeError(
+                "QRLifecycleService.restore called inside an active transaction"
+            )
+        request_id = UUID(current_request_id())
+        timestamp = datetime.now(UTC)
+        restored: QR | None = None
+        async with self._session.begin():
+            locked = await self._qr_code_repo.get_by_id_for_update(qr_id)
+            if locked is None:
+                raise QRNotFoundError(qr_id)
+            if locked.status is not QRStatus.RETIRED:
+                raise QRStateConflictError(locked.status)
+            restored = locked.restore()
+            await self._qr_code_repo.update(restored)
+            await self._audit_log_repo.insert(
+                AuditLogEntry(
+                    request_id=request_id,
+                    timestamp=timestamp,
+                    user_email=user.email or "",
+                    user_keycloak_id=UUID(user.sub),
+                    session_id=user.shift_session_id,
+                    operation="qr.restore",
+                    entity_type="qr",
+                    entity_id=qr_id,
+                    before_json={
+                        "status": QRStatus.RETIRED.value,
+                        "retired_at": (
+                            locked.retired_at.isoformat()
+                            if locked.retired_at
+                            else None
+                        ),
+                        "retired_reason": locked.retired_reason,
+                        # Capture the historical binding so an auditor can
+                        # tell what the QR was attached to before the retire
+                        # they're now undoing.
+                        "prior_bound_to_device_id": locked.bound_to_device_id,
+                    },
+                    after_json={"status": QRStatus.FREE.value},
+                    result=AuditResult.SUCCESS,
+                )
+            )
+        assert restored is not None
+        return restored
+
     async def _retire_bound(
         self,
         *,

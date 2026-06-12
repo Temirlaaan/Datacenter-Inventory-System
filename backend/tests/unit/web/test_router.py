@@ -56,6 +56,7 @@ from app.web.router import (
     web_devices_detail,
     web_devices_search,
     web_force_close_session,
+    web_qr_restore,
     web_qr_retire,
     web_qr_search,
     web_users_detail,
@@ -1683,10 +1684,15 @@ async def test_web_batches_create_strips_comment_to_none_when_blank(
 # --- web_qr_retire ---------------------------------------------------------
 
 
-def _patch_lifecycle_service(monkeypatch: pytest.MonkeyPatch, retire_impl: Any) -> None:
-    """Install a fake QRLifecycleService whose ``retire`` runs ``retire_impl``.
-    Wires up the netbox_client + write_service deps as no-ops since the
-    handler reaches them via the import path on each call."""
+def _patch_lifecycle_service(
+    monkeypatch: pytest.MonkeyPatch,
+    retire_impl: Any = None,
+    restore_impl: Any = None,
+) -> None:
+    """Install a fake QRLifecycleService. ``retire`` / ``restore`` impls are
+    optional — pass whichever the test under exercise hits. Wires up the
+    netbox_client + write_service deps as no-ops since the handler reaches
+    them via the import path on each call."""
 
     class _FakeRepo:
         def __init__(self, _session: object) -> None: ...
@@ -1698,7 +1704,12 @@ def _patch_lifecycle_service(monkeypatch: pytest.MonkeyPatch, retire_impl: Any) 
         def __init__(self, *args: object, **kwargs: object) -> None: ...
 
         async def retire(self, **kwargs: object) -> Any:
+            assert retire_impl is not None, "retire not stubbed in this test"
             return await retire_impl(**kwargs)
+
+        async def restore(self, **kwargs: object) -> Any:
+            assert restore_impl is not None, "restore not stubbed in this test"
+            return await restore_impl(**kwargs)
 
     monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
     monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
@@ -1880,6 +1891,115 @@ async def test_web_qr_retire_missing_version_redirects_with_error_flash(
     assert response.status_code == 303
     assert "flash_kind=error" in response.headers["location"]
     assert "device+decommission" in response.headers["location"]
+
+
+# --- web_qr_restore (RETIRED → FREE undo, 2026-06-11) ----------------------
+
+
+async def test_web_qr_restore_success_redirects_with_info_flash_and_show_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: service.restore returns cleanly → 303 to the originating
+    batch detail with ?show_retired=1 preserved (operator stays in the
+    "looking at retired rows" view to undo more if needed) + info flash."""
+    from uuid import uuid4
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _restore(**_kwargs: object) -> Any:
+        return None
+
+    _patch_lifecycle_service(monkeypatch, restore_impl=_restore)
+
+    batch_id = uuid4()
+    response = await web_qr_restore(
+        qr_id="QR-RESTORED",
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    # Returns to the originating batch view, with show_retired=1 still on.
+    assert loc.startswith(f"/web/batches/{batch_id}?show_retired=1&")
+    assert "flash_kind=info" in loc
+    assert "QR-RESTORED" in loc
+    assert "restored+to+FREE" in loc
+
+
+async def test_web_qr_restore_unknown_qr_redirects_with_error_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown QR id → QRNotFoundError → error flash. Mirrors retire path."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.qr.lifecycle import QRNotFoundError
+
+    async def _restore(**_kwargs: object) -> Any:
+        raise QRNotFoundError("QR-NOPE")
+
+    _patch_lifecycle_service(monkeypatch, restore_impl=_restore)
+
+    response = await web_qr_restore(
+        qr_id="QR-NOPE",
+        batch_id=None,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "not+registered" in response.headers["location"]
+
+
+async def test_web_qr_restore_already_free_redirects_with_info_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore on a non-retired QR (e.g. double-submit from a stale page) →
+    QRStateConflictError, mapped to a friendly info flash so the operator
+    doesn't see a scary error for a benign no-op."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.domain.qr import QRStatus
+    from app.services.qr.lifecycle import QRStateConflictError
+
+    async def _restore(**_kwargs: object) -> Any:
+        raise QRStateConflictError(current_status=QRStatus.FREE)
+
+    _patch_lifecycle_service(monkeypatch, restore_impl=_restore)
+
+    response = await web_qr_restore(
+        qr_id="QR-DOUBLE",
+        batch_id=None,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=info" in response.headers["location"]
+    assert "nothing+to+restore" in response.headers["location"]
+
+
+async def test_web_qr_restore_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad CSRF → 403, lifecycle service is never touched."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_qr_restore(
+            qr_id="QR-X",
+            batch_id=None,
+            csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
 
 
 # --- web_devices_decommission ----------------------------------------------

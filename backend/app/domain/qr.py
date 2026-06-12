@@ -88,6 +88,36 @@ class QR:
             retired_reason=reason,
         )
 
+    def restore(self) -> QR:
+        """Transition RETIRED -> FREE (undo of an accidental retire).
+
+        Added 2026-06-11 after admins reported retiring working stickers by
+        mistake (e.g. selected the wrong row, or got the "already retired"
+        idempotent-success path wrong). Forensics aren't lost — audit_log
+        keeps the prior ``qr.retire`` row, and the new ``qr.restore`` row
+        records the recovery.
+
+        Clears the historical bound_* fields along with retired_at/reason
+        so the resulting row satisfies the FREE branch of the
+        ``qr_state_consistency`` CHECK (free => bound_to_device_id IS NULL
+        AND retired_at IS NULL). If the QR was BOUND before being retired,
+        the old binding is NOT auto-restored — admin must explicitly
+        ``bind`` the QR to a device again. Safer default: don't recreate
+        a binding that might collide with another QR bound to that device
+        in the meantime.
+        """
+        if self.status is not QRStatus.RETIRED:
+            raise IllegalQRTransition(self.status, QRStatus.FREE)
+        return dataclasses.replace(
+            self,
+            status=QRStatus.FREE,
+            bound_to_device_id=None,
+            bound_at=None,
+            bound_by_email=None,
+            retired_at=None,
+            retired_reason=None,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class QRBatch:

@@ -950,6 +950,94 @@ async def test_retire_free_qr_disappeared_under_lock_raises_qr_not_found(
             await service.retire(_QR_ID, None, _user())
 
 
+# ========== restore — RETIRED → FREE undo path ==========
+
+
+async def test_restore_retired_transitions_to_free_with_zero_netbox_calls(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Pure app-DB operation — no NetBox PATCH, no journal entry."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, write_service = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _retired_qr()
+
+        with respx.mock(assert_all_called=False) as router:
+            restored = await service.restore(_QR_ID, _user())
+
+        assert router.calls.call_count == 0
+
+    assert restored.status is QRStatus.FREE
+    assert restored.bound_to_device_id is None
+    assert restored.retired_at is None
+    assert restored.retired_reason is None
+    assert qr_repo.updates == [restored]
+    assert write_service.calls == []
+
+
+async def test_restore_writes_atomic_success_audit_row_with_prior_state(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Audit row captures the retired→free transition. before_json carries
+    the retired_at / retired_reason / prior_bound_to_device_id so an
+    auditor can correlate this restore to the original retire by
+    request_id / entity_id."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, audit_repo, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _retired_qr()
+
+        await service.restore(_QR_ID, _user())
+
+    assert len(audit_repo.entries) == 1
+    entry = audit_repo.entries[0]
+    assert entry.result is AuditResult.SUCCESS
+    assert entry.operation == "qr.restore"
+    assert entry.entity_type == "qr"
+    assert entry.entity_id == _QR_ID
+    assert entry.before_json["status"] == "retired"
+    # The retired_at / retired_reason from the now-undone retire are captured.
+    assert entry.before_json["retired_at"] is not None
+    assert "retired_reason" in entry.before_json
+    assert entry.after_json == {"status": "free"}
+
+
+async def test_restore_unknown_qr_id_raises_qr_not_found(
+    clean_env: None, netbox_env: None
+) -> None:
+    async with NetBoxClient.from_settings() as client:
+        service, _s, _qr, _a, _ws = _build_service(client)
+
+        with pytest.raises(QRNotFoundError):
+            await service.restore("DCQR-NOT-EXIST", _user())
+
+
+async def test_restore_on_free_qr_raises_state_conflict(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Restoring an already-FREE QR is a UX error (admin clicked Restore
+    on the wrong row) — surface it to the caller, who maps it to a flash."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _free_qr()
+
+        with pytest.raises(QRStateConflictError) as exc_info:
+            await service.restore(_QR_ID, _user())
+    assert exc_info.value.current_status is QRStatus.FREE
+
+
+async def test_restore_on_bound_qr_raises_state_conflict(
+    clean_env: None, netbox_env: None
+) -> None:
+    """BOUND → FREE via restore is not allowed — admin must explicitly
+    retire then restore, or decommission via the device endpoint."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _bound_qr(device_id=42)
+
+        with pytest.raises(QRStateConflictError) as exc_info:
+            await service.restore(_QR_ID, _user())
+    assert exc_info.value.current_status is QRStatus.BOUND
+
+
 # ========== retire — BOUND path: Step B errors ==========
 
 
