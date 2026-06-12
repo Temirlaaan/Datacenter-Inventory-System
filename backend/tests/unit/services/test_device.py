@@ -325,6 +325,42 @@ def test_to_device_data_extracts_u_height_from_device_type() -> None:
     assert to_device_data(device).u_height == 4
 
 
+def test_to_device_data_prefers_top_level_u_height_for_netbox_4x() -> None:
+    """NetBox 4.x exposes ``u_height`` directly on the device serializer
+    (calculated property delegating to device_type). When present we read
+    from there — the nested ``device_type.u_height`` may not be expanded
+    in 4.x list responses.
+
+    Real 2026-06-11 prod incident on the rack-elevation phase 1: device 238
+    (PowerEdge R640, 1U) came back without nested u_height, the mobile
+    elevation defaulted every device to 1U-by-guess."""
+    device = _device(
+        device_type={
+            "id": 11,
+            "display": "PowerEdge R640",
+            "manufacturer": {"id": 1, "name": "Dell"},
+            # Note: NO u_height under device_type — partial 4.x nesting
+        }
+    )
+    device["u_height"] = 2  # NetBox 4.x exposes here
+    assert to_device_data(device).u_height == 2
+
+
+def test_to_device_data_falls_back_to_device_type_u_height_when_top_level_missing() -> None:
+    """NetBox 3.x compat: ``u_height`` lives only under device_type."""
+    device = _device(
+        device_type={
+            "id": 11,
+            "display": "C9300",
+            "manufacturer": {"id": 1, "name": "Cisco"},
+            "u_height": 3,
+        }
+    )
+    # Explicitly DON'T set device["u_height"] — pure 3.x shape.
+    assert "u_height" not in device or device["u_height"] is None
+    assert to_device_data(device).u_height == 3
+
+
 def test_to_device_data_device_type_name_falls_back_to_model_when_display_absent() -> None:
     device = _device(
         device_type={"id": 11, "model": "C9300-48U", "manufacturer": {"id": 1, "name": "X"}}

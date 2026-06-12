@@ -121,8 +121,16 @@ def to_device_data(device: dict[str, Any], *, qr_id: str | None = None) -> Devic
     role_raw = device.get("role") or device.get("device_role")
     device_role = ObjectRef(id=role_raw["id"], name=role_raw["name"]) if role_raw else None
 
-    # u_height is a property of the device model, exposed under device_type.
-    u_height = (device_type_raw or {}).get("u_height") if device_type_raw else None
+    # u_height: NetBox 4.x exposes it as a top-level field on the device
+    # serializer (calculated property delegating to device_type). 3.x and
+    # partial nested-expansion responses only carry it under device_type.
+    # Real 2026-06-11 incident: device 238 (PowerEdge R640, 1U) came back
+    # with both ``device.u_height`` AND ``device.device_type.u_height``
+    # absent in the wire format, so the mobile elevation rendered every
+    # device as 1U-by-guess. Check both locations defensively.
+    u_height = device.get("u_height")
+    if u_height is None and device_type_raw:
+        u_height = device_type_raw.get("u_height")
 
     primary_ip4_raw = device.get("primary_ip4")
     primary_ip4 = primary_ip4_raw["address"] if primary_ip4_raw else None
