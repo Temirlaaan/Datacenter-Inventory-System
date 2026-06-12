@@ -69,6 +69,33 @@ class QRCodeRepository:
         result = await self.session.execute(stmt)
         return [_to_domain(model) for model in result.scalars()]
 
+    async def search_by_id_substring(
+        self, *, fragment: str, limit: int = 50
+    ) -> list[QR]:
+        """Case-insensitive substring search on ``qr_codes.id``.
+
+        Used by the web admin's QR search page so the operator can type
+        ``"7F3A"`` and find ``"DCQR-7F3A2B"`` without remembering the full
+        slug. ``LIKE %fragment%`` over an index-light table — fine for the
+        current scale (a few thousand QRs). Capped at ``limit`` rows to
+        keep the page responsive on very loose queries; the form should
+        surface ``"more matches truncated"`` when the cap is hit.
+
+        Empty ``fragment`` returns an empty list (don't accidentally dump
+        the whole table).
+        """
+        if not fragment:
+            return []
+        # ILIKE so the operator doesn't have to type the case the slug uses.
+        stmt = (
+            select(QRCodeModel)
+            .where(QRCodeModel.id.ilike(f"%{fragment}%"))
+            .order_by(QRCodeModel.id)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [_to_domain(model) for model in result.scalars()]
+
     async def find_by_bound_device_id(self, device_id: int) -> QR | None:
         """Return the BOUND QR for ``device_id``, or ``None`` if none.
 

@@ -2339,6 +2339,12 @@ async def test_web_qr_search_renders_not_found_for_unknown_qr_id(
         async def get_by_id(self, _qr_id: str) -> None:
             return None
 
+        async def search_by_id_substring(
+            self, *, fragment: str, limit: int
+        ) -> list[Any]:
+            _ = fragment, limit
+            return []
+
     monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
 
     scope = {
@@ -2357,8 +2363,153 @@ async def test_web_qr_search_renders_not_found_for_unknown_qr_id(
         session=object(),  # type: ignore[arg-type]
     )
     assert response.status_code == 200
-    assert b"No QR with id" in response.body
+    assert b"No QR matches" in response.body
     assert b"QR-DOESNT-EXIST" in response.body
+
+
+async def test_web_qr_search_fragment_with_multiple_matches_renders_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typing ``"7F3A"`` (fragment, no exact match) should render a list of
+    matching QRs that the admin can click into — not a "Not found" message."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    batch_id = uuid4()
+    fragment_matches = [
+        QR(id="DCQR-7F3A2B", batch_id=batch_id, status=QRStatus.FREE,
+           bound_to_device_id=None, bound_at=None, bound_by_email=None,
+           retired_at=None, retired_reason=None),
+        QR(id="DCQR-7F3AC1", batch_id=batch_id, status=QRStatus.BOUND,
+           bound_to_device_id=42, bound_at=datetime(2026, 6, 10, tzinfo=UTC),
+           bound_by_email="b@x", retired_at=None, retired_reason=None),
+    ]
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> None:
+            return None
+
+        async def search_by_id_substring(
+            self, *, fragment: str, limit: int
+        ) -> list[QR]:
+            assert fragment == "7F3A"
+            assert limit >= len(fragment_matches)
+            return fragment_matches
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+
+    scope = {
+        "type": "http", "method": "GET",
+        "path": "/web/qr/search?qr_id=7F3A",
+        "scheme": "http", "server": ("test", 80),
+        "query_string": b"qr_id=7F3A",
+        "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope), qr_id="7F3A",
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    # Match count header + both ids rendered as clickable rows
+    assert b"2 matches" in body
+    assert b"DCQR-7F3A2B" in body
+    assert b"DCQR-7F3AC1" in body
+
+
+async def test_web_qr_search_fragment_with_single_match_renders_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One substring match → render the same detail block as if the admin had
+    typed the full id. No "1 match" header — they're effectively on the QR."""
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    canned = QR(
+        id="DCQR-7F3A2B", batch_id=uuid4(), status=QRStatus.FREE,
+        bound_to_device_id=None, bound_at=None, bound_by_email=None,
+        retired_at=None, retired_reason=None,
+    )
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> None:
+            return None
+
+        async def search_by_id_substring(
+            self, *, fragment: str, limit: int
+        ) -> list[QR]:
+            _ = fragment, limit
+            return [canned]
+
+    class _FakeAuditRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def query(self, **_kw: object) -> tuple[list[Any], bool]:
+            return [], False
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/web/qr/search?qr_id=7F3A",
+        "scheme": "http", "server": ("test", 80),
+        "query_string": b"qr_id=7F3A", "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope), qr_id="7F3A",
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    # Detail block (heading "QR <code>") rendered, NOT a "matches" list.
+    assert b"DCQR-7F3A2B" in body
+    assert b"matches for" not in body  # no list header
+
+
+async def test_web_qr_search_short_fragment_does_not_trigger_substring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inputs shorter than 3 chars skip the substring search entirely —
+    avoids "Q" matching every QR in the system."""
+    _set_env(monkeypatch)
+
+    called = False
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> None:
+            return None
+
+        async def search_by_id_substring(
+            self, *, fragment: str, limit: int
+        ) -> list[Any]:
+            nonlocal called
+            called = True
+            _ = fragment, limit
+            return []
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/web/qr/search?qr_id=QR",
+        "scheme": "http", "server": ("test", 80),
+        "query_string": b"qr_id=QR", "headers": [],
+    }
+    response = await web_qr_search(
+        request=Request(scope), qr_id="QR",
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    assert not called, "short input must skip substring search"
 
 
 async def test_web_qr_search_renders_free_qr_without_device_lookup(

@@ -262,6 +262,56 @@ async def test_qr_code_repository_get_by_id_returns_none_for_unknown_id() -> Non
         assert await QRCodeRepository(session).get_by_id("DCQR-ZZZZZZZZ") is None
 
 
+async def test_qr_code_repository_search_by_id_substring_finds_partial_match() -> None:
+    """``search_by_id_substring`` returns rows whose id contains the fragment,
+    case-insensitively. Powers the /web/qr/search "type-7F3A-find-the-7F3A2B"
+    UX so admins don't need to remember the full slug."""
+    batch = _batch()
+    codes = [
+        _free_qr("DCQR-7F3A2B01", batch.id),
+        _free_qr("DCQR-7F3AC123", batch.id),
+        _free_qr("DCQR-ABCD0000", batch.id),  # control — should NOT match "7F3A"
+    ]
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert(codes)
+        await session.commit()
+
+        # Upper-case fragment matches lower-case stored ids via ILIKE.
+        fetched = await QRCodeRepository(session).search_by_id_substring(fragment="7f3a")
+    assert {c.id for c in fetched} == {"DCQR-7F3A2B01", "DCQR-7F3AC123"}
+
+
+async def test_qr_code_repository_search_by_id_substring_empty_fragment_returns_empty_list() -> None:
+    """Defensive: empty fragment short-circuits — never accidentally dump the
+    whole ``qr_codes`` table."""
+    batch = _batch()
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert([_free_qr("DCQR-AAAAAAAA", batch.id)])
+        await session.commit()
+
+        assert await QRCodeRepository(session).search_by_id_substring(fragment="") == []
+
+
+async def test_qr_code_repository_search_by_id_substring_respects_limit() -> None:
+    """Cap matches at ``limit`` to keep the page render bounded on very loose
+    fragments. Ordering by id makes the truncated set deterministic."""
+    batch = _batch()
+    codes = [_free_qr(f"DCQR-AAAA00{i:02d}", batch.id) for i in range(10)]
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert(codes)
+        await session.commit()
+
+        fetched = await QRCodeRepository(session).search_by_id_substring(
+            fragment="AAAA", limit=3
+        )
+    assert len(fetched) == 3
+    # Sorted-by-id means the lowest three are returned.
+    assert [c.id for c in fetched] == ["DCQR-AAAA0000", "DCQR-AAAA0001", "DCQR-AAAA0002"]
+
+
 async def test_qr_code_repository_exists_returns_true_for_known_id() -> None:
     batch = _batch()
     qr = _free_qr("DCQR-AAAAAAAA", batch.id)

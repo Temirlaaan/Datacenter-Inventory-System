@@ -53,6 +53,7 @@ from app.db.repositories.shift_session import (
 )
 from app.db.session import get_session, get_sessionmaker
 from app.domain.audit import AuditLogEntry, AuditResult
+from app.domain.qr import QR
 from app.domain.shift_session import ShiftEndReason
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxNotFound
@@ -1785,6 +1786,10 @@ async def web_devices_add_comment(
 
 
 _WEB_QR_SEARCH_AUDIT_PAGE_SIZE = 20
+# Substring search cap. 50 keeps the page responsive on very loose
+# fragments like "DCQR" without dumping the whole table; the template
+# surfaces "more matches truncated" when this is hit.
+_WEB_QR_SEARCH_MATCH_LIMIT = 50
 
 
 @router.get("/qr/search", response_class=HTMLResponse)
@@ -1817,11 +1822,31 @@ async def web_qr_search(
                 "device_error": None,
                 "audit_rows": None,
                 "audit_has_more": False,
+                "matches": None,
+                "matches_truncated": False,
                 "lookup_attempted": False,
             },
         )
     qr_id = qr_id.strip()
-    qr = await QRCodeRepository(session).get_by_id(qr_id)
+    code_repo = QRCodeRepository(session)
+    qr = await code_repo.get_by_id(qr_id)
+    matches: list[QR] | None = None
+    matches_truncated = False
+    if qr is None and len(qr_id) >= 3:
+        # Substring fallback so an admin who types "7F3A" finds
+        # "DCQR-7F3A2B" without remembering the full slug. Capped at the
+        # repository limit + 1 so we can flag truncation in the template.
+        matches = await code_repo.search_by_id_substring(
+            fragment=qr_id, limit=_WEB_QR_SEARCH_MATCH_LIMIT + 1
+        )
+        if len(matches) > _WEB_QR_SEARCH_MATCH_LIMIT:
+            matches_truncated = True
+            matches = matches[:_WEB_QR_SEARCH_MATCH_LIMIT]
+        # If substring returned exactly one match, treat it as if the admin
+        # had typed the full id — render the detail block directly.
+        if len(matches) == 1:
+            qr = matches[0]
+            matches = None
     device = None
     device_error: str | None = None
     audit_rows: list[AuditLogEntry] = []
@@ -1840,7 +1865,7 @@ async def web_qr_search(
             except Exception as exc:  # NetBoxClientError / circuit open / etc.
                 device_error = f"Could not fetch bound device: {type(exc).__name__}"
         audit_rows, audit_has_more = await AuditLogRepository(session).query(
-            filters=AuditLogQueryFilters(entity_type="qr", entity_id=qr_id),
+            filters=AuditLogQueryFilters(entity_type="qr", entity_id=qr.id),
             page=1,
             page_size=_WEB_QR_SEARCH_AUDIT_PAGE_SIZE,
         )
@@ -1855,6 +1880,8 @@ async def web_qr_search(
             "device_error": device_error,
             "audit_rows": audit_rows,
             "audit_has_more": audit_has_more,
+            "matches": matches,
+            "matches_truncated": matches_truncated,
             "lookup_attempted": True,
         },
     )
