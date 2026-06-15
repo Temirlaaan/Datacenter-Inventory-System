@@ -65,8 +65,11 @@ class _StubMetaService:
     async def get_sites(self) -> list[MetaSite]:
         return self._sites
 
-    async def get_racks(self) -> list[MetaRack]:
-        return self._racks
+    async def get_racks(self, *, site_id: int | None = None) -> list[MetaRack]:
+        self.last_racks_site_id = site_id
+        if site_id is None:
+            return self._racks
+        return [r for r in self._racks if r.site_id == site_id]
 
     async def get_statuses(self) -> list[MetaStatus]:
         return self._statuses
@@ -92,9 +95,29 @@ async def test_list_sites_handler_returns_service_result() -> None:
 async def test_list_racks_handler_returns_service_result() -> None:
     stub = _StubMetaService(racks=[MetaRack(id=7, name="R-14", site_id=1, u_height=42)])
     result = await list_racks(
-        service=cast(MetaLookupService, stub), _user=_user("dcinv-mobile-user")
+        site_id=None,
+        service=cast(MetaLookupService, stub),
+        _user=_user("dcinv-mobile-user"),
     )
     assert result == [MetaRack(id=7, name="R-14", site_id=1, u_height=42)]
+
+
+async def test_list_racks_handler_passes_site_id_to_service() -> None:
+    """2026-06-15 fix: the endpoint must forward ?site_id= to the service
+    (it was previously dropped, returning every site's racks)."""
+    stub = _StubMetaService(
+        racks=[
+            MetaRack(id=7, name="R-14", site_id=1, u_height=42),
+            MetaRack(id=8, name="R-02", site_id=2, u_height=42),
+        ]
+    )
+    result = await list_racks(
+        site_id=1,
+        service=cast(MetaLookupService, stub),
+        _user=_user("dcinv-mobile-user"),
+    )
+    assert stub.last_racks_site_id == 1
+    assert [r.id for r in result] == [7]
 
 
 async def test_list_statuses_handler_returns_service_result() -> None:

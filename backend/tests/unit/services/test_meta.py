@@ -121,6 +121,34 @@ async def test_get_racks_fetches_and_transforms(clean_env: None, netbox_env: Non
     assert racks == [MetaRack(id=7, name="R-14", site_id=1, u_height=42)]
 
 
+async def test_get_racks_filters_by_site_id(clean_env: None, netbox_env: None) -> None:
+    """``site_id`` scopes the result to one site (2026-06-15 fix — the filter
+    was previously ignored and every site's racks came back). One upstream
+    read, in-memory filter over the cached full list."""
+    cache: TTLCache = TTLCache(ttl_seconds=300)
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/racks/").respond(
+                json=_page(
+                    [
+                        {"id": 7, "name": "R-14", "site": {"id": 1, "name": "DC-1"}, "u_height": 42},
+                        {"id": 8, "name": "R-02", "site": {"id": 2, "name": "DC-2"}, "u_height": 42},
+                        {"id": 9, "name": "R-15", "site": {"id": 1, "name": "DC-1"}, "u_height": 47},
+                    ]
+                )
+            )
+            service = MetaLookupService(client, cache)
+            site_1 = await service.get_racks(site_id=1)
+            # Second call hits the cache (assert_all_called still satisfied by
+            # the single upstream GET); proves filtering is post-cache.
+            site_2 = await service.get_racks(site_id=2)
+            all_racks = await service.get_racks()
+
+    assert [r.id for r in site_1] == [7, 9]
+    assert [r.id for r in site_2] == [8]
+    assert {r.id for r in all_racks} == {7, 8, 9}
+
+
 async def test_get_racks_returns_empty_list_when_netbox_has_no_racks(
     clean_env: None, netbox_env: None
 ) -> None:

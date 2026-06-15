@@ -9,7 +9,7 @@ All require the ``dcinv-mobile-user`` role.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.auth.dependencies import AuthUser, require_role
 from app.netbox.client import get_netbox_client
@@ -43,11 +43,13 @@ async def list_sites(
 
 @router.get("/racks", response_model=list[MetaRack])
 async def list_racks(
+    site_id: int | None = Query(default=None, ge=1, alias="site_id"),
     service: MetaLookupService = Depends(get_meta_service),
     _user: AuthUser = Depends(require_role("dcinv-mobile-user")),
 ) -> list[MetaRack]:
-    """All NetBox racks — the form's Rack reference field."""
-    return await service.get_racks()
+    """NetBox racks for the form's Rack reference field. ``?site_id=N``
+    scopes to one site (2026-06-15 fix — the param was previously ignored)."""
+    return await service.get_racks(site_id=site_id)
 
 
 @router.get("/statuses", response_model=list[MetaStatus])

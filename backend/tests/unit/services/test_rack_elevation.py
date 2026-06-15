@@ -56,15 +56,20 @@ def _device(
     u_height: float | None = 1,
     face: str | None = "front",
     nested_u_height: float | None = None,
+    device_type_id: int = 11,
 ) -> dict[str, Any]:
-    """A NetBox device row trimmed to what the elevation transform reads."""
+    """A NetBox device row trimmed to what the elevation transform reads.
+
+    The nested ``device_type`` carries only ``id`` reliably — ``u_height`` is
+    resolved from the device-types resource, not from here (mirrors NetBox's
+    brief nested serializer)."""
     return {
         "id": device_id,
         "name": name,
         "status": {"value": "active", "label": "Active"},
         "role": {"id": 31, "name": "Server"},
         "device_type": {
-            "id": 11,
+            "id": device_type_id,
             "model": "PowerEdge R640",
             "display": "PowerEdge R640",
             "u_height": nested_u_height,
@@ -75,41 +80,77 @@ def _device(
     }
 
 
+def _device_types(types: list[dict[str, Any]]) -> dict[str, Any]:
+    """A NetBox device-types list payload (the authoritative u_height source)."""
+    return _page(
+        [
+            {
+                "id": t["id"],
+                "model": t.get("model", "model"),
+                "manufacturer": {"name": "Dell"},
+                "u_height": t["u_height"],
+            }
+            for t in types
+        ]
+    )
+
+
 def _mock_rack_routes(
     router: respx.Router,
     *,
     devices: list[dict[str, Any]],
     reservations: list[dict[str, Any]] | None = None,
+    device_types: list[dict[str, Any]] | None = None,
 ) -> None:
     router.get(f"{NETBOX_URL}/api/dcim/racks/{_RACK_ID}/").respond(json=_rack_payload())
     router.get(f"{NETBOX_URL}/api/dcim/devices/").respond(json=_page(devices))
     router.get(f"{NETBOX_URL}/api/dcim/rack-reservations/").respond(
         json=_page(reservations or [])
     )
+    # Default: device-type 11 (used by the _device() helper) at 1U.
+    router.get(f"{NETBOX_URL}/api/dcim/device-types/").respond(
+        json=_device_types(device_types or [{"id": 11, "u_height": 1}])
+    )
 
 
-# ---------- u_height / face resolvers (pure helpers) ----------
+@pytest.fixture(autouse=True)
+def _clear_meta_cache() -> Any:
+    """The device-types lookup reads the process-wide meta cache singleton;
+    clear it around each test so mocked responses aren't masked by a warm
+    cache from another test."""
+    from app.services.meta import get_meta_cache
+
+    get_meta_cache.cache_clear()
+    yield
+    get_meta_cache.cache_clear()
 
 
-def test_resolve_u_height_prefers_top_level_field() -> None:
-    assert _resolve_u_height({"u_height": 2, "device_type": {"u_height": 4}}) == 2
+# ---------- u_height resolver (pure helper) ----------
 
 
-def test_resolve_u_height_falls_back_to_device_type() -> None:
-    assert _resolve_u_height({"u_height": None, "device_type": {"u_height": 4}}) == 4
+def test_resolve_u_height_prefers_device_type_map() -> None:
+    """The authoritative {device_type_id: u_height} map wins over any inline
+    value — the device serializer's nested u_height is unreliable/absent."""
+    device = {"device_type": {"id": 11, "u_height": 99}, "u_height": 99}
+    assert _resolve_u_height(device, {11: 2}) == 2
+
+
+def test_resolve_u_height_falls_back_to_inline_when_type_not_in_map() -> None:
+    assert _resolve_u_height({"u_height": 4, "device_type": {"id": 11}}, {}) == 4
+    assert _resolve_u_height({"u_height": None, "device_type": {"u_height": 4}}, {}) == 4
 
 
 def test_resolve_u_height_defaults_to_one_when_absent_everywhere() -> None:
-    """The prod defect from the TZ: device 238 came back with null u_height
-    everywhere — mobile must still get a drawable ≥ 1 block."""
-    assert _resolve_u_height({"u_height": None, "device_type": {"u_height": None}}) == 1
-    assert _resolve_u_height({}) == 1
+    """Real TZ defect: device 238 came back with null u_height everywhere AND
+    not in the map — mobile must still get a drawable ≥ 1 block."""
+    assert _resolve_u_height({"u_height": None, "device_type": {"u_height": None}}, {}) == 1
+    assert _resolve_u_height({}, {}) == 1
 
 
-def test_resolve_u_height_rounds_fractional_up_and_clamps_to_one() -> None:
-    assert _resolve_u_height({"u_height": 0.5}) == 1  # half-U → one drawable unit
-    assert _resolve_u_height({"u_height": 2.5}) == 3
-    assert _resolve_u_height({"u_height": 0}) == 1  # 0U (vertical PDU) clamps
+def test_resolve_u_height_rounds_inline_fractional_up_and_clamps_to_one() -> None:
+    assert _resolve_u_height({"u_height": 0.5}, {}) == 1  # half-U → one block
+    assert _resolve_u_height({"u_height": 2.5}, {}) == 3
+    assert _resolve_u_height({"u_height": 0}, {}) == 1  # 0U (vertical PDU) clamps
 
 
 def test_resolve_face_passes_front_and_rear_defaults_otherwise() -> None:
@@ -131,9 +172,13 @@ async def test_get_elevation_assembles_rack_devices_and_reservations(
             _mock_rack_routes(
                 router,
                 devices=[
-                    _device(device_id=238, position=34, u_height=1, face="front"),
-                    _device(device_id=239, name="san-1", position=10, u_height=4, face="rear"),
+                    _device(device_id=238, position=34, face="front", device_type_id=11),
+                    _device(
+                        device_id=239, name="san-1", position=10, face="rear",
+                        device_type_id=12,
+                    ),
                 ],
+                device_types=[{"id": 11, "u_height": 1}, {"id": 12, "u_height": 4}],
                 reservations=[
                     {"units": [20, 21], "description": "Под новый SAN, заявка №123"}
                 ],
@@ -197,9 +242,10 @@ async def test_get_elevation_occupied_units_deduplicates_front_rear_overlap(
             _mock_rack_routes(
                 router,
                 devices=[
-                    _device(device_id=1, position=10, u_height=2, face="front"),
-                    _device(device_id=2, position=10, u_height=2, face="rear"),
+                    _device(device_id=1, position=10, face="front"),
+                    _device(device_id=2, position=10, face="rear"),
                 ],
+                device_types=[{"id": 11, "u_height": 2}],
             )
             result = await RackElevationService(
                 client, TTLCache(ttl_seconds=60)
@@ -209,24 +255,29 @@ async def test_get_elevation_occupied_units_deduplicates_front_rear_overlap(
     assert result.occupied_units == 2
 
 
-async def test_get_elevation_resolves_u_height_from_device_type_when_top_level_null(
+async def test_get_elevation_resolves_u_height_from_device_types_resource(
     clean_env: None, netbox_env: None
 ) -> None:
-    """The exact prod shape from the TZ: device 238 (R640) with top-level
-    u_height null — resolve via device_type."""
+    """2026-06-15 mobile bug: a 2U disk shelf whose nested device_type carries
+    NO u_height (brief serializer) must still resolve to 2U via the
+    authoritative /api/dcim/device-types resource — not default to 1."""
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:
             _mock_rack_routes(
                 router,
                 devices=[
-                    _device(device_id=238, position=34, u_height=None, nested_u_height=1)
+                    _device(
+                        device_id=238, position=34, u_height=None,
+                        nested_u_height=None, device_type_id=11,
+                    )
                 ],
+                device_types=[{"id": 11, "u_height": 2}],
             )
             result = await RackElevationService(
                 client, TTLCache(ttl_seconds=60)
             ).get_elevation(_RACK_ID)
 
-    assert result.devices[0].u_height == 1
+    assert result.devices[0].u_height == 2
 
 
 async def test_get_elevation_caches_within_ttl(clean_env: None, netbox_env: None) -> None:

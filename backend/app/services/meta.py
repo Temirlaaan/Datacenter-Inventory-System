@@ -85,8 +85,20 @@ class MetaLookupService:
     async def get_sites(self) -> list[MetaSite]:
         return await self._cache.get_or_fetch(_SITES_KEY, self._fetch_sites)
 
-    async def get_racks(self) -> list[MetaRack]:
-        return await self._cache.get_or_fetch(_RACKS_KEY, self._fetch_racks)
+    async def get_racks(self, *, site_id: int | None = None) -> list[MetaRack]:
+        """All racks, optionally scoped to one site.
+
+        The full list is fetched once and cached under a single key; the
+        ``site_id`` filter is applied in-memory over the cached result.
+        Filtering server-side here (rather than per-site NetBox calls keyed
+        in the cache) keeps a single upstream read for a single-DC rack count
+        while still honouring ``?site_id=`` — 2026-06-15 mobile bug: the
+        endpoint silently ignored the filter and returned every site's racks.
+        """
+        racks = await self._cache.get_or_fetch(_RACKS_KEY, self._fetch_racks)
+        if site_id is None:
+            return racks
+        return [r for r in racks if r.site_id == site_id]
 
     async def get_statuses(self) -> list[MetaStatus]:
         return await self._cache.get_or_fetch(_STATUSES_KEY, self._fetch_statuses)

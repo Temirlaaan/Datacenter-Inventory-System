@@ -58,6 +58,51 @@ def _device(**overrides: Any) -> dict[str, Any]:
     return device
 
 
+@pytest.fixture(autouse=True)
+def _clear_meta_cache() -> Any:
+    """get_device/search resolve u_height via the process-wide meta cache
+    singleton; clear it around each test so a warm cache from another test
+    doesn't mask (or substitute for) the mocked device-types response."""
+    from app.services.meta import get_meta_cache
+
+    get_meta_cache.cache_clear()
+    yield
+    get_meta_cache.cache_clear()
+
+
+async def test_get_device_resolves_u_height_from_device_types_resource(
+    clean_env: None, netbox_env: None
+) -> None:
+    """2026-06-15 mobile bug: the device serializer nests device_type WITHOUT
+    u_height, so a 2U device read as null. Resolve from the authoritative
+    /api/dcim/device-types resource (id 11 -> 2U)."""
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/5/").respond(
+                json=_device(
+                    device_type={"id": 11, "model": "MD1400", "display": "MD1400"}
+                )
+            )
+            router.get(f"{NETBOX_URL}/api/dcim/device-types/").respond(
+                json={
+                    "count": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {
+                            "id": 11,
+                            "model": "MD1400",
+                            "manufacturer": {"id": 1, "name": "Dell"},
+                            "u_height": 2,
+                        }
+                    ],
+                }
+            )
+            result = await DeviceService(client).get_device(5)
+
+    assert result.data.u_height == 2
+
+
 async def test_get_device_parses_a_full_device(clean_env: None, netbox_env: None) -> None:
     async with NetBoxClient.from_settings() as client:
         with respx.mock(assert_all_called=True) as router:

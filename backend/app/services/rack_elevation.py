@@ -82,16 +82,22 @@ class RackElevationResponse(BaseModel):
     occupied_units: int
 
 
-def _resolve_u_height(device: dict[str, Any]) -> int:
-    """Device u_height: top-level (NetBox 4.x) → device_type (3.x) → 1.
+def _resolve_u_height(device: dict[str, Any], u_height_map: dict[int, int]) -> int:
+    """Device u_height, ≥ 1.
 
-    Same fallback chain as ``to_device_data`` (2026-06-11 u_height fix).
-    ``math.ceil`` handles fractional heights (NetBox allows 0.5U); minimum 1
-    so the mobile client never draws a zero-height block.
+    Primary source is ``u_height_map`` (``{device_type_id: u_height}`` resolved
+    from the authoritative device-types resource) — the device serializer
+    nests ``device_type`` as a brief object WITHOUT ``u_height`` (2026-06-15
+    mobile bug: multi-U disk shelves rendered as 1U). Falls back to any inline
+    value, then 1. ``math.ceil`` covers fractional heights (NetBox allows
+    0.5U) so the client never draws a zero-height block.
     """
+    device_type = device.get("device_type") or {}
+    dt_id = device_type.get("id")
+    if dt_id is not None and dt_id in u_height_map:
+        return u_height_map[dt_id]
     raw = device.get("u_height")
     if raw is None:
-        device_type = device.get("device_type") or {}
         raw = device_type.get("u_height")
     if raw is None:
         return 1
@@ -125,6 +131,28 @@ class RackElevationService:
 
         return await self._cache.get_or_fetch(f"elevation:{rack_id}", _fetch)
 
+    async def _u_height_by_device_type(
+        self, devices: list[dict[str, Any]]
+    ) -> dict[int, int]:
+        """``{device_type_id: u_height}`` from the cached ``/meta/device-types``.
+
+        The device serializer nests ``device_type`` without ``u_height``, so we
+        resolve the height from the authoritative device-types resource. That
+        list is cached 5 minutes, so this adds no NetBox round trip on a warm
+        cache no matter how many device types the rack holds.
+        """
+        type_ids = {
+            tid
+            for d in devices
+            if (tid := (d.get("device_type") or {}).get("id")) is not None
+        }
+        if not type_ids:
+            return {}
+        from app.services.meta import MetaLookupService, get_meta_cache
+
+        types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        return {t.id: max(1, t.u_height) for t in types if t.id in type_ids}
+
     async def _fetch_elevation(self, rack_id: int) -> RackElevationResponse:
         # Rack first — a 404 here aborts before the two list calls.
         rack_resp = await self._netbox.get(f"/api/dcim/racks/{rack_id}/")
@@ -140,6 +168,11 @@ class RackElevationService:
         )
         reservations_raw: list[dict[str, Any]] = reservations_resp.json().get("results", [])
 
+        # {device_type_id: u_height} from the authoritative device-types
+        # resource (cached 5 min) — the device list nests device_type as a
+        # brief object without u_height (2026-06-15 fix).
+        u_height_map = await self._u_height_by_device_type(devices_raw)
+
         devices: list[ElevationDevice] = []
         unpositioned = 0
         occupied: set[int] = set()
@@ -151,7 +184,7 @@ class RackElevationService:
                 # the array, surfaced via unpositioned_count).
                 unpositioned += 1
                 continue
-            u_height = _resolve_u_height(d)
+            u_height = _resolve_u_height(d, u_height_map)
             bottom_unit = int(position)
             status_raw = d.get("status") or {}
             role_raw = d.get("role") or d.get("device_role") or {}

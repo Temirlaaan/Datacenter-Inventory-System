@@ -80,7 +80,19 @@ catch-all ``custom_fields`` map. Production verification 2026-06-04 moved
 ``asset_tag`` off the custom-fields path onto NetBox 4.x's native field."""
 
 
-def to_device_data(device: dict[str, Any], *, qr_id: str | None = None) -> DeviceData:
+def _device_type_id(device: dict[str, Any]) -> int | None:
+    """The device's ``device_type`` id, or ``None`` when absent. The id is
+    always present in NetBox's brief nested device_type (unlike ``u_height``)."""
+    dt = device.get("device_type") or {}
+    return dt.get("id")
+
+
+def to_device_data(
+    device: dict[str, Any],
+    *,
+    qr_id: str | None = None,
+    u_height_override: int | None = None,
+) -> DeviceData:
     """Project a raw NetBox device object onto ``DeviceData``.
 
     The Sprint 4 Task 3 additions are all read defensively (``.get()`` chains)
@@ -121,16 +133,19 @@ def to_device_data(device: dict[str, Any], *, qr_id: str | None = None) -> Devic
     role_raw = device.get("role") or device.get("device_role")
     device_role = ObjectRef(id=role_raw["id"], name=role_raw["name"]) if role_raw else None
 
-    # u_height: NetBox 4.x exposes it as a top-level field on the device
-    # serializer (calculated property delegating to device_type). 3.x and
-    # partial nested-expansion responses only carry it under device_type.
-    # Real 2026-06-11 incident: device 238 (PowerEdge R640, 1U) came back
-    # with both ``device.u_height`` AND ``device.device_type.u_height``
-    # absent in the wire format, so the mobile elevation rendered every
-    # device as 1U-by-guess. Check both locations defensively.
-    u_height = device.get("u_height")
-    if u_height is None and device_type_raw:
-        u_height = device_type_raw.get("u_height")
+    # u_height resolution. The NetBox device serializer nests ``device_type``
+    # as a BRIEF object that does NOT carry ``u_height`` (confirmed 2026-06-15
+    # by mobile: multi-U devices like disk shelves came back as 1U). The
+    # authoritative value lives on the device-type resource; the service layer
+    # resolves it from the cached ``/meta/device-types`` and passes it here as
+    # ``u_height_override``. The inline ``.get()`` chain stays as a best-effort
+    # fallback for callers that don't resolve (e.g. QR bind/retire/rebind
+    # responses, where u_height is incidental).
+    u_height = u_height_override
+    if u_height is None:
+        u_height = device.get("u_height")
+        if u_height is None and device_type_raw:
+            u_height = device_type_raw.get("u_height")
 
     primary_ip4_raw = device.get("primary_ip4")
     primary_ip4 = primary_ip4_raw["address"] if primary_ip4_raw else None
@@ -315,7 +330,35 @@ class DeviceService:
     async def get_device(self, device_id: int) -> DeviceResponse:
         """Fetch device ``device_id`` from NetBox. Raises ``NetBoxNotFound`` if absent."""
         device = await self.get_device_raw(device_id)
-        return DeviceResponse(data=to_device_data(device), version=device["last_updated"])
+        u_height_map = await self._u_height_by_device_type([device])
+        dt_id = _device_type_id(device)
+        override = u_height_map.get(dt_id) if dt_id is not None else None
+        return DeviceResponse(
+            data=to_device_data(device, u_height_override=override),
+            version=device["last_updated"],
+        )
+
+    async def _u_height_by_device_type(
+        self, devices: list[dict[str, Any]]
+    ) -> dict[int, int]:
+        """``{device_type_id: u_height}`` resolved from the cached
+        ``/meta/device-types`` resource.
+
+        The device serializer nests ``device_type`` as a brief object without
+        ``u_height`` (2026-06-15 mobile bug), so the value can't be read
+        inline. The device-types resource carries the authoritative height and
+        is already cached 5 minutes — reusing that cache adds zero NetBox round
+        trips on a warm cache, regardless of how many devices we resolve.
+        """
+        type_ids = {tid for d in devices if (tid := _device_type_id(d)) is not None}
+        if not type_ids:
+            return {}
+        # Local import avoids a module-level cycle (meta imports nothing from
+        # device, but keep the dependency one-directional + lazy).
+        from app.services.meta import MetaLookupService, get_meta_cache
+
+        types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        return {t.id: max(1, t.u_height) for t in types if t.id in type_ids}
 
     async def get_device_raw(self, device_id: int) -> dict[str, Any]:
         """Like ``get_device`` but returns the raw NetBox payload.
@@ -400,9 +443,19 @@ class DeviceService:
         raw_devices: list[dict[str, Any]] = payload.get("results", [])
         has_more = len(raw_devices) > page_size
         trimmed = raw_devices[:page_size]
+        # One device-types lookup (cached) covers every row's u_height.
+        u_height_map = await self._u_height_by_device_type(trimmed)
+
+        def _u(d: dict[str, Any]) -> int | None:
+            dt_id = _device_type_id(d)
+            return u_height_map.get(dt_id) if dt_id is not None else None
+
         return DeviceSearchResponse(
             results=[
-                DeviceResponse(data=to_device_data(d), version=d["last_updated"])
+                DeviceResponse(
+                    data=to_device_data(d, u_height_override=_u(d)),
+                    version=d["last_updated"],
+                )
                 for d in trimmed
             ],
             page=page,
