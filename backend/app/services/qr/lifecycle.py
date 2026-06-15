@@ -41,7 +41,7 @@ from app.domain.audit import AuditLogEntry, AuditResult
 from app.domain.qr import QR, QRStatus
 from app.netbox.client import NetBoxClient
 from app.observability.request_id import current_request_id
-from app.services.netbox_write import NetBoxWriteService
+from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 
 logger = structlog.get_logger()
 
@@ -121,6 +121,58 @@ class QRRetireInconsistencyError(Exception):
         )
         self.qr_id = qr_id
         self.device_id = device_id
+
+
+class SameDeviceError(Exception):
+    """Rebind target is the QR's current device — nothing to move."""
+
+    def __init__(self, device_id: int) -> None:
+        super().__init__(f"QR is already bound to device {device_id}")
+        self.device_id = device_id
+
+
+class DeviceAlreadyBoundError(Exception):
+    """The rebind target device already carries a different QR token.
+
+    We refuse to silently steal a label from another device — the operator
+    must resolve the conflict (retire the other QR, or pick a different
+    device). Carries the existing token so the endpoint can surface it.
+    """
+
+    def __init__(self, device_id: int, existing_qr_id: str) -> None:
+        super().__init__(
+            f"Device {device_id} already has QR {existing_qr_id}"
+        )
+        self.device_id = device_id
+        self.existing_qr_id = existing_qr_id
+
+
+class QRRebindRolledBackError(Exception):
+    """A rebind step failed after a NetBox PATCH; compensation restored the
+    original (old-device-bound) state."""
+
+    def __init__(self, qr_id: str, old_device_id: int, new_device_id: int) -> None:
+        super().__init__(
+            f"Rebind of QR {qr_id} from device {old_device_id} to "
+            f"{new_device_id} rolled back"
+        )
+        self.qr_id = qr_id
+        self.old_device_id = old_device_id
+        self.new_device_id = new_device_id
+
+
+class QRRebindInconsistencyError(Exception):
+    """A rebind step failed AND compensation failed; NetBox custom_fields may
+    diverge from qr_codes. Manual cleanup required."""
+
+    def __init__(self, qr_id: str, old_device_id: int, new_device_id: int) -> None:
+        super().__init__(
+            f"Rebind of QR {qr_id} (device {old_device_id} -> {new_device_id}) "
+            "left an inconsistency — manual cleanup required"
+        )
+        self.qr_id = qr_id
+        self.old_device_id = old_device_id
+        self.new_device_id = new_device_id
 
 
 class _PostNetBoxStateRace(Exception):
@@ -532,6 +584,417 @@ class QRLifecycleService:
             )
         assert restored is not None
         return restored
+
+    # ---------- rebind (BOUND -> BOUND, change device) ----------
+
+    async def rebind(
+        self,
+        qr_id: str,
+        new_device_id: int,
+        expected_version: str,
+        reason: str,
+        user: AuthUser,
+    ) -> tuple[QR, dict[str, Any]]:
+        """Move a BOUND QR from its current device to ``new_device_id``.
+
+        Returns ``(rebound_qr, new_device_dict)``. The saga writes a single
+        ``qr.rebind`` audit row (atomic with the registry update) plus two
+        best-effort NetBox journals (one per device). NOT routed through
+        ``patch_with_attribution`` — that would emit a second audit row and
+        couldn't carry both device ids in one record.
+
+        Raises:
+        - ``QRNotFoundError`` — unknown qr_id.
+        - ``QRStateConflictError`` — QR is FREE (use bind) or RETIRED (terminal).
+        - ``SameDeviceError`` — new_device_id == current device.
+        - ``NetBoxNotFound`` — new device doesn't exist (propagated from the GET).
+        - ``DeviceAlreadyBoundError`` — new device already has a QR token.
+        - ``WriteConflictError`` — new device changed since the client read it.
+        - ``QRRebindRolledBackError`` / ``QRRebindInconsistencyError`` — a
+          post-PATCH failure with compensation (recovered / unrecovered).
+
+        Ordering rationale: set-new -> clear-old -> registry. The most likely
+        failure (new-device OCC conflict) happens BEFORE any durable write, so
+        it needs zero compensation. See the saga for the failure matrix.
+        """
+        # Same defensive guard as bind/retire — the saga opens its own
+        # session.begin(), so an already-active tx would conflict.
+        if self._session.in_transaction():
+            raise RuntimeError(
+                "QRLifecycleService.rebind called inside an active transaction"
+            )
+
+        # Step A — pre-validate the QR (cheap, own tx that closes autobegin).
+        async with self._session.begin():
+            qr = await self._qr_code_repo.get_by_id(qr_id)
+        if qr is None:
+            raise QRNotFoundError(qr_id)
+        if qr.status is not QRStatus.BOUND:
+            raise QRStateConflictError(qr.status)
+        old_device_id = qr.bound_to_device_id
+        if old_device_id is None:
+            # Unreachable under the qr_state_consistency CHECK (BOUND => non-null
+            # bound_to_device_id); RuntimeError survives `python -O`.
+            raise RuntimeError(
+                f"BOUND QR {qr_id} has no bound_to_device_id — invariant violated"
+            )
+        if old_device_id == new_device_id:
+            raise SameDeviceError(new_device_id)
+
+        # Step B — read the new device: existence, free-ness, and OCC. The GET
+        # raising NetBoxNotFound propagates to the endpoint as DEVICE_NOT_FOUND.
+        new_device = (
+            await self._netbox.get(f"/api/dcim/devices/{new_device_id}/")
+        ).json()
+        existing_token = (new_device.get("custom_fields") or {}).get("qr_id")
+        if existing_token:
+            raise DeviceAlreadyBoundError(new_device_id, str(existing_token))
+        observed_version = new_device.get("last_updated")
+        if observed_version != expected_version:
+            # Conflict BEFORE any durable change — consistent with _retire_free's
+            # QRStateConflictError handling (raise, no audit row at this layer;
+            # nothing happened to record). The endpoint maps to 409.
+            raise WriteConflictError(
+                current_object=new_device, current_version=observed_version
+            )
+
+        # Step C — the saga (set new, clear old, registry+audit) with compensation.
+        rebound = await self._commit_rebind_or_compensate(
+            qr=qr,
+            old_device_id=old_device_id,
+            new_device_id=new_device_id,
+            reason=reason,
+            user=user,
+        )
+        # Re-read the new device so the caller returns its post-PATCH version.
+        refreshed = (
+            await self._netbox.get(f"/api/dcim/devices/{new_device_id}/")
+        ).json()
+        return rebound, refreshed
+
+    async def _commit_rebind_or_compensate(
+        self,
+        *,
+        qr: QR,
+        old_device_id: int,
+        new_device_id: int,
+        reason: str,
+        user: AuthUser,
+    ) -> QR:
+        """The rebind saga. Failure matrix (durable writes in order):
+
+        - C1 set-new fails: nothing durable — error propagates, no compensation.
+        - C2 clear-old fails: only new is set -> clear new -> rolled back.
+        - C3 registry fails: new set + old cleared -> clear new + restore old
+          -> rolled back (or inconsistency if a compensation PATCH fails).
+        """
+        qr_id = qr.id
+
+        # C1 — set new device's qr_id (durable point 1). A NetBox error here
+        # propagates untouched; the endpoint maps it (502 / validation).
+        await self._netbox.patch(
+            f"/api/dcim/devices/{new_device_id}/",
+            json={"custom_fields": {"qr_id": qr_id}},
+        )
+
+        # C2 — clear old device's qr_id (durable point 2).
+        try:
+            await self._netbox.patch(
+                f"/api/dcim/devices/{old_device_id}/",
+                json={"custom_fields": {"qr_id": None}},
+            )
+        except Exception as err:
+            await self._run_rebind_compensation(
+                qr_id=qr_id,
+                old_device_id=old_device_id,
+                new_device_id=new_device_id,
+                restore_old=False,
+                original_err=err,
+                user=user,
+            )
+
+        # C3 — registry update + qr.rebind audit, atomic.
+        try:
+            rebound = await self._commit_rebind_registry(
+                qr=qr,
+                old_device_id=old_device_id,
+                new_device_id=new_device_id,
+                reason=reason,
+                user=user,
+            )
+        except Exception as err:
+            await self._run_rebind_compensation(
+                qr_id=qr_id,
+                old_device_id=old_device_id,
+                new_device_id=new_device_id,
+                restore_old=True,
+                original_err=err,
+                user=user,
+            )
+
+        # C4 — best-effort journals on both devices (decision B: attribution is
+        # best-effort; a journal failure never rolls back the durable rebind).
+        await self._best_effort_rebind_journals(
+            qr_id=qr_id,
+            old_device_id=old_device_id,
+            new_device_id=new_device_id,
+            reason=reason,
+            user=user,
+        )
+        return rebound
+
+    async def _commit_rebind_registry(
+        self,
+        *,
+        qr: QR,
+        old_device_id: int,
+        new_device_id: int,
+        reason: str,
+        user: AuthUser,
+    ) -> QR:
+        """FOR UPDATE re-check + registry move + SUCCESS audit, all in one tx.
+
+        Re-checks BOUND state AND that the QR still points at ``old_device_id``
+        under the lock — a concurrent rebind/retire that moved it raises
+        ``_PostNetBoxStateRace``. The ``qr_one_per_device`` partial unique
+        index may also reject the update if another QR captured new_device in
+        the registry; that ``IntegrityError`` propagates and the caller
+        compensates.
+        """
+        request_id = UUID(current_request_id())
+        timestamp = datetime.now(UTC)
+        rebound: QR | None = None
+        async with self._session.begin():
+            locked = await self._qr_code_repo.get_by_id_for_update(qr.id)
+            if locked is None:
+                raise _PostNetBoxStateRace("qr_disappeared")
+            if locked.status is not QRStatus.BOUND:
+                raise _PostNetBoxStateRace(f"qr_not_bound:{locked.status.value}")
+            if locked.bound_to_device_id != old_device_id:
+                raise _PostNetBoxStateRace(
+                    f"qr_moved:{locked.bound_to_device_id}"
+                )
+            rebound = locked.rebind(
+                device_id=new_device_id,
+                by_email=user.email or "",
+                at=timestamp,
+            )
+            await self._qr_code_repo.update(rebound)
+            await self._audit_log_repo.insert(
+                AuditLogEntry(
+                    request_id=request_id,
+                    timestamp=timestamp,
+                    user_email=user.email or "",
+                    user_keycloak_id=UUID(user.sub),
+                    session_id=user.shift_session_id,
+                    operation="qr.rebind",
+                    entity_type="qr",
+                    entity_id=qr.id,
+                    before_json={
+                        "status": QRStatus.BOUND.value,
+                        "bound_to_device_id": old_device_id,
+                    },
+                    after_json={
+                        "status": QRStatus.BOUND.value,
+                        "bound_to_device_id": new_device_id,
+                        "reason": reason,
+                    },
+                    result=AuditResult.SUCCESS,
+                )
+            )
+        assert rebound is not None
+        return rebound
+
+    async def _run_rebind_compensation(
+        self,
+        *,
+        qr_id: str,
+        old_device_id: int,
+        new_device_id: int,
+        restore_old: bool,
+        original_err: BaseException,
+        user: AuthUser,
+    ) -> NoReturn:
+        """Undo the durable NetBox writes and always raise.
+
+        ``restore_old=False`` for a C2 failure (only new device was set);
+        ``restore_old=True`` for a C3 failure (new set + old cleared). Both
+        compensations are conditional + idempotent (reusing the bind/retire
+        helpers): clear-new only acts if new device still shows our token,
+        restore-old only if old device shows ``None``. If any compensation
+        PATCH raises, we escalate to an INCONSISTENCY (manual cleanup).
+        """
+        request_id = current_request_id()
+        comp_errors: list[BaseException] = []
+        clear_outcome: str | None = None
+        restore_outcome: str | None = None
+
+        try:
+            clear_outcome = await self._compensate_clear_qr(new_device_id, qr_id)
+        except Exception as comp_err:
+            comp_errors.append(comp_err)
+
+        if restore_old:
+            try:
+                restore_outcome = await self._compensate_restore_qr(
+                    old_device_id, qr_id
+                )
+            except Exception as comp_err:
+                comp_errors.append(comp_err)
+
+        if comp_errors:
+            # ===== Inconsistency: a compensation PATCH failed =====
+            logger.critical(
+                "qr_rebind_inconsistency_unrecoverable",
+                qr_id=qr_id,
+                old_device_id=old_device_id,
+                new_device_id=new_device_id,
+                request_id=request_id,
+                original_error=repr(original_err),
+                compensation_errors=[repr(e) for e in comp_errors],
+            )
+            await self._best_effort_inconsistency_journal(
+                operation="qr.rebind",
+                device_id=new_device_id,
+                qr_id=qr_id,
+                original_err=original_err,
+                comp_err=comp_errors[0],
+            )
+            await self._best_effort_rebind_failure_audit(
+                qr_id=qr_id,
+                old_device_id=old_device_id,
+                new_device_id=new_device_id,
+                user=user,
+                failure_stage="compensation",
+                original_err=original_err,
+                clear_outcome=clear_outcome,
+                restore_outcome=restore_outcome,
+                compensation_errors=comp_errors,
+            )
+            raise QRRebindInconsistencyError(qr_id, old_device_id, new_device_id)
+
+        # ===== Rolled back: compensation restored the original state =====
+        logger.error(
+            "qr_rebind_db_failed_netbox_compensated",
+            qr_id=qr_id,
+            old_device_id=old_device_id,
+            new_device_id=new_device_id,
+            request_id=request_id,
+            original_error=repr(original_err),
+            clear_outcome=clear_outcome,
+            restore_outcome=restore_outcome,
+        )
+        await self._best_effort_rebind_failure_audit(
+            qr_id=qr_id,
+            old_device_id=old_device_id,
+            new_device_id=new_device_id,
+            user=user,
+            failure_stage="db_commit",
+            original_err=original_err,
+            clear_outcome=clear_outcome,
+            restore_outcome=restore_outcome,
+            compensation_errors=[],
+        )
+        raise QRRebindRolledBackError(qr_id, old_device_id, new_device_id)
+
+    async def _best_effort_rebind_failure_audit(
+        self,
+        *,
+        qr_id: str,
+        old_device_id: int,
+        new_device_id: int,
+        user: AuthUser,
+        failure_stage: Literal["db_commit", "compensation"],
+        original_err: BaseException,
+        clear_outcome: str | None,
+        restore_outcome: str | None,
+        compensation_errors: list[BaseException],
+    ) -> None:
+        """Forensic FAILURE row for a rolled-back / inconsistent rebind.
+        Best-effort: log on failure, never raise."""
+        after: dict[str, Any] = {
+            "failure_stage": failure_stage,
+            "original_error": repr(original_err),
+            "clear_new_outcome": clear_outcome,
+            "restore_old_outcome": restore_outcome,
+        }
+        if compensation_errors:
+            after["compensation_errors"] = [repr(e) for e in compensation_errors]
+        try:
+            entry = AuditLogEntry(
+                request_id=UUID(current_request_id()),
+                timestamp=datetime.now(UTC),
+                user_email=user.email or "",
+                user_keycloak_id=UUID(user.sub),
+                session_id=user.shift_session_id,
+                operation="qr.rebind",
+                entity_type="qr",
+                entity_id=qr_id,
+                before_json={
+                    "qr_id": qr_id,
+                    "old_device_id": old_device_id,
+                    "new_device_id": new_device_id,
+                },
+                after_json=after,
+                result=AuditResult.FAILURE,
+            )
+            async with self._session.begin():
+                await self._audit_log_repo.insert(entry)
+        except Exception as audit_err:
+            logger.error(
+                "rebind_compensation_audit_write_failed",
+                qr_id=qr_id,
+                request_id=current_request_id(),
+                error=repr(audit_err),
+            )
+
+    async def _best_effort_rebind_journals(
+        self,
+        *,
+        qr_id: str,
+        old_device_id: int,
+        new_device_id: int,
+        reason: str,
+        user: AuthUser,
+    ) -> None:
+        """Post the two attribution journals (new + old device). Best-effort."""
+        request_id = current_request_id()
+        actor = user.email or "unknown"
+        session = user.shift_session_id or "unknown"
+        await self._post_rebind_journal(
+            device_id=new_device_id,
+            comment=(
+                f"QR {qr_id} rebound here from device {old_device_id} by {actor}.\n"
+                f"Request ID: {request_id}\nSession: {session}\nReason: {reason}"
+            ),
+        )
+        await self._post_rebind_journal(
+            device_id=old_device_id,
+            comment=(
+                f"QR {qr_id} unbound (rebound to device {new_device_id}) by {actor}.\n"
+                f"Request ID: {request_id}\nSession: {session}\nReason: {reason}"
+            ),
+        )
+
+    async def _post_rebind_journal(self, *, device_id: int, comment: str) -> None:
+        """Single best-effort journal POST. Swallows + logs on failure."""
+        try:
+            await self._netbox.post(
+                _JOURNAL_PATH,
+                json={
+                    "assigned_object_type": "dcim.device",
+                    "assigned_object_id": device_id,
+                    "kind": "info",
+                    "comments": comment,
+                },
+            )
+        except Exception as journal_err:
+            logger.warning(
+                "qr_rebind_journal_failed",
+                device_id=device_id,
+                request_id=current_request_id(),
+                error=repr(journal_err),
+            )
 
     async def _retire_bound(
         self,

@@ -88,6 +88,30 @@ class QR:
             retired_reason=reason,
         )
 
+    def rebind(self, *, device_id: int, by_email: str, at: datetime) -> QR:
+        """Transition BOUND -> BOUND, moving the QR to a different device.
+
+        Added 2026-06-15 (docs/backend-tz-qr-rebind.md): some hardware has no
+        surface to stick a QR on, so the label lives on the rack frame at the
+        device's elevation. When two such devices are physically swapped the
+        label must point at the new occupant — without printing a fresh
+        sticker (FREE->bind) or burning the label (BOUND->retire, terminal).
+
+        ``bound_at`` / ``bound_by_email`` are refreshed to the rebind moment —
+        the binding is now "owned" by whoever moved it, and the timestamp
+        reflects the current attachment, not the original one. The prior
+        device_id is captured by the caller's audit row, not retained on the
+        QR.
+        """
+        if self.status is not QRStatus.BOUND:
+            raise IllegalQRTransition(self.status, QRStatus.BOUND)
+        return dataclasses.replace(
+            self,
+            bound_to_device_id=device_id,
+            bound_at=at,
+            bound_by_email=by_email,
+        )
+
     def restore(self) -> QR:
         """Transition RETIRED -> FREE (undo of an accidental retire).
 

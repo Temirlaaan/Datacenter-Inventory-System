@@ -107,13 +107,13 @@ undo from the mobile side.
 
 ### Which endpoints accept it
 
-All 9 write endpoints: every `POST`/`PATCH` under `/api/v1/`. Reads
+All write endpoints: every `POST`/`PATCH` under `/api/v1/`. Reads
 (`GET`) don't accept the header — they're already idempotent.
 
 | Endpoint | Why it matters |
 |---|---|
 | `POST /sessions/start`, `POST /sessions/end` | Avoid duplicate-shift / double-end |
-| `POST /qr/{id}/bind`, `POST /qr/{id}/retire` | DB partial unique index also protects, but the retry without idempotency surfaces 409 instead of the original 200 |
+| `POST /qr/{id}/bind`, `POST /qr/{id}/retire`, `POST /qr/{id}/rebind` | DB partial unique index also protects, but the retry without idempotency surfaces 409 instead of the original 200 |
 | `POST /devices/` | **Critical — NetBox has no native dedupe; without idempotency a retry creates a second device** |
 | `PATCH /devices/{id}` | Optimistic-concurrency catches the second write but mobile sees confusing 409 instead of the original 200 |
 | `POST /devices/{id}/comments` | **Critical — NetBox doesn't dedupe journal entries, so a retry leaves a duplicate comment row** |
@@ -274,6 +274,50 @@ Returns 200 + the new state. Failure modes:
 - `422` — NetBox rejected the device update (e.g., invalid custom
   field). Body has NetBox's actual error message in
   `error.netbox_detail`.
+
+### 3.3b Rebind QR → a different device (2026-06-15)
+
+For a BOUND QR whose label lives on the rack frame (not the device
+itself): when two such devices are physically swapped, move the label's
+binding to the new occupant without printing a fresh sticker.
+
+```http
+POST /api/v1/qr/DCQR-ABCD1234/rebind
+Idempotency-Key: <client-uuid>
+{
+  "device_id": 4711,          // the NEW device
+  "version": "2026-06-…",     // NEW device's last_updated (from GET /devices/4711)
+  "reason": "Swapped sw-01 and sw-02 during line-card replacement"  // REQUIRED, 1..2000
+}
+```
+
+Returns 200 + the combined `{qr, device}` (device = the new binding,
+with a fresh `version`). Role `dcinv-mobile-user`, **active shift
+required**. `reason` is mandatory — it lands in the audit trail and both
+devices' NetBox journals.
+
+Flow on the device: pick "Rebind label" on a bound device's profile →
+search for the new device (same as bind) → required "Reason" field →
+confirm with old + new device names → rebind → refreshed screen.
+
+Failure modes (TZ error table):
+
+- `404 QR_NOT_FOUND` — unknown QR id.
+- `409 QR_NOT_BOUND` — QR is FREE (use bind) or RETIRED (terminal).
+  Body's `current_status` says which.
+- `404 DEVICE_NOT_FOUND` — the new device id doesn't exist in NetBox.
+- `409 DEVICE_ALREADY_BOUND` — the new device already has a QR. Body's
+  `existing_qr_id` names it; resolve the conflict first.
+- `409 SAME_DEVICE` — the new device IS the current device. No-op refused.
+- `409 DEVICE_CONFLICT` — the new device changed since you read it.
+  Body carries `current_state` + `current_version`; re-read and retry.
+- `422` — `reason` missing/empty/>2000 chars, or NetBox rejected the
+  device update (`error.netbox_detail`).
+- `500 QR_REBIND_ROLLED_BACK` — a mid-saga failure was cleanly rolled
+  back; the QR still points at the old device. Safe to retry.
+- `500 QR_REBIND_INCONSISTENCY` — rare: rollback itself failed, NetBox
+  custom_fields may diverge from the registry. Surface to an admin; do
+  not auto-retry.
 
 ### 3.4 Retire a QR (admin only)
 

@@ -18,7 +18,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1._helpers import netbox_validation_error_response
@@ -28,20 +28,24 @@ from app.db.repositories.qr_batch import QRBatchRepository
 from app.db.repositories.qr_code import QRCodeRepository
 from app.db.session import get_session, get_sessionmaker
 from app.netbox.client import get_netbox_client
-from app.netbox.errors import NetBoxValidationError
+from app.netbox.errors import NetBoxNotFound, NetBoxValidationError
 from app.services.device import DeviceService, to_device_data
 from app.services.idempotency import with_optional_idempotency_outer
 from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 from app.services.qr.lifecycle import (
+    DeviceAlreadyBoundError,
     MissingVersionError,
     QRAlreadyBoundError,
     QRBindInconsistencyError,
     QRBindRolledBackError,
     QRLifecycleService,
     QRNotFoundError,
+    QRRebindInconsistencyError,
+    QRRebindRolledBackError,
     QRRetireInconsistencyError,
     QRRetireRolledBackError,
     QRStateConflictError,
+    SameDeviceError,
 )
 from app.services.qr.lookup import (
     QRInfo,  # kept for backward-compat re-export; deletable in Sprint 5
@@ -65,6 +69,22 @@ class QRBindRequest(BaseModel):
 
     device_id: int
     version: str
+
+
+class QRRebindRequest(BaseModel):
+    """``POST /api/v1/qr/{qr_id}/rebind`` payload (docs/backend-tz-qr-rebind.md).
+
+    ``device_id`` is the NEW device; ``version`` is that device's expected
+    ``last_updated`` (the backend re-reads + compares, Sprint 3 decision A).
+    ``reason`` is mandatory (1..2000) — the rebind moves a label between
+    physical devices, so the WHY is required for the audit trail.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: int
+    version: str
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class QRRetireRequest(BaseModel):
@@ -245,6 +265,129 @@ async def bind_qr(
         return status.HTTP_200_OK, QRLookupResponse(
             qr=to_qr_info(bound_qr, batch),
             device=to_device_data(device_dict, qr_id=bound_qr.id),
+            device_error=None,
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload={"qr_id": qr_id, **request.model_dump(mode="json")},
+        do_work=_do_work,
+    )
+    return JSONResponse(body, status_code=status_code)
+
+
+@router.post(
+    "/{qr_id}/rebind",
+    response_model=QRLookupResponse,
+    response_model_exclude_none=True,
+)
+async def rebind_qr(
+    qr_id: str,
+    request: QRRebindRequest,
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
+    lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
+    session: AsyncSession = Depends(get_session),
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
+    """Move a BOUND QR to a different device (docs/backend-tz-qr-rebind.md).
+
+    Field case: a label stuck to a rack frame must follow the device that was
+    physically swapped, without printing a new sticker. Role
+    ``dcinv-mobile-user`` (field op) — the mandatory ``reason`` + full audit
+    trail compensate for not gating on admin.
+
+    On success returns the combined QR+device response (device = the new
+    binding). Errors per the TZ table — see ``docs/mobile-api-guide.md``.
+    Sprint 9 Task 0: optional ``Idempotency-Key`` header.
+    """
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            rebound_qr, device_dict = await lifecycle.rebind(
+                qr_id=qr_id,
+                new_device_id=request.device_id,
+                expected_version=request.version,
+                reason=request.reason,
+                user=user,
+            )
+        except QRNotFoundError:
+            return status.HTTP_404_NOT_FOUND, {
+                "error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}
+            }
+        except QRStateConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "QR_NOT_BOUND",
+                    "message": (
+                        f"QR is in {exc.current_status.value} state — only a BOUND "
+                        "QR can be rebound"
+                    ),
+                    "current_status": exc.current_status.value,
+                }
+            }
+        except SameDeviceError as exc:
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "SAME_DEVICE",
+                    "message": f"QR is already bound to device {exc.device_id}",
+                }
+            }
+        except NetBoxNotFound:
+            return status.HTTP_404_NOT_FOUND, {
+                "error": {
+                    "code": "DEVICE_NOT_FOUND",
+                    "message": f"Device {request.device_id} not found in NetBox",
+                }
+            }
+        except DeviceAlreadyBoundError as exc:
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "DEVICE_ALREADY_BOUND",
+                    "message": (
+                        f"Device {exc.device_id} already has QR {exc.existing_qr_id}"
+                    ),
+                    "existing_qr_id": exc.existing_qr_id,
+                }
+            }
+        except WriteConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "DEVICE_CONFLICT",
+                    "message": "Device was modified after you read it.",
+                    "current_state": to_device_data(exc.current_object).model_dump(),
+                    "current_version": exc.current_version,
+                }
+            }
+        except QRRebindRolledBackError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
+                "error": {
+                    "code": "QR_REBIND_ROLLED_BACK",
+                    "message": "Rebind failed (rolled back)",
+                }
+            }
+        except QRRebindInconsistencyError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
+                "error": {
+                    "code": "QR_REBIND_INCONSISTENCY",
+                    "message": "Rebind failed, manual cleanup required",
+                }
+            }
+        except NetBoxValidationError as exc:
+            resp = netbox_validation_error_response(
+                exc, fallback_message="NetBox rejected the rebind"
+            )
+            import json as _json
+
+            return resp.status_code, _json.loads(bytes(resp.body))
+
+        batch = await QRBatchRepository(session).get_by_id(rebound_qr.batch_id)
+        assert batch is not None
+        return status.HTTP_200_OK, QRLookupResponse(
+            qr=to_qr_info(rebound_qr, batch),
+            device=to_device_data(device_dict, qr_id=rebound_qr.id),
             device_error=None,
         ).model_dump(mode="json", exclude_none=True)
 

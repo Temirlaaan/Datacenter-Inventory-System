@@ -333,6 +333,44 @@ def test_qr_restore_from_bound_raises_illegal_qr_transition() -> None:
     assert "bound" in str(exc.value)
 
 
+# Rebind (BOUND → BOUND, change device) -----------------------------------------
+
+
+def test_qr_rebind_moves_binding_to_new_device_and_refreshes_attribution() -> None:
+    """BOUND → BOUND with a different device_id; bound_at / bound_by_email are
+    refreshed to the rebind moment (the binding is now owned by whoever
+    moved it)."""
+    bound = _bound()  # bound to device 100 by default helper
+
+    rebound = bound.rebind(device_id=777, by_email="mover@example.com", at=_LATER)
+
+    assert rebound.status is QRStatus.BOUND
+    assert rebound.bound_to_device_id == 777
+    assert rebound.bound_at == _LATER
+    assert rebound.bound_by_email == "mover@example.com"
+    assert rebound.retired_at is None
+    # Original untouched (frozen dataclass).
+    assert bound.bound_to_device_id != 777
+
+
+def test_qr_rebind_from_free_raises_illegal_qr_transition() -> None:
+    qr = _free()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.rebind(device_id=5, by_email="x@example.com", at=_LATER)
+
+    assert "free" in str(exc.value)
+
+
+def test_qr_rebind_from_retired_raises_illegal_qr_transition() -> None:
+    qr = _retired()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.rebind(device_id=5, by_email="x@example.com", at=_LATER)
+
+    assert "retired" in str(exc.value)
+
+
 def test_illegal_qr_transition_message_contains_from_and_to_states() -> None:
     qr = _retired()
 
