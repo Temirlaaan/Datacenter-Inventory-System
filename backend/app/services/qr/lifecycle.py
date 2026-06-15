@@ -658,19 +658,20 @@ class QRLifecycleService:
                 current_object=new_device, current_version=observed_version
             )
 
-        # Step C — the saga (set new, clear old, registry+audit) with compensation.
-        rebound = await self._commit_rebind_or_compensate(
+        # Step C — the saga (set new, clear old, registry+audit) with
+        # compensation. Returns the new device dict captured from C1's PATCH
+        # response — NO post-saga re-read: a GET after the registry commits
+        # could fail (NetBox blip / device deleted in the window) and turn a
+        # durable, successful rebind into a 5xx whose retry yields
+        # SAME_DEVICE instead of the original 200 (idempotency doesn't cache
+        # on exception). C1's response already carries the post-set version.
+        return await self._commit_rebind_or_compensate(
             qr=qr,
             old_device_id=old_device_id,
             new_device_id=new_device_id,
             reason=reason,
             user=user,
         )
-        # Re-read the new device so the caller returns its post-PATCH version.
-        refreshed = (
-            await self._netbox.get(f"/api/dcim/devices/{new_device_id}/")
-        ).json()
-        return rebound, refreshed
 
     async def _commit_rebind_or_compensate(
         self,
@@ -680,9 +681,10 @@ class QRLifecycleService:
         new_device_id: int,
         reason: str,
         user: AuthUser,
-    ) -> QR:
-        """The rebind saga. Failure matrix (durable writes in order):
+    ) -> tuple[QR, dict[str, Any]]:
+        """The rebind saga. Returns ``(rebound_qr, new_device_dict)``.
 
+        Failure matrix (durable writes in order):
         - C1 set-new fails: nothing durable — error propagates, no compensation.
         - C2 clear-old fails: only new is set -> clear new -> rolled back.
         - C3 registry fails: new set + old cleared -> clear new + restore old
@@ -691,11 +693,14 @@ class QRLifecycleService:
         qr_id = qr.id
 
         # C1 — set new device's qr_id (durable point 1). A NetBox error here
-        # propagates untouched; the endpoint maps it (502 / validation).
-        await self._netbox.patch(
-            f"/api/dcim/devices/{new_device_id}/",
-            json={"custom_fields": {"qr_id": qr_id}},
-        )
+        # propagates untouched; the endpoint maps it (502 / validation). The
+        # response is the post-set device object we return to the caller.
+        new_device = (
+            await self._netbox.patch(
+                f"/api/dcim/devices/{new_device_id}/",
+                json={"custom_fields": {"qr_id": qr_id}},
+            )
+        ).json()
 
         # C2 — clear old device's qr_id (durable point 2).
         try:
@@ -741,7 +746,7 @@ class QRLifecycleService:
             reason=reason,
             user=user,
         )
-        return rebound
+        return rebound, new_device
 
     async def _commit_rebind_registry(
         self,
