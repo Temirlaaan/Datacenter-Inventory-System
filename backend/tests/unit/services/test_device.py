@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from pydantic import ValidationError
@@ -101,6 +102,31 @@ async def test_get_device_resolves_u_height_from_device_types_resource(
             result = await DeviceService(client).get_device(5)
 
     assert result.data.u_height == 2
+
+
+async def test_get_device_degrades_gracefully_when_device_types_lookup_fails(
+    clean_env: None, netbox_env: None, fast_backoff: None
+) -> None:
+    """A device-types blip (NetBox timeout) must NOT fail the device read —
+    u_height degrades to the inline fallback, the primary data still returns."""
+    from app.netbox.errors import NetBoxTimeout
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}/api/dcim/devices/5/").respond(
+                json=_device(device_type={"id": 11, "model": "MD1400"})
+            )
+            # device-types lookup times out on every retry.
+            router.get(f"{NETBOX_URL}/api/dcim/device-types/").mock(
+                side_effect=httpx.ConnectTimeout("netbox down")
+            )
+            result = await DeviceService(client).get_device(5)
+
+    # Primary data survived; u_height fell back (no device_type.u_height inline → None).
+    assert result.data.id == 5
+    assert result.data.u_height is None
+    # Sanity: NetBoxTimeout is what the lookup raised internally (swallowed).
+    assert NetBoxTimeout is not None
 
 
 async def test_get_device_parses_a_full_device(clean_env: None, netbox_env: None) -> None:

@@ -35,11 +35,19 @@ from app.observability.request_id import current_request_id
 _READ_TIMEOUT_SECONDS = 5.0
 _WRITE_TIMEOUT_SECONDS = 10.0
 _BACKOFF_SECONDS: tuple[float, ...] = (0.2, 0.6, 1.8)
+# Transient transport failures we retry, then wrap in NetBoxTimeout on
+# exhaustion. Use the httpx base classes so we don't miss a sibling:
+# - httpx.TimeoutException covers ConnectTimeout / ReadTimeout / WriteTimeout
+#   / PoolTimeout. 2026-06-15 prod incident: ConnectTimeout (TCP connect to a
+#   slow/unreachable NetBox) was NOT in the old explicit list — it's a sibling
+#   of ReadTimeout, not a ConnectError — so it leaked raw to the global
+#   handler as a scary 500 instead of being retried + mapped to a 502/503.
+# - httpx.NetworkError covers ConnectError / ReadError / WriteError / CloseError.
+# - httpx.RemoteProtocolError: NetBox closed the connection mid-response.
 _RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
-    httpx.ConnectError,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
 )
 
 logger = structlog.get_logger()

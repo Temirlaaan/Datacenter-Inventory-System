@@ -216,6 +216,45 @@ async def test_get_retries_on_read_timeout(
     assert route.call_count == 3
 
 
+async def test_get_retries_on_connect_timeout(
+    clean_env: None, netbox_env: None, fast_backoff: None
+) -> None:
+    """2026-06-15 prod incident: ConnectTimeout (a sibling of ReadTimeout under
+    httpx.TimeoutException, NOT a ConnectError) leaked raw to the global handler
+    as a 500. It must now be retried and wrapped in NetBoxTimeout → the endpoint
+    maps that to a clean 502/503, not a scary 500."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxTimeout
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/status/").mock(
+                side_effect=httpx.ConnectTimeout("connect timed out")
+            )
+            with pytest.raises(NetBoxTimeout):
+                await client.get("/api/status/")
+
+    assert route.call_count == 3
+
+
+async def test_get_retries_on_pool_timeout(
+    clean_env: None, netbox_env: None, fast_backoff: None
+) -> None:
+    """PoolTimeout (all connections busy) is transient — retry, then NetBoxTimeout."""
+    from app.netbox.client import NetBoxClient
+    from app.netbox.errors import NetBoxTimeout
+
+    async with NetBoxClient.from_settings() as client:
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(f"{NETBOX_URL}/api/status/").mock(
+                side_effect=httpx.PoolTimeout("pool exhausted")
+            )
+            with pytest.raises(NetBoxTimeout):
+                await client.get("/api/status/")
+
+    assert route.call_count == 3
+
+
 async def test_get_uses_backoff_between_retries(
     clean_env: None, netbox_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

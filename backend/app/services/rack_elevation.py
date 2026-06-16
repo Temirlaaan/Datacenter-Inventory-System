@@ -28,10 +28,13 @@ import math
 from functools import lru_cache
 from typing import Any
 
+import structlog
 from pydantic import BaseModel
 
 from app.netbox.client import NetBoxClient
 from app.services.cache import TTLCache
+
+logger = structlog.get_logger()
 
 _ELEVATION_TTL_SECONDS = 60.0
 
@@ -150,7 +153,13 @@ class RackElevationService:
             return {}
         from app.services.meta import MetaLookupService, get_meta_cache
 
-        types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        try:
+            types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        except Exception as exc:
+            # Supplementary lookup — a device-types blip must not fail the whole
+            # elevation. Degrade to the inline u_height fallback (then 1).
+            logger.warning("elevation_u_height_lookup_failed", error=repr(exc))
+            return {}
         return {t.id: max(1, t.u_height) for t in types if t.id in type_ids}
 
     async def _fetch_elevation(self, rack_id: int) -> RackElevationResponse:

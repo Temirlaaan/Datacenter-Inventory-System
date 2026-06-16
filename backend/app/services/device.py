@@ -13,9 +13,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.netbox.client import NetBoxClient
+
+logger = structlog.get_logger()
 
 
 class StatusRef(BaseModel):
@@ -357,7 +360,15 @@ class DeviceService:
         # device, but keep the dependency one-directional + lazy).
         from app.services.meta import MetaLookupService, get_meta_cache
 
-        types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        try:
+            types = await MetaLookupService(self._netbox, get_meta_cache()).get_device_types()
+        except Exception as exc:
+            # u_height is supplementary — a device-types blip must NOT fail the
+            # whole device read/search/elevation. Degrade to the inline
+            # fallback (top-level/nested/1). The primary device data already
+            # succeeded; returning it without precise heights beats a 5xx.
+            logger.warning("u_height_lookup_failed", error=repr(exc))
+            return {}
         return {t.id: max(1, t.u_height) for t in types if t.id in type_ids}
 
     async def get_device_raw(self, device_id: int) -> dict[str, Any]:
