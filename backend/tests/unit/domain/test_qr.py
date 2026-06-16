@@ -371,6 +371,43 @@ def test_qr_rebind_from_retired_raises_illegal_qr_transition() -> None:
     assert "retired" in str(exc.value)
 
 
+# Unbind (BOUND → FREE) ----------------------------------------------------------
+
+
+def test_qr_unbind_returns_clean_free_qr() -> None:
+    """BOUND → FREE clears bound_to_device_id / bound_at / bound_by_email."""
+    bound = _bound()
+
+    freed = bound.unbind()
+
+    assert freed.status is QRStatus.FREE
+    assert freed.bound_to_device_id is None
+    assert freed.bound_at is None
+    assert freed.bound_by_email is None
+    assert freed.retired_at is None
+    assert freed.id == bound.id
+    # Original untouched (frozen).
+    assert bound.bound_to_device_id is not None
+
+
+def test_qr_unbind_from_free_raises_illegal_qr_transition() -> None:
+    qr = _free()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.unbind()
+
+    assert "free" in str(exc.value)
+
+
+def test_qr_unbind_from_retired_raises_illegal_qr_transition() -> None:
+    qr = _retired()
+
+    with pytest.raises(IllegalQRTransition) as exc:
+        qr.unbind()
+
+    assert "retired" in str(exc.value)
+
+
 def test_illegal_qr_transition_message_contains_from_and_to_states() -> None:
     qr = _retired()
 

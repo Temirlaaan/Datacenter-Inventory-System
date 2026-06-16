@@ -42,6 +42,8 @@ from app.services.qr.lifecycle import (
     QRRetireInconsistencyError,
     QRRetireRolledBackError,
     QRStateConflictError,
+    QRUnbindInconsistencyError,
+    QRUnbindRolledBackError,
     SameDeviceError,
 )
 
@@ -1347,6 +1349,159 @@ async def test_rebind_c3_state_race_when_qr_moved_under_lock(
                     await service.rebind(_QR_ID, _NEW_DEV_ID, _VERSION, "x", _user())
 
     assert any(e.result is AuditResult.FAILURE for e in audit_repo.entries)
+
+
+# ========== unbind — BOUND → FREE saga ==========
+
+
+async def test_unbind_happy_path_frees_qr_with_single_audit(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Full success: clear device qr_id → registry FREE + ONE qr.unbind SUCCESS
+    audit row carrying the former device id + reason; one journal."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, audit_repo, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _bound_qr(device_id=_DEVICE_ID)
+
+        with respx.mock(assert_all_called=False) as router:
+            router.get(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                return_value=_resp(_device_dict(_VERSION, qr_id=_QR_ID))
+            )
+            router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                return_value=_resp(_device_dict(_NEW_VERSION, qr_id=None))
+            )
+            router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").mock(return_value=_resp({"id": 1}))
+
+            with _bind_request_id("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"):
+                freed = await service.unbind(_QR_ID, _VERSION, "device removed", _user())
+
+    assert freed.status is QRStatus.FREE
+    assert freed.bound_to_device_id is None
+    assert qr_repo.updates == [freed]
+    assert len(audit_repo.entries) == 1
+    entry = audit_repo.entries[0]
+    assert entry.result is AuditResult.SUCCESS
+    assert entry.operation == "qr.unbind"
+    assert entry.entity_id == _QR_ID
+    assert entry.before_json["bound_to_device_id"] == _DEVICE_ID
+    assert entry.after_json["status"] == "free"
+    assert entry.after_json["reason"] == "device removed"
+
+
+async def test_unbind_raises_qr_not_found(clean_env: None, netbox_env: None) -> None:
+    async with NetBoxClient.from_settings() as client:
+        service, _s, _qr, _a, _ws = _build_service(client)
+        with pytest.raises(QRNotFoundError):
+            await service.unbind(_QR_ID, _VERSION, "x", _user())
+
+
+async def test_unbind_raises_state_conflict_when_free(
+    clean_env: None, netbox_env: None
+) -> None:
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _free_qr()
+        with pytest.raises(QRStateConflictError) as exc:
+            await service.unbind(_QR_ID, _VERSION, "x", _user())
+    assert exc.value.current_status is QRStatus.FREE
+
+
+async def test_unbind_raises_state_conflict_when_retired(
+    clean_env: None, netbox_env: None
+) -> None:
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, _ws = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _retired_qr()
+        with pytest.raises(QRStateConflictError) as exc:
+            await service.unbind(_QR_ID, _VERSION, "x", _user())
+    assert exc.value.current_status is QRStatus.RETIRED
+
+
+async def test_unbind_raises_write_conflict_on_version_mismatch(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Device changed since the client read it → no durable write, no audit."""
+    async with NetBoxClient.from_settings() as client:
+        service, _s, qr_repo, _a, write_service = _build_service(client)
+        qr_repo.by_id[_QR_ID] = _bound_qr(device_id=_DEVICE_ID)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                return_value=_resp(_device_dict(_NEW_VERSION, qr_id=_QR_ID))
+            )
+            with pytest.raises(WriteConflictError) as exc:
+                await service.unbind(_QR_ID, _VERSION, "x", _user())
+    assert exc.value.current_version == _NEW_VERSION
+    assert qr_repo.updates == []
+    assert write_service.calls == []
+
+
+async def test_unbind_db_failure_restores_qr_and_rolls_back(
+    clean_env: None, netbox_env: None
+) -> None:
+    """Registry update fails after the device PATCH cleared qr_id → compensate
+    by restoring qr_id on the device → QRUnbindRolledBackError + FAILURE audit."""
+    async with NetBoxClient.from_settings() as client:
+        qr_repo = _FakeQRCodeRepo()
+        qr_repo.by_id[_QR_ID] = _bound_qr(device_id=_DEVICE_ID)
+        qr_repo.next_update_raises = RuntimeError("db down")
+        service, _s, _qr, audit_repo, _ws = _build_service(client, qr_repo=qr_repo)
+
+        with respx.mock(assert_all_called=False) as router:
+            router.get(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                side_effect=[
+                    # Step B OCC read (still bound), then compensation re-read
+                    # (shows None → restore).
+                    _resp(_device_dict(_VERSION, qr_id=_QR_ID)),
+                    _resp(_device_dict(_VERSION, qr_id=None)),
+                ]
+            )
+            router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                return_value=_resp(_device_dict(_VERSION, qr_id=None))
+            )
+            router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").mock(return_value=_resp({"id": 1}))
+
+            with _bind_request_id("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"):
+                with pytest.raises(QRUnbindRolledBackError):
+                    await service.unbind(_QR_ID, _VERSION, "x", _user())
+
+    assert any(e.result is AuditResult.FAILURE for e in audit_repo.entries)
+    fail = next(e for e in audit_repo.entries if e.result is AuditResult.FAILURE)
+    assert fail.operation == "qr.unbind"
+
+
+async def test_unbind_inconsistency_when_compensation_patch_fails(
+    clean_env: None, netbox_env: None
+) -> None:
+    """DB fails AND the restore PATCH fails → QRUnbindInconsistencyError."""
+    import httpx
+
+    async with NetBoxClient.from_settings() as client:
+        qr_repo = _FakeQRCodeRepo()
+        qr_repo.by_id[_QR_ID] = _bound_qr(device_id=_DEVICE_ID)
+        qr_repo.next_update_raises = RuntimeError("db down")
+        service, _s, _qr, audit_repo, _ws = _build_service(client, qr_repo=qr_repo)
+
+        with respx.mock(assert_all_called=False) as router:
+            router.get(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                side_effect=[
+                    _resp(_device_dict(_VERSION, qr_id=_QR_ID)),  # Step B OCC
+                    _resp(_device_dict(_VERSION, qr_id=None)),  # compensation re-read
+                ]
+            )
+            router.patch(f"{NETBOX_URL}{_DEVICE_PATH}").mock(
+                side_effect=[
+                    _resp(_device_dict(_VERSION, qr_id=None)),  # C1 clear (ok)
+                    httpx.ConnectError("compensation boom"),  # restore (fails)
+                ]
+            )
+            router.post(f"{NETBOX_URL}{_JOURNAL_PATH}").mock(return_value=_resp({"id": 1}))
+
+            with _bind_request_id("cccccccc-cccc-cccc-cccc-cccccccccccc"):
+                with pytest.raises(QRUnbindInconsistencyError):
+                    await service.unbind(_QR_ID, _VERSION, "x", _user())
+
+    fail = next(e for e in audit_repo.entries if e.result is AuditResult.FAILURE)
+    assert fail.after_json["failure_stage"] == "compensation"
 
 
 # ========== retire — BOUND path: Step B errors ==========

@@ -45,6 +45,8 @@ from app.services.qr.lifecycle import (
     QRRetireInconsistencyError,
     QRRetireRolledBackError,
     QRStateConflictError,
+    QRUnbindInconsistencyError,
+    QRUnbindRolledBackError,
     SameDeviceError,
 )
 from app.services.qr.lookup import (
@@ -83,6 +85,20 @@ class QRRebindRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_id: int
+    version: str
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class QRUnbindRequest(BaseModel):
+    """``POST /api/v1/qr/{qr_id}/unbind`` payload (docs/backend-tz-qr-unbind.md).
+
+    ``version`` is the bound device's expected ``last_updated`` (OCC when the
+    backend clears its ``qr_id``). ``reason`` is mandatory (1..2000) — unbind
+    returns a label to the free pool, the WHY is required for the audit trail.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     version: str
     reason: str = Field(min_length=1, max_length=2000)
 
@@ -487,6 +503,105 @@ async def retire_qr(
         assert batch is not None
         return status.HTTP_200_OK, QRRetireResponse(
             qr=to_qr_info(retired, batch)
+        ).model_dump(mode="json", exclude_none=True)
+
+    status_code, body = await with_optional_idempotency_outer(
+        sessionmaker=sessionmaker,
+        user_keycloak_id=UUID(user.sub),
+        idempotency_key=idempotency_key,
+        request_payload={"qr_id": qr_id, **request.model_dump(mode="json")},
+        do_work=_do_work,
+    )
+    return JSONResponse(body, status_code=status_code)
+
+
+@router.post(
+    "/{qr_id}/unbind",
+    response_model=QRRetireResponse,
+    response_model_exclude_none=True,
+)
+async def unbind_qr(
+    qr_id: str,
+    request: QRUnbindRequest,
+    user: AuthUser = Depends(require_role_with_active_shift("dcinv-mobile-user")),
+    lifecycle: QRLifecycleService = Depends(get_lifecycle_service),
+    session: AsyncSession = Depends(get_session),
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+) -> JSONResponse:
+    """Unbind a BOUND QR, returning it to FREE (docs/backend-tz-qr-unbind.md).
+
+    Field case: a label scanned onto the wrong device (test/mistake/removed)
+    needs to go back into the free pool — without burning it (retire) or
+    moving it to a specific device (rebind). Clears the device's
+    ``custom_fields.qr_id`` with OCC, transitions the registry to FREE, and
+    writes one ``qr.unbind`` audit row (former device id + reason).
+
+    Returns ``{qr}`` (no device — the binding is gone). Role
+    ``dcinv-mobile-user`` + active shift; mandatory ``reason``. Optional
+    ``Idempotency-Key``.
+    """
+
+    async def _do_work() -> tuple[int, dict[str, object]]:
+        try:
+            freed = await lifecycle.unbind(
+                qr_id=qr_id,
+                expected_version=request.version,
+                reason=request.reason,
+                user=user,
+            )
+        except QRNotFoundError:
+            return status.HTTP_404_NOT_FOUND, {
+                "error": {"code": "QR_NOT_FOUND", "message": f"QR {qr_id} not registered"}
+            }
+        except QRStateConflictError as exc:
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "QR_NOT_BOUND",
+                    "message": (
+                        f"QR is in {exc.current_status.value} state — only a BOUND "
+                        "QR can be unbound"
+                    ),
+                    "current_status": exc.current_status.value,
+                }
+            }
+        except WriteConflictError as exc:
+            # Consistent with bind/rebind/retire: DEVICE_CONFLICT carries the
+            # current state + version so the client can re-read and retry.
+            return status.HTTP_409_CONFLICT, {
+                "error": {
+                    "code": "DEVICE_CONFLICT",
+                    "message": "Device was modified after you read it.",
+                    "current_state": to_device_data(exc.current_object).model_dump(),
+                    "current_version": exc.current_version,
+                }
+            }
+        except QRUnbindRolledBackError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
+                "error": {
+                    "code": "QR_UNBIND_ROLLED_BACK",
+                    "message": "Unbind failed (rolled back)",
+                }
+            }
+        except QRUnbindInconsistencyError:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR, {
+                "error": {
+                    "code": "QR_UNBIND_INCONSISTENCY",
+                    "message": "Unbind failed, manual cleanup required",
+                }
+            }
+        except NetBoxValidationError as exc:
+            resp = netbox_validation_error_response(
+                exc, fallback_message="NetBox rejected the unbind"
+            )
+            import json as _json
+
+            return resp.status_code, _json.loads(bytes(resp.body))
+
+        batch = await QRBatchRepository(session).get_by_id(freed.batch_id)
+        assert batch is not None
+        return status.HTTP_200_OK, QRRetireResponse(
+            qr=to_qr_info(freed, batch)
         ).model_dump(mode="json", exclude_none=True)
 
     status_code, body = await with_optional_idempotency_outer(

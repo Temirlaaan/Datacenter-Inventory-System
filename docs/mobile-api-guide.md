@@ -113,7 +113,7 @@ All write endpoints: every `POST`/`PATCH` under `/api/v1/`. Reads
 | Endpoint | Why it matters |
 |---|---|
 | `POST /sessions/start`, `POST /sessions/end` | Avoid duplicate-shift / double-end |
-| `POST /qr/{id}/bind`, `POST /qr/{id}/retire`, `POST /qr/{id}/rebind` | DB partial unique index also protects, but the retry without idempotency surfaces 409 instead of the original 200 |
+| `POST /qr/{id}/bind`, `POST /qr/{id}/retire`, `POST /qr/{id}/rebind`, `POST /qr/{id}/unbind` | DB partial unique index also protects, but the retry without idempotency surfaces 409 instead of the original 200 |
 | `POST /devices/` | **Critical — NetBox has no native dedupe; without idempotency a retry creates a second device** |
 | `PATCH /devices/{id}` | Optimistic-concurrency catches the second write but mobile sees confusing 409 instead of the original 200 |
 | `POST /devices/{id}/comments` | **Critical — NetBox doesn't dedupe journal entries, so a retry leaves a duplicate comment row** |
@@ -318,6 +318,58 @@ Failure modes (TZ error table):
 - `500 QR_REBIND_INCONSISTENCY` — rare: rollback itself failed, NetBox
   custom_fields may diverge from the registry. Surface to an admin; do
   not auto-retry.
+
+### 3.3c Unbind QR → back to FREE (2026-06-16)
+
+For a BOUND QR scanned onto the wrong device (test/mistake/device removed):
+return the label to the FREE pool for reuse — without burning it (retire)
+or moving it to a specific device (rebind).
+
+```http
+POST /api/v1/qr/DCQR-ABCD1234/unbind
+Idempotency-Key: <client-uuid>
+{
+  "version": "2026-06-…",     // current device's last_updated (OCC)
+  "reason": "Метка снята: устройство демонтировано"   // REQUIRED, 1..2000
+}
+```
+
+Returns 200 + `{ "qr": { "id": "...", "status": "free", ... } }` — **no
+device** (the binding is gone). Role `dcinv-mobile-user`, **active shift
+required**, `reason` mandatory (lands in the audit trail + the device's
+NetBox journal).
+
+Flow on the device: "Unbind label" on a bound device's profile → required
+"Reason" → unbind → screen shows "Free QR".
+
+Failure modes:
+
+- `404 QR_NOT_FOUND` — unknown QR id.
+- `409 QR_NOT_BOUND` — QR is FREE (nothing to unbind) or RETIRED
+  (terminal). Body's `current_status` says which.
+- `409 DEVICE_CONFLICT` — the bound device changed since you read it. Body
+  carries `current_state` + `current_version`; re-read and retry. **Note:
+  the TZ called this `VERSION_CONFLICT`; the backend returns
+  `DEVICE_CONFLICT` to match bind/rebind/retire — same body shape.**
+- `422` — `reason` missing/empty/>2000, or NetBox rejected the device
+  update (`error.netbox_detail`).
+- `500 QR_UNBIND_ROLLED_BACK` — mid-saga failure cleanly rolled back; the
+  QR is still bound. Safe to retry.
+- `500 QR_UNBIND_INCONSISTENCY` — rare: rollback failed, NetBox may
+  diverge from the registry. Surface to an admin; do not auto-retry.
+
+### Showing device NAME, not id (cross-cutting, per the unbind TZ)
+
+The backend already returns the **full device object** (incl. `name`)
+wherever a binding is shown — display `device.data.name`, not the id:
+- `GET /qr/{id}` (lookup) on a BOUND QR → `device.data.name`.
+- `POST /qr/{id}/bind` and `POST /qr/{id}/rebind` success → `device.data.name`.
+
+`DEVICE_ALREADY_BOUND` / `QR_ALREADY_BOUND` error bodies carry the numeric
+`device_id` (machine-readable). To show a name there, call `GET
+/devices/{device_id}` and read `data.name` — but note NetBox is the
+bottleneck under load, so prefer showing the id immediately and resolving
+the name lazily.
 
 ### 3.4 Retire a QR (admin only)
 

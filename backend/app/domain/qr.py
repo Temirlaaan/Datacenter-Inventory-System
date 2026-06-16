@@ -112,6 +112,30 @@ class QR:
             bound_by_email=by_email,
         )
 
+    def unbind(self) -> QR:
+        """Transition BOUND -> FREE, returning the label to the free pool.
+
+        Added 2026-06-16 (docs/backend-tz-qr-unbind.md): an engineer scans a
+        QR that's bound to the wrong device (test mistake, device removed) and
+        wants to free the label for reuse — without burning it (retire, which
+        is terminal) or moving it to a specific other device (rebind).
+
+        Clears the binding fields so the resulting row satisfies the FREE
+        branch of the ``qr_state_consistency`` CHECK (free => null
+        bound_to_device_id AND null retired_at). The prior device_id is
+        captured by the caller's ``qr.unbind`` audit row, not retained on the
+        QR.
+        """
+        if self.status is not QRStatus.BOUND:
+            raise IllegalQRTransition(self.status, QRStatus.FREE)
+        return dataclasses.replace(
+            self,
+            status=QRStatus.FREE,
+            bound_to_device_id=None,
+            bound_at=None,
+            bound_by_email=None,
+        )
+
     def restore(self) -> QR:
         """Transition RETIRED -> FREE (undo of an accidental retire).
 
