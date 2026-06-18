@@ -15,8 +15,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
-# Install uv via the official standalone binary — no apt packages, no compilers.
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+# Install uv from PyPI (not the ghcr.io image). The build already needs PyPI
+# reachable — ``uv sync`` downloads every dependency from there — so this adds
+# no new network dependency, while dropping ghcr.io which some networks block
+# (2026-06-16 deploy: ``ghcr.io/astral-sh/uv`` pull failed with connection
+# reset while Docker Hub + PyPI were fine). Pinned to the 0.5.x line that the
+# uv.lock was resolved against.
+RUN pip install --no-cache-dir "uv>=0.5,<0.6"
 
 WORKDIR /app
 
