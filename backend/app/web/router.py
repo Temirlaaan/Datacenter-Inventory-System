@@ -53,7 +53,7 @@ from app.db.repositories.shift_session import (
 )
 from app.db.session import get_session, get_sessionmaker
 from app.domain.audit import AuditLogEntry, AuditResult
-from app.domain.qr import QR
+from app.domain.qr import QR, QRStatus
 from app.domain.shift_session import ShiftEndReason
 from app.netbox.client import get_netbox_client
 from app.netbox.errors import NetBoxNotFound
@@ -66,12 +66,16 @@ from app.services.device_decommission import (
 from app.services.netbox_write import NetBoxWriteService, WriteConflictError
 from app.services.qr.generation import GenerateBatchRequest, QRGenerationService
 from app.services.qr.lifecycle import (
+    DeviceAlreadyBoundError,
     MissingVersionError,
     QRLifecycleService,
     QRNotFoundError,
+    QRRebindInconsistencyError,
+    QRRebindRolledBackError,
     QRRetireInconsistencyError,
     QRRetireRolledBackError,
     QRStateConflictError,
+    SameDeviceError,
 )
 from app.services.shift_session import SessionAlreadyActive, ShiftSessionService
 from app.web.auth import (
@@ -1419,6 +1423,214 @@ async def web_qr_restore(
     return RedirectResponse(
         url=f"{target_path}{sep}{urlencode({'flash': flash, 'flash_kind': kind})}",
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ---------- /web/qr/{qr_id}/rebind — reassign a BOUND label to another device
+
+
+_WEB_REBIND_SEARCH_PAGE_SIZE = 20
+
+
+def _rebind_redirect(
+    *, qr_id: str, flash: str, flash_kind: str, device_id: int | None = None
+) -> RedirectResponse:
+    """303 back to the rebind wizard (optionally keeping the picked device)."""
+    params: dict[str, str] = {"flash": flash, "flash_kind": flash_kind}
+    if device_id is not None:
+        params["device_id"] = str(device_id)
+    return RedirectResponse(
+        url=f"/web/qr/{qr_id}/rebind?{urlencode(params)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.get("/qr/{qr_id}/rebind", response_class=HTMLResponse)
+async def web_qr_rebind_form(
+    request: Request,
+    qr_id: str,
+    q: str | None = Query(default=None, max_length=255),
+    device_id: int | None = Query(default=None, ge=1),
+    flash: str | None = Query(default=None),
+    flash_kind: str | None = Query(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Rebind wizard: move a BOUND QR to another device (2026-06-16).
+
+    Web counterpart of the mobile ``POST /api/v1/qr/{id}/rebind`` — same
+    ``QRLifecycleService.rebind`` underneath (decision I: direct service call).
+
+    Single page, server-rendered, three states driven by query params:
+    - base: the QR + its current device (by name) + a device-search box;
+    - ``?q=`` : candidate devices matching the name (reuses DeviceService.search);
+    - ``?device_id=`` : the chosen target + a reason field + confirm button
+      (POSTs to the same path).
+
+    Only BOUND QRs are rebindable; FREE/RETIRED render an explanatory note
+    instead of the wizard.
+    """
+    qr = await QRCodeRepository(session).get_by_id(qr_id)
+    if qr is None:
+        return templates.TemplateResponse(
+            request,
+            "_not_found.html",
+            {"user_email": user.email, "resource": f"QR {qr_id}"},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    device_service = DeviceService(get_netbox_client())
+
+    # Current device name (best-effort — a NetBox blip shows the raw id).
+    current_device_name: str | None = None
+    if qr.bound_to_device_id is not None:
+        try:
+            names = await device_service.get_device_names_by_ids({qr.bound_to_device_id})
+            current_device_name = names.get(qr.bound_to_device_id)
+        except Exception as exc:
+            logger.warning("rebind_current_device_name_failed", error=repr(exc))
+
+    candidates: list[Any] = []
+    candidates_error: str | None = None
+    target: Any = None
+    target_error: str | None = None
+    is_bound = qr.status is QRStatus.BOUND
+
+    if is_bound and q and q.strip():
+        try:
+            envelope = await device_service.search(
+                name=q.strip(), page=1, page_size=_WEB_REBIND_SEARCH_PAGE_SIZE
+            )
+            # Drop the QR's current device from the candidate list — rebinding
+            # to it is a no-op (the service would 409 SAME_DEVICE anyway).
+            candidates = [
+                d for d in envelope.results if d.data.id != qr.bound_to_device_id
+            ]
+        except Exception as exc:
+            candidates_error = f"Could not search devices: {type(exc).__name__}"
+
+    if is_bound and device_id is not None:
+        try:
+            target = await device_service.get_device(device_id)
+        except NetBoxNotFound:
+            target_error = f"Device {device_id} not found in NetBox"
+        except Exception as exc:
+            target_error = f"Could not load device {device_id}: {type(exc).__name__}"
+
+    return templates.TemplateResponse(
+        request,
+        "qr/rebind.html",
+        {
+            "user_email": user.email,
+            "qr": qr,
+            "is_bound": is_bound,
+            "current_device_name": current_device_name,
+            "query": q or "",
+            "candidates": candidates,
+            "candidates_error": candidates_error,
+            "target": target,
+            "target_error": target_error,
+            "flash": flash,
+            "flash_kind": flash_kind,
+            "csrf_token": user.csrf_token,
+        },
+    )
+
+
+@router.post("/qr/{qr_id}/rebind")
+async def web_qr_rebind(
+    qr_id: str,
+    csrf: str = Form(alias="_csrf"),
+    device_id: int = Form(ge=1),
+    reason: str = Form(min_length=1, max_length=2000),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Execute the rebind. Fetches the target device's ``last_updated`` itself
+    (the admin never types a version — same pattern as the decommission form),
+    then delegates to ``QRLifecycleService.rebind``. Errors → flash back to the
+    wizard; success → flash on the QR search page.
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+    auth_user = await _build_auth_user_for_admin_action(user)
+    netbox = get_netbox_client()
+    device_service = DeviceService(netbox)
+
+    # OCC version for the target device — fetched here, passed to rebind.
+    try:
+        target = await device_service.get_device(device_id)
+    except NetBoxNotFound:
+        return _rebind_redirect(
+            qr_id=qr_id, flash=f"Device {device_id} not found in NetBox", flash_kind="error"
+        )
+
+    audit_repo = AuditLogRepository(session)
+    lifecycle = QRLifecycleService(
+        netbox_client=netbox,
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=audit_repo,
+        write_service=NetBoxWriteService(netbox, session, audit_repo),
+    )
+    target_label = target.data.name or f"device {device_id}"
+    try:
+        await lifecycle.rebind(
+            qr_id=qr_id,
+            new_device_id=device_id,
+            expected_version=target.version,
+            reason=reason,
+            user=auth_user,
+        )
+    except QRNotFoundError:
+        return _rebind_redirect(
+            qr_id=qr_id, flash=f"QR {qr_id} not registered", flash_kind="error"
+        )
+    except QRStateConflictError as exc:
+        return _rebind_redirect(
+            qr_id=qr_id,
+            flash=f"QR is {exc.current_status.value} — only a BOUND label can be rebound",
+            flash_kind="error",
+        )
+    except SameDeviceError:
+        return _rebind_redirect(
+            qr_id=qr_id,
+            flash=f"QR is already bound to {target_label}",
+            flash_kind="info",
+            device_id=device_id,
+        )
+    except DeviceAlreadyBoundError as exc:
+        return _rebind_redirect(
+            qr_id=qr_id,
+            flash=(
+                f"{target_label} already has QR {exc.existing_qr_id} — "
+                "unbind it first"
+            ),
+            flash_kind="error",
+            device_id=device_id,
+        )
+    except NetBoxNotFound:
+        return _rebind_redirect(
+            qr_id=qr_id, flash=f"Device {device_id} not found in NetBox", flash_kind="error"
+        )
+    except WriteConflictError:
+        return _rebind_redirect(
+            qr_id=qr_id,
+            flash=f"{target_label} was modified concurrently — reload and try again",
+            flash_kind="error",
+            device_id=device_id,
+        )
+    except (QRRebindRolledBackError, QRRebindInconsistencyError):
+        return _rebind_redirect(
+            qr_id=qr_id,
+            flash=f"Rebind of QR {qr_id} rolled back — see audit log",
+            flash_kind="error",
+        )
+    # Success → back to the QR search page with the new state.
+    qs = urlencode(
+        {"qr_id": qr_id, "flash": f"QR {qr_id} rebound to {target_label}", "flash_kind": "info"}
+    )
+    return RedirectResponse(
+        url=f"/web/qr/search?{qs}", status_code=status.HTTP_303_SEE_OTHER
     )
 
 

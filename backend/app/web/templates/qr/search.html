@@ -95,6 +95,13 @@
             </div>
         </dl>
 
+        {% if qr.status.value == "bound" %}
+        <div class="mb-8">
+            <a class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm"
+               href="/web/qr/{{ qr.id }}/rebind">Reassign to another device &rarr;</a>
+        </div>
+        {% endif %}
+
         {% if device is not none %}
         <h2 class="text-lg font-semibold text-gray-900 mb-3">Bound device</h2>
         <dl class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6 mb-8">

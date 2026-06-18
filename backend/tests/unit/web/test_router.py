@@ -56,6 +56,8 @@ from app.web.router import (
     web_devices_detail,
     web_devices_search,
     web_force_close_session,
+    web_qr_rebind,
+    web_qr_rebind_form,
     web_qr_restore,
     web_qr_retire,
     web_qr_search,
@@ -1688,10 +1690,11 @@ def _patch_lifecycle_service(
     monkeypatch: pytest.MonkeyPatch,
     retire_impl: Any = None,
     restore_impl: Any = None,
+    rebind_impl: Any = None,
 ) -> None:
-    """Install a fake QRLifecycleService. ``retire`` / ``restore`` impls are
-    optional — pass whichever the test under exercise hits. Wires up the
-    netbox_client + write_service deps as no-ops since the handler reaches
+    """Install a fake QRLifecycleService. ``retire`` / ``restore`` / ``rebind``
+    impls are optional — pass whichever the test under exercise hits. Wires up
+    the netbox_client + write_service deps as no-ops since the handler reaches
     them via the import path on each call."""
 
     class _FakeRepo:
@@ -1710,6 +1713,10 @@ def _patch_lifecycle_service(
         async def restore(self, **kwargs: object) -> Any:
             assert restore_impl is not None, "restore not stubbed in this test"
             return await restore_impl(**kwargs)
+
+        async def rebind(self, **kwargs: object) -> Any:
+            assert rebind_impl is not None, "rebind not stubbed in this test"
+            return await rebind_impl(**kwargs)
 
     monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
     monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
@@ -2000,6 +2007,329 @@ async def test_web_qr_restore_rejects_csrf_mismatch(
             session=object(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 403
+
+
+# --- web_qr_rebind (reassign a BOUND label to another device, 2026-06-16) ---
+
+
+def _bound_qr_for_rebind(device_id: int = 42) -> Any:
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    return QR(
+        id="DCQR-REBIND01", batch_id=uuid4(), status=QRStatus.BOUND,
+        bound_to_device_id=device_id, bound_at=datetime(2026, 6, 16, tzinfo=UTC),
+        bound_by_email="b@x", retired_at=None, retired_reason=None,
+    )
+
+
+def _patch_rebind_device_service(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    get_device_impl: Any = None,
+    search_impl: Any = None,
+    names_impl: Any = None,
+) -> None:
+    """Fake DeviceService for the rebind handlers (get_device for the OCC
+    version, search + names for the wizard)."""
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            assert get_device_impl is not None
+            return await get_device_impl(device_id)
+
+        async def search(self, **kwargs: object) -> Any:
+            assert search_impl is not None
+            return await search_impl(**kwargs)
+
+        async def get_device_names_by_ids(self, ids: set[int]) -> Any:
+            return await names_impl(ids) if names_impl is not None else {}
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+
+
+def _target_device(device_id: int = 200, name: str = "srv61", version: str = "v2") -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(version=version, data=SimpleNamespace(id=device_id, name=name))
+
+
+async def test_web_qr_rebind_success_redirects_to_qr_search_with_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _get_device(_device_id: int) -> Any:
+        return _target_device(200, "srv61", "v2")
+
+    async def _rebind(**_kwargs: object) -> Any:
+        return None  # handler ignores the return on success
+
+    _patch_lifecycle_service(monkeypatch, rebind_impl=_rebind)
+    _patch_rebind_device_service(monkeypatch, get_device_impl=_get_device)
+
+    response = await web_qr_rebind(
+        qr_id="DCQR-REBIND01",
+        csrf="test-csrf-token",
+        device_id=200,
+        reason="swap srv60/srv61",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/qr/search?")
+    assert "qr_id=DCQR-REBIND01" in loc
+    assert "flash_kind=info" in loc
+    assert "rebound+to+srv61" in loc
+
+
+async def test_web_qr_rebind_device_already_bound_flashes_existing_qr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.qr.lifecycle import DeviceAlreadyBoundError
+
+    async def _get_device(_device_id: int) -> Any:
+        return _target_device(200, "srv61", "v2")
+
+    async def _rebind(**_kwargs: object) -> Any:
+        raise DeviceAlreadyBoundError(200, "DCQR-OTHER99")
+
+    _patch_lifecycle_service(monkeypatch, rebind_impl=_rebind)
+    _patch_rebind_device_service(monkeypatch, get_device_impl=_get_device)
+
+    response = await web_qr_rebind(
+        qr_id="DCQR-REBIND01",
+        csrf="test-csrf-token",
+        device_id=200,
+        reason="x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    # Back to the wizard, keeping the picked device, naming the blocking QR.
+    assert loc.startswith("/web/qr/DCQR-REBIND01/rebind?")
+    assert "flash_kind=error" in loc
+    assert "DCQR-OTHER99" in loc
+    assert "device_id=200" in loc
+
+
+async def test_web_qr_rebind_same_device_flashes_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.qr.lifecycle import SameDeviceError
+
+    async def _get_device(_device_id: int) -> Any:
+        return _target_device(200, "srv61", "v2")
+
+    async def _rebind(**_kwargs: object) -> Any:
+        raise SameDeviceError(200)
+
+    _patch_lifecycle_service(monkeypatch, rebind_impl=_rebind)
+    _patch_rebind_device_service(monkeypatch, get_device_impl=_get_device)
+
+    response = await web_qr_rebind(
+        qr_id="DCQR-REBIND01",
+        csrf="test-csrf-token",
+        device_id=200,
+        reason="x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=info" in response.headers["location"]
+    assert "already+bound" in response.headers["location"]
+
+
+async def test_web_qr_rebind_write_conflict_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.netbox_write import WriteConflictError
+
+    async def _get_device(_device_id: int) -> Any:
+        return _target_device(200, "srv61", "v2")
+
+    async def _rebind(**_kwargs: object) -> Any:
+        raise WriteConflictError(current_object={"id": 200}, current_version="v9")
+
+    _patch_lifecycle_service(monkeypatch, rebind_impl=_rebind)
+    _patch_rebind_device_service(monkeypatch, get_device_impl=_get_device)
+
+    response = await web_qr_rebind(
+        qr_id="DCQR-REBIND01",
+        csrf="test-csrf-token",
+        device_id=200,
+        reason="x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "modified+concurrently" in response.headers["location"]
+
+
+async def test_web_qr_rebind_target_device_not_found_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_device (version fetch) raises NetBoxNotFound → rebind never runs."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.netbox.errors import NetBoxNotFound
+
+    rebind_called = False
+
+    async def _get_device(_device_id: int) -> Any:
+        raise NetBoxNotFound("device 200")
+
+    async def _rebind(**_kwargs: object) -> Any:
+        nonlocal rebind_called
+        rebind_called = True
+        return None
+
+    _patch_lifecycle_service(monkeypatch, rebind_impl=_rebind)
+    _patch_rebind_device_service(monkeypatch, get_device_impl=_get_device)
+
+    response = await web_qr_rebind(
+        qr_id="DCQR-REBIND01",
+        csrf="test-csrf-token",
+        device_id=200,
+        reason="x",
+        user=_admin_user(),
+        session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert "flash_kind=error" in response.headers["location"]
+    assert "not+found" in response.headers["location"]
+    assert not rebind_called, "rebind must not run when the target device is missing"
+
+
+async def test_web_qr_rebind_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_qr_rebind(
+            qr_id="DCQR-REBIND01",
+            csrf="WRONG-TOKEN",
+            device_id=200,
+            reason="x",
+            user=_admin_user(),
+            session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_web_qr_rebind_form_renders_wizard_for_bound_qr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> Any:
+            return _bound_qr_for_rebind(device_id=42)
+
+    async def _names(_ids: set[int]) -> dict[int, str]:
+        return {42: "srv60"}
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+    _patch_rebind_device_service(monkeypatch, names_impl=_names)
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/web/qr/DCQR-REBIND01/rebind",
+        "scheme": "http", "server": ("test", 80), "query_string": b"", "headers": [],
+    }
+    response = await web_qr_rebind_form(
+        request=Request(scope), qr_id="DCQR-REBIND01",
+        q=None, device_id=None, flash=None, flash_kind=None,
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"Reassign" in body or b"Find the new device" in body
+    assert b"srv60" in body  # current device name resolved
+
+
+async def test_web_qr_rebind_form_shows_note_for_non_bound_qr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    free_qr = QR(
+        id="DCQR-FREE0001", batch_id=uuid4(), status=QRStatus.FREE,
+        bound_to_device_id=None, bound_at=None, bound_by_email=None,
+        retired_at=None, retired_reason=None,
+    )
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> Any:
+            return free_qr
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+    _patch_rebind_device_service(monkeypatch)
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/web/qr/DCQR-FREE0001/rebind",
+        "scheme": "http", "server": ("test", 80), "query_string": b"", "headers": [],
+    }
+    response = await web_qr_rebind_form(
+        request=Request(scope), qr_id="DCQR-FREE0001",
+        q=None, device_id=None, flash=None, flash_kind=None,
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 200
+    body = bytes(response.body)
+    assert b"Only a" in body and b"bound" in body
+
+
+async def test_web_qr_rebind_form_404_for_unknown_qr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+
+    class _FakeQRCodeRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> None:
+            return None
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRCodeRepo)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+    _patch_rebind_device_service(monkeypatch)
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/web/qr/NOPE/rebind",
+        "scheme": "http", "server": ("test", 80), "query_string": b"", "headers": [],
+    }
+    response = await web_qr_rebind_form(
+        request=Request(scope), qr_id="NOPE",
+        q=None, device_id=None, flash=None, flash_kind=None,
+        user=_admin_user(), session=object(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 404
 
 
 # --- web_devices_decommission ----------------------------------------------
