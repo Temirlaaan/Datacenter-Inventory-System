@@ -1294,6 +1294,127 @@ async def web_batches_bulk_retire(
     return _redirect(f"Retired {succeeded} QR codes", "info")
 
 
+# ---------- POST /web/batches/{batch_id}/delete — force-delete a batch ------
+
+
+@router.post("/batches/{batch_id}/delete")
+async def web_batches_delete(
+    batch_id: UUID,
+    csrf: str = Form(alias="_csrf"),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Force-delete an entire batch: unbind any BOUND labels, then hard-delete
+    every QR row + the batch row, writing a ``batch.delete`` audit row.
+
+    Destructive admin escape hatch (web-only — mobile never deletes batches).
+    Ordering and safety:
+
+    1. Unbind each BOUND label via ``QRLifecycleService.unbind`` (its own
+       three-record write, freeing the NetBox device's ``qr_id``). If ANY
+       bound label can't be cleanly unbound, the whole delete aborts — we
+       never hard-delete a row whose NetBox device still points at it. The
+       already-unbound labels stay FREE (retry-safe); the batch survives.
+    2. With every label FREE/RETIRED, delete ``qr_codes`` then ``qr_batches``
+       (FK order) + the audit row in one transaction.
+
+    The per-label ``qr.unbind`` audit rows and the summary ``batch.delete``
+    row reference QRs/batch by string id (no FK), so they outlive the delete.
+    """
+    from uuid import uuid4
+
+    verify_csrf_token(csrf, user.csrf_token)
+
+    def _to_list(flash: str, flash_kind: str) -> RedirectResponse:
+        qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+        return RedirectResponse(
+            url=f"/web/batches/?{qs}", status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    def _to_detail(flash: str, flash_kind: str) -> RedirectResponse:
+        qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+        return RedirectResponse(
+            url=f"/web/batches/{batch_id}?{qs}", status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    auth_user = await _build_auth_user_for_admin_action(user)
+    netbox = get_netbox_client()
+    device_service = DeviceService(netbox)
+
+    # Read batch + codes in their own tx so the autobegun transaction closes
+    # before the lifecycle service opens its own.
+    async with session.begin():
+        batch = await QRBatchRepository(session).get_by_id(batch_id)
+        codes = await QRCodeRepository(session).find_by_batch_id(batch_id)
+    if batch is None:
+        return _to_list(f"Batch {batch_id} not found", "error")
+
+    bound = [c for c in codes if c.status is QRStatus.BOUND]
+    lifecycle = QRLifecycleService(
+        netbox_client=netbox,
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=AuditLogRepository(session),
+        write_service=NetBoxWriteService(netbox, session, AuditLogRepository(session)),
+    )
+
+    unbound = 0
+    unbind_failed: list[str] = []
+    for qr in bound:
+        device_id = qr.bound_to_device_id
+        assert device_id is not None  # BOUND invariant
+        try:
+            device = await device_service.get_device(device_id)
+            await lifecycle.unbind(
+                qr_id=qr.id,
+                expected_version=device.version,
+                reason=f"batch {batch_id} force-deleted",
+                user=auth_user,
+            )
+            unbound += 1
+        except (
+            NetBoxNotFound,
+            WriteConflictError,
+            QRStateConflictError,
+            QRNotFoundError,
+            QRUnbindRolledBackError,
+            QRUnbindInconsistencyError,
+        ):
+            unbind_failed.append(qr.id)
+
+    if unbind_failed:
+        # Abort before any hard-delete — leave the batch intact for a retry.
+        return _to_detail(
+            f"Unbound {unbound} of {len(bound)} bound labels — "
+            f"{len(unbind_failed)} could not be cleared, batch not deleted "
+            "(see audit log)",
+            "error",
+        )
+
+    # All labels are now FREE/RETIRED — hard-delete codes, batch, + audit row.
+    async with session.begin():
+        await QRCodeRepository(session).delete_by_batch_id(batch_id)
+        await QRBatchRepository(session).delete(batch_id)
+        await AuditLogRepository(session).insert(
+            AuditLogEntry(
+                request_id=uuid4(),
+                timestamp=datetime.now(UTC),
+                user_email=user.email or "",
+                user_keycloak_id=user.sub,
+                session_id=auth_user.shift_session_id,
+                operation="batch.delete",
+                entity_type="batch",
+                entity_id=str(batch_id),
+                before_json={"count": batch.count, "comment": batch.comment},
+                after_json={"deleted_codes": len(codes), "unbound": unbound},
+                result=AuditResult.SUCCESS,
+            )
+        )
+
+    detail = f"{len(codes)} codes" + (f", {unbound} unbound" if unbound else "")
+    return _to_list(f"Batch deleted ({detail})", "info")
+
+
 # ---------- POST /web/qr/{qr_id}/retire — inline retire-QR form -------------
 
 

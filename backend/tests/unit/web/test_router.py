@@ -4074,6 +4074,303 @@ async def test_web_batches_bulk_retire_rejects_csrf_mismatch(
     assert exc.value.status_code == 403
 
 
+# --- web_batches_delete (force-delete a batch, 2026-06-19) ------------------
+
+
+def _make_batch(batch_id: Any, *, count: int = 3) -> Any:
+    from app.domain.qr import QRBatch
+
+    return QRBatch(
+        id=batch_id,
+        created_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        created_by_email="alice@example.com",
+        created_by_keycloak_id=_USER_SUB,
+        count=count,
+        intended_site_id=None,
+        intended_location_id=None,
+        intended_rack_id=None,
+        comment="to-delete",
+    )
+
+
+def _free_qr(qr_id: str, batch_id: Any) -> Any:
+    from app.domain.qr import QR, QRStatus
+
+    return QR(
+        id=qr_id, batch_id=batch_id, status=QRStatus.FREE,
+        bound_to_device_id=None, bound_at=None, bound_by_email=None,
+        retired_at=None, retired_reason=None,
+    )
+
+
+def _patch_batch_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    batch: Any,
+    codes: list[Any],
+    unbind_impl: Any = None,
+    get_device_impl: Any = None,
+) -> dict[str, Any]:
+    """Wire fakes for ``web_batches_delete`` and return a recorder dict
+    capturing the destructive calls + the audit entry."""
+    from app.services.device import (
+        DeviceData,
+        DeviceResponse,
+        ObjectRef,
+        StatusRef,
+    )
+
+    rec: dict[str, Any] = {"deleted_codes": False, "deleted_batch": False, "audit": []}
+
+    class _FakeBatchRepo:
+        def __init__(self, _s: object) -> None: ...
+
+        async def get_by_id(self, _id: object) -> Any:
+            return batch
+
+        async def delete(self, _id: object) -> None:
+            rec["deleted_batch"] = True
+
+    class _FakeCodeRepo:
+        def __init__(self, _s: object) -> None: ...
+
+        async def find_by_batch_id(self, _id: object) -> list[Any]:
+            return codes
+
+        async def delete_by_batch_id(self, _id: object) -> None:
+            rec["deleted_codes"] = True
+
+    class _FakeAuditRepo:
+        def __init__(self, _s: object) -> None: ...
+
+        async def insert(self, entry: object) -> None:
+            rec["audit"].append(entry)
+
+    class _FakeWriteService:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+    class _FakeLifecycle:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+        async def unbind(self, **kwargs: object) -> Any:
+            assert unbind_impl is not None, "unbind not stubbed"
+            return await unbind_impl(**kwargs)
+
+    async def _default_get_device(device_id: int) -> Any:
+        return DeviceResponse(
+            data=DeviceData(
+                id=device_id, name="dev",
+                status=StatusRef(value="active", label="Active"),
+                site=ObjectRef(id=1, name="DC-1"), rack=None,
+                position=None, serial="", asset_tag=None, comments="",
+                custom_fields={},
+            ),
+            version="2026-06-19T00:00:00Z",
+        )
+
+    class _FakeDeviceService:
+        def __init__(self, _c: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            impl = get_device_impl or _default_get_device
+            return await impl(device_id)
+
+    monkeypatch.setattr("app.web.router.QRBatchRepository", _FakeBatchRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeCodeRepo)
+    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.NetBoxWriteService", _FakeWriteService)
+    monkeypatch.setattr("app.web.router.QRLifecycleService", _FakeLifecycle)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+    return rec
+
+
+async def test_web_batches_delete_no_bound_codes_deletes_and_audits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All-FREE batch → no unbind, codes+batch deleted, audit row written,
+    303 to the list with an info flash."""
+    from uuid import uuid4
+
+    from app.web.router import web_batches_delete
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    batch_id = uuid4()
+    batch = _make_batch(batch_id, count=2)
+    codes = [_free_qr("QR-A", batch_id), _free_qr("QR-B", batch_id)]
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("unbind must not run when no codes are bound")
+
+    rec = _patch_batch_delete(
+        monkeypatch, batch=batch, codes=codes, unbind_impl=_unbind
+    )
+
+    response = await web_batches_delete(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/batches/?")
+    assert "flash_kind=info" in loc
+    assert "Batch+deleted" in loc
+    assert rec["deleted_codes"] is True
+    assert rec["deleted_batch"] is True
+    assert len(rec["audit"]) == 1
+    entry = rec["audit"][0]
+    assert entry.operation == "batch.delete"
+    assert entry.entity_id == str(batch_id)
+    assert entry.after_json == {"deleted_codes": 2, "unbound": 0}
+
+
+async def test_web_batches_delete_unbinds_bound_codes_before_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BOUND label is unbound first, then the batch is deleted; flash notes
+    the unbound count."""
+    from uuid import uuid4
+
+    from app.web.router import web_batches_delete
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    batch_id = uuid4()
+    batch = _make_batch(batch_id, count=2)
+    codes = [
+        _free_qr("QR-FREE", batch_id),
+        _bound_qr_on_device(qr_id="QR-BOUND", device_id=7),
+    ]
+    unbound_ids: list[str] = []
+
+    async def _unbind(**kwargs: object) -> Any:
+        unbound_ids.append(str(kwargs["qr_id"]))
+        return None
+
+    rec = _patch_batch_delete(
+        monkeypatch, batch=batch, codes=codes, unbind_impl=_unbind
+    )
+
+    response = await web_batches_delete(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/batches/?")
+    assert "flash_kind=info" in loc
+    assert "unbound" in loc
+    assert unbound_ids == ["QR-BOUND"]
+    assert rec["deleted_codes"] is True
+    assert rec["deleted_batch"] is True
+    assert rec["audit"][0].after_json == {"deleted_codes": 2, "unbound": 1}
+
+
+async def test_web_batches_delete_aborts_when_unbind_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed unbind aborts the whole delete — nothing is hard-deleted, and
+    the admin is sent back to the detail page with an error flash."""
+    from uuid import uuid4
+
+    from app.services.netbox_write import WriteConflictError
+    from app.web.router import web_batches_delete
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    batch_id = uuid4()
+    batch = _make_batch(batch_id, count=1)
+    codes = [_bound_qr_on_device(qr_id="QR-BOUND", device_id=7)]
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise WriteConflictError(current_object={}, current_version="v2")
+
+    rec = _patch_batch_delete(
+        monkeypatch, batch=batch, codes=codes, unbind_impl=_unbind
+    )
+
+    response = await web_batches_delete(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith(f"/web/batches/{batch_id}?")
+    assert "flash_kind=error" in loc
+    assert "not+deleted" in loc
+    assert rec["deleted_codes"] is False
+    assert rec["deleted_batch"] is False
+    assert rec["audit"] == []
+
+
+async def test_web_batches_delete_unknown_batch_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing batch → 303 to the list with an error flash, no deletes."""
+    from uuid import uuid4
+
+    from app.web.router import web_batches_delete
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    batch_id = uuid4()
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("no unbind for a missing batch")
+
+    rec = _patch_batch_delete(
+        monkeypatch, batch=None, codes=[], unbind_impl=_unbind
+    )
+
+    response = await web_batches_delete(
+        batch_id=batch_id,
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/batches/?")
+    assert "flash_kind=error" in loc
+    assert "not+found" in loc
+    assert rec["deleted_codes"] is False
+    assert rec["deleted_batch"] is False
+
+
+async def test_web_batches_delete_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong csrf → HTTPException(403) before any side effects."""
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from app.web.router import web_batches_delete
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_batches_delete(
+            batch_id=uuid4(),
+            csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=_NoopTxSession(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
 # ---------- /web/devices/{id} detail + comments (Sprint 9 Task 2) -----------
 
 

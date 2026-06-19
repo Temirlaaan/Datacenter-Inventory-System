@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -146,6 +146,18 @@ class QRCodeRepository:
             await self.session.execute(stmt)
         except IntegrityError as exc:
             raise RepositoryError(str(exc)) from exc
+
+    async def delete_by_batch_id(self, batch_id: UUID) -> None:
+        """Hard-delete every QR row for ``batch_id``.
+
+        Used only by the web admin's force-delete-batch flow. The caller owns
+        the transaction and must have already transitioned any BOUND rows out
+        of NetBox (unbind) — this is a raw DELETE with no state-machine guard.
+        ``audit_log`` rows reference QRs by string id, not FK, so they survive.
+        """
+        await self.session.execute(
+            delete(QRCodeModel).where(QRCodeModel.batch_id == batch_id)
+        )
 
     async def update(self, qr: QR) -> None:
         """Persist changes to an existing QR row.

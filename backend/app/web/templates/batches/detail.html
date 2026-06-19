@@ -140,6 +140,25 @@
     {% endif %}
 </section>
 
+{# Danger zone — force-delete the whole batch. Unbinds any BOUND labels
+   from their NetBox devices first, then hard-deletes every QR row + the
+   batch. Irreversible, so the JS handler requires the operator to type
+   the batch id to confirm (the id is a UUID — safe as a data- attribute). #}
+<section class="mt-6 bg-white rounded-xl border border-rose-200 shadow-sm p-6">
+    <h2 class="text-base font-semibold text-rose-800">Danger zone</h2>
+    <p class="text-sm text-gray-600 mt-1 mb-4">
+        Deleting this batch unbinds any
+        <span class="font-medium">{{ status_counts.bound }} bound</span> label{{ "" if status_counts.bound == 1 else "s" }}
+        from their devices and permanently removes all
+        <span class="font-medium">{{ batch.count }}</span> QR codes. This cannot be undone.
+    </p>
+    <form method="post" action="/web/batches/{{ batch.id }}/delete"
+          class="js-delete-batch-form" data-batch-id="{{ batch.id }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit" class="inline-flex items-center px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium shadow-sm">Delete this batch</button>
+    </form>
+</section>
+
 {# Confirm dialog for each inline retire form. QR ids come from
    secrets.token_urlsafe() (url-safe base64 — no quotes/backslashes) so
    embedding them as a data- attribute is safe; this still avoids
@@ -183,5 +202,21 @@
     });
     for (const cb of checkboxes) cb.addEventListener("change", updateCount);
   })();
+
+  // Force-delete-batch confirm: require the operator to type the batch id.
+  for (const form of document.querySelectorAll(".js-delete-batch-form")) {
+    form.addEventListener("submit", (event) => {
+      const expected = form.dataset.batchId;
+      const typed = prompt(
+        "This permanently deletes the batch and ALL its QR codes, unbinding " +
+        "any bound labels from their devices. This cannot be undone.\n\n" +
+        "Type the batch id to confirm:"
+      );
+      if (typed !== expected) {
+        event.preventDefault();
+        if (typed !== null) alert("Batch id did not match — nothing deleted.");
+      }
+    });
+  }
 </script>
 {% endblock %}

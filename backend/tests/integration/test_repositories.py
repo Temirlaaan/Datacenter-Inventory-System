@@ -245,6 +245,53 @@ async def test_qr_code_repository_find_by_batch_id_returns_codes_sorted_by_id() 
     assert [c.id for c in fetched] == ["DCQR-AAAAAAAA", "DCQR-BBBBBBBB", "DCQR-CCCCCCCC"]
 
 
+async def test_qr_code_repository_delete_by_batch_id_removes_all_rows() -> None:
+    batch = _batch()
+    codes = [_free_qr(f"DCQR-DEL0000{i}", batch.id) for i in range(4)]
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await QRCodeRepository(session).bulk_insert(codes)
+        await session.commit()
+
+        await QRCodeRepository(session).delete_by_batch_id(batch.id)
+        await session.commit()
+
+        remaining = await QRCodeRepository(session).find_by_batch_id(batch.id)
+    assert remaining == []
+
+
+async def test_qr_code_repository_delete_by_batch_id_leaves_other_batches() -> None:
+    keep = _batch()
+    drop = _batch()
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(keep)
+        await QRBatchRepository(session).insert(drop)
+        await QRCodeRepository(session).bulk_insert([_free_qr("DCQR-KEEP0001", keep.id)])
+        await QRCodeRepository(session).bulk_insert([_free_qr("DCQR-DROP0001", drop.id)])
+        await session.commit()
+
+        await QRCodeRepository(session).delete_by_batch_id(drop.id)
+        await session.commit()
+
+        kept = await QRCodeRepository(session).find_by_batch_id(keep.id)
+        dropped = await QRCodeRepository(session).find_by_batch_id(drop.id)
+    assert [c.id for c in kept] == ["DCQR-KEEP0001"]
+    assert dropped == []
+
+
+async def test_qr_batch_repository_delete_removes_the_batch_row() -> None:
+    batch = _batch()
+    async with get_sessionmaker()() as session:
+        await QRBatchRepository(session).insert(batch)
+        await session.commit()
+
+        await QRBatchRepository(session).delete(batch.id)
+        await session.commit()
+
+        fetched = await QRBatchRepository(session).get_by_id(batch.id)
+    assert fetched is None
+
+
 async def test_qr_code_repository_get_by_id_returns_qr_when_present() -> None:
     batch = _batch()
     qr = _free_qr("DCQR-AAAAAAAA", batch.id)

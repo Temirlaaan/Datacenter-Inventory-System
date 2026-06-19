@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +61,17 @@ class QRBatchRepository:
         models = list(result.scalars())
         has_more = len(models) > page_size
         return [_to_domain(m) for m in models[:page_size]], has_more
+
+    async def delete(self, batch_id: UUID) -> None:
+        """Hard-delete the ``qr_batches`` row.
+
+        Web admin force-delete only. The caller must delete the dependent
+        ``qr_codes`` rows first (the ``qr_codes.batch_id`` FK has no cascade)
+        and owns the surrounding transaction.
+        """
+        await self.session.execute(
+            delete(QRBatchModel).where(QRBatchModel.id == batch_id)
+        )
 
     async def insert(self, batch: QRBatch) -> None:
         model = QRBatchModel(
