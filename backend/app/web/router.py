@@ -1486,6 +1486,82 @@ async def web_qr_retire(
     )
 
 
+# ---------- POST /web/qr/{qr_id}/unbind — free a BOUND label ----------------
+
+
+@router.post("/qr/{qr_id}/unbind")
+async def web_qr_unbind(
+    qr_id: str,
+    csrf: str = Form(alias="_csrf"),
+    batch_id: UUID | None = Form(default=None),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Unbind a BOUND label (BOUND→FREE) from the batch detail page —
+    "just detach the device" without retiring the sticker.
+
+    The admin never types a device version: the handler reads the QR to
+    find its bound device, fetches that device's ``last_updated`` for OCC,
+    then delegates to ``QRLifecycleService.unbind`` (same three-record
+    write as the mobile ``POST /api/v1/qr/{id}/unbind``).
+
+    ``batch_id`` (hidden form input) routes the 303 back to the originating
+    batch page; absent → the batch list.
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+    auth_user = await _build_auth_user_for_admin_action(user)
+    netbox = get_netbox_client()
+    target = f"/web/batches/{batch_id}" if batch_id is not None else "/web/batches/"
+
+    def _redirect(flash: str, flash_kind: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=f"{target}?{urlencode({'flash': flash, 'flash_kind': flash_kind})}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # Read the QR (in its own tx so the autobegun one closes before the
+    # service opens its own) to find the bound device for the OCC version.
+    async with session.begin():
+        qr = await QRCodeRepository(session).get_by_id(qr_id)
+    if qr is None:
+        return _redirect(f"QR {qr_id} not registered", "error")
+    if qr.status is not QRStatus.BOUND or qr.bound_to_device_id is None:
+        return _redirect(f"QR {qr_id} is {qr.status.value} — nothing to unbind", "error")
+
+    try:
+        device = await DeviceService(netbox).get_device(qr.bound_to_device_id)
+    except NetBoxNotFound:
+        return _redirect(
+            f"Device {qr.bound_to_device_id} not found in NetBox", "error"
+        )
+
+    lifecycle = _device_lifecycle(session)
+    try:
+        await lifecycle.unbind(
+            qr_id=qr_id,
+            expected_version=device.version,
+            reason="unbound by admin from batch view",
+            user=auth_user,
+        )
+    except QRNotFoundError:
+        return _redirect(f"QR {qr_id} not registered", "error")
+    except QRStateConflictError as exc:
+        return _redirect(
+            f"QR {qr_id} is {exc.current_status.value} — nothing to unbind", "error"
+        )
+    except WriteConflictError:
+        return _redirect(
+            "Device was modified concurrently — reload and try again", "error"
+        )
+    except NetBoxNotFound:
+        return _redirect(
+            f"Device {qr.bound_to_device_id} not found in NetBox", "error"
+        )
+    except (QRUnbindRolledBackError, QRUnbindInconsistencyError):
+        return _redirect(f"Unbind of QR {qr_id} rolled back — see audit log", "error")
+    return _redirect(f"QR {qr_id} unbound", "info")
+
+
 # ---------- POST /web/qr/{qr_id}/restore — undo an accidental retire --------
 
 
@@ -2022,8 +2098,8 @@ async def web_devices_search(
     name: str | None = Query(default=None, max_length=255),
     asset_tag: str | None = Query(default=None, max_length=255),
     serial: str | None = Query(default=None, max_length=255),
-    site_id: int | None = Query(default=None, ge=1, alias="site"),
-    rack_id: int | None = Query(default=None, ge=1, alias="rack"),
+    site: str | None = Query(default=None, max_length=16),
+    rack: str | None = Query(default=None, max_length=16),
     page: int = Query(default=1, ge=1),
     flash: str | None = Query(default=None),
     flash_kind: str | None = Query(default=None),
@@ -2033,9 +2109,21 @@ async def web_devices_search(
     9 Task 1). Filter form at the top; results table below when any
     filter is set. Read-only; no audit row.
 
+    ``site`` / ``rack`` are accepted as strings (not ``int`` query params)
+    so the GET form can submit empty values without tripping FastAPI's
+    int coercion → 422 JSON (the form always posts every field, blank or
+    not). Non-numeric / out-of-range values are ignored as "no filter".
+
     ``flash`` / ``flash_kind`` surface the bulk-decommission redirect
     banner so the admin sees aggregated success/failure right where they
     selected the rows."""
+
+    def _opt_int(raw: str | None) -> int | None:
+        raw = (raw or "").strip()
+        return int(raw) if raw.isdigit() and int(raw) >= 1 else None
+
+    site_id = _opt_int(site)
+    rack_id = _opt_int(rack)
     service = DeviceService(get_netbox_client())
     submitted = any(
         v is not None and v != ""

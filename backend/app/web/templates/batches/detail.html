@@ -104,6 +104,16 @@
                             <input type="hidden" name="batch_id" value="{{ batch.id }}">
                             <button type="submit" class="inline-flex items-center px-2.5 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium">Retire</button>
                         </form>
+                        {% elif c.status.value == "bound" %}
+                        {# Unbind (2026-06-19): detach the device from this
+                           label (BOUND→FREE) without retiring it. The handler
+                           fetches the device version itself for OCC. #}
+                        <form method="post" action="/web/qr/{{ c.id }}/unbind"
+                              class="js-unbind-form" data-qr-id="{{ c.id }}">
+                            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                            <input type="hidden" name="batch_id" value="{{ batch.id }}">
+                            <button type="submit" class="inline-flex items-center px-2.5 py-1 rounded-md border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-medium">Unbind</button>
+                        </form>
                         {% elif c.status.value == "retired" %}
                         {# Restore-from-retired (2026-06-11): undo button for
                            accidentally-retired stickers. Only rendered when
@@ -169,6 +179,16 @@
     form.addEventListener("submit", (event) => {
       const qrId = form.dataset.qrId;
       if (!confirm("Retire QR " + qrId + "? Use Restore if you change your mind.")) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  // Unbind confirm (mirrors retire-form pattern).
+  for (const form of document.querySelectorAll(".js-unbind-form")) {
+    form.addEventListener("submit", (event) => {
+      const qrId = form.dataset.qrId;
+      if (!confirm("Unbind QR " + qrId + " from its device? The label returns to FREE.")) {
         event.preventDefault();
       }
     });

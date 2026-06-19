@@ -62,12 +62,12 @@
                 <input id="new_qr_id" name="new_qr_id" type="text" maxlength="255" required
                        placeholder="FREE QR id, e.g. DCQR-7F3A2B"
                        class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
-                {% if bound_qr %}
-                <p class="mt-1 text-xs text-gray-500">Frees <code class="font-mono">{{ bound_qr.id }}</code> and binds the new label to this device.</p>
-                {% endif %}
             </div>
             <button type="submit" class="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">{% if bound_qr %}Replace QR{% else %}Bind QR{% endif %}</button>
         </form>
+        {% if bound_qr %}
+        <p class="mt-2 text-xs text-gray-500">Frees <code class="font-mono">{{ bound_qr.id }}</code> and binds the new label to this device.</p>
+        {% endif %}
     </div>
 
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Add a comment</h2>

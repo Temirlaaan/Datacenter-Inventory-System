@@ -3,7 +3,7 @@
 {% block content %}
 <section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6 max-w-2xl">
     <h1 class="text-2xl font-semibold text-gray-900 mb-1">Decommission device</h1>
-    <p class="text-sm text-gray-500 mb-6">Marks a NetBox device as decommissioned. If the device has a bound QR, the QR is retired in the same flow (QR-first ordering). Records a per-incident reason in the NetBox journal entry + audit log.</p>
+    <p class="text-sm text-gray-500 mb-6">Marks a device decommissioned. A bound QR is retired in the same flow; the reason is recorded in NetBox + the audit log.</p>
 
     {% if flash %}
     {% if flash_kind == "error" %}

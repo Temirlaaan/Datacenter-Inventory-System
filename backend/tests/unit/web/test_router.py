@@ -62,6 +62,7 @@ from app.web.router import (
     web_qr_restore,
     web_qr_retire,
     web_qr_search,
+    web_qr_unbind,
     web_users_detail,
     web_users_list,
 )
@@ -2016,6 +2017,203 @@ async def test_web_qr_restore_rejects_csrf_mismatch(
             csrf="WRONG-TOKEN",
             user=_admin_user(),
             session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+# --- web_qr_unbind (free a BOUND label from the batch view, 2026-06-19) ------
+
+
+def _patch_qr_unbind(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    qr: Any,
+    unbind_impl: Any = None,
+    get_device_impl: Any = None,
+) -> None:
+    """Wire fakes for ``web_qr_unbind``: a QRCodeRepository returning ``qr``
+    from ``get_by_id``, a DeviceService.get_device, and a lifecycle unbind."""
+    from app.services.device import (
+        DeviceData,
+        DeviceResponse,
+        ObjectRef,
+        StatusRef,
+    )
+
+    _patch_lifecycle_service(monkeypatch, unbind_impl=unbind_impl)
+
+    class _FakeQRRepo:
+        def __init__(self, _s: object) -> None: ...
+
+        async def get_by_id(self, _qr_id: str) -> Any:
+            return qr
+
+    async def _default_get_device(device_id: int) -> Any:
+        return DeviceResponse(
+            data=DeviceData(
+                id=device_id, name="dev",
+                status=StatusRef(value="active", label="Active"),
+                site=ObjectRef(id=1, name="DC-1"), rack=None,
+                position=None, serial="", asset_tag=None, comments="",
+                custom_fields={},
+            ),
+            version="2026-06-19T00:00:00Z",
+        )
+
+    class _FakeDeviceService:
+        def __init__(self, _c: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            impl = get_device_impl or _default_get_device
+            return await impl(device_id)
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+
+
+async def test_web_qr_unbind_success_redirects_to_batch_with_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BOUND label → unbind called, 303 back to the batch with info flash."""
+    from uuid import uuid4
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    seen: dict[str, Any] = {}
+
+    async def _unbind(**kwargs: object) -> Any:
+        seen.update(kwargs)
+        return None
+
+    _patch_qr_unbind(
+        monkeypatch,
+        qr=_bound_qr_on_device(qr_id="QR-BOUND", device_id=7),
+        unbind_impl=_unbind,
+    )
+
+    batch_id = uuid4()
+    response = await web_qr_unbind(
+        qr_id="QR-BOUND",
+        csrf="test-csrf-token",
+        batch_id=batch_id,
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith(f"/web/batches/{batch_id}?")
+    assert "flash_kind=info" in loc
+    assert "unbound" in loc
+    assert seen["qr_id"] == "QR-BOUND"
+
+
+async def test_web_qr_unbind_unknown_qr_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown QR → error flash, no lifecycle call."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("unbind must not run for an unknown QR")
+
+    _patch_qr_unbind(monkeypatch, qr=None, unbind_impl=_unbind)
+
+    response = await web_qr_unbind(
+        qr_id="QR-MISSING",
+        csrf="test-csrf-token",
+        batch_id=None,
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/batches/?")
+    assert "flash_kind=error" in loc
+    assert "not+registered" in loc
+
+
+async def test_web_qr_unbind_free_qr_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FREE label has nothing to unbind → error flash, no lifecycle call."""
+    from uuid import uuid4
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("unbind must not run for a FREE QR")
+
+    _patch_qr_unbind(
+        monkeypatch, qr=_free_qr("QR-FREE", uuid4()), unbind_impl=_unbind
+    )
+
+    response = await web_qr_unbind(
+        qr_id="QR-FREE",
+        csrf="test-csrf-token",
+        batch_id=None,
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "nothing+to+unbind" in loc
+
+
+async def test_web_qr_unbind_device_not_found_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound device vanished from NetBox → error flash, no unbind."""
+    from app.netbox.errors import NetBoxNotFound
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _missing(_device_id: int) -> Any:
+        raise NetBoxNotFound("device 7")
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("unbind must not run when the device is missing")
+
+    _patch_qr_unbind(
+        monkeypatch,
+        qr=_bound_qr_on_device(qr_id="QR-BOUND", device_id=7),
+        unbind_impl=_unbind,
+        get_device_impl=_missing,
+    )
+
+    response = await web_qr_unbind(
+        qr_id="QR-BOUND",
+        csrf="test-csrf-token",
+        batch_id=None,
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "not+found" in loc
+
+
+async def test_web_qr_unbind_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong csrf token → HTTPException(403) before any side effects."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_qr_unbind(
+            qr_id="QR-BOUND",
+            csrf="WRONG-TOKEN",
+            batch_id=None,
+            user=_admin_user(),
+            session=_NoopTxSession(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 403
 
@@ -4951,14 +5149,54 @@ async def test_web_devices_search_renders_empty_form_when_no_filters(
         name=None,
         asset_tag=None,
         serial=None,
-        site_id=None,
-        rack_id=None,
+        site=None,
+        rack=None,
         page=1,
         user=_admin_user(),
     )
     assert response.status_code == 200
     assert b"Device search" in response.body
     assert not netbox_called
+
+
+async def test_web_devices_search_ignores_blank_site_and_rack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty ``site=``/``rack=`` from the GET form are treated as no filter
+    (not coerced to int → 422). Regression for the 'Search returns JSON' bug.
+    """
+    _set_env(monkeypatch)
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def search(self, **_kwargs: object) -> Any:
+            raise AssertionError("blank site/rack must not count as a filter")
+
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+    monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/web/devices/search",
+        "scheme": "http",
+        "server": ("test", 80),
+        "query_string": b"",
+        "headers": [],
+    }
+    response = await web_devices_search(
+        request=Request(scope),
+        name="",
+        asset_tag="",
+        serial="",
+        site="",
+        rack="",
+        page=1,
+        user=_admin_user(),
+    )
+    assert response.status_code == 200
+    assert b"Device search" in response.body
 
 
 def test_web_devices_search_route_declared_before_web_devices_detail() -> None:
