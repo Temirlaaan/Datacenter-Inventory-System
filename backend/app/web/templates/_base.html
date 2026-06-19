@@ -6,14 +6,7 @@
     <title>{% block title %}DC Inventory admin{% endblock %}</title>
     {# Tailwind Play script, self-hosted under /static/ so the admin
        surface has no runtime dependency on cdn.tailwindcss.com. Bundled
-       with the official @tailwindcss/forms plugin (gives all native
-       <input>/<textarea>/<select> sane padding + border defaults out
-       of the box — without it Tailwind's preflight strips browser
-       styling and inputs render with zero internal padding). Pinned to
-       the version we downloaded on 2026-06-07. To upgrade, re-fetch
-       `https://cdn.tailwindcss.com?plugins=forms`. Precompile to a CSS
-       bundle (needs Node) only if the ~400KB JS load becomes a perf
-       concern. #}
+       with the official @tailwindcss/forms plugin. Pinned 2026-06-07. #}
     <script src="/static/tailwind.js"></script>
     <script>
       tailwind.config = {
@@ -29,24 +22,39 @@
     </script>
     <link rel="stylesheet" href="/static/admin.css">
 </head>
-<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+<body class="text-gray-900 antialiased min-h-screen flex flex-col">
 
-<header class="bg-white border-b border-gray-200 shadow-sm">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center h-14 gap-8">
-        <a class="text-sm font-semibold text-gray-900 tracking-tight whitespace-nowrap" href="/web/">DC Inventory</a>
-        <nav class="flex items-center gap-1 flex-1 overflow-x-auto">
-            {% set _navlink = "px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 whitespace-nowrap" %}
-            <a class="{{ _navlink }}" href="/web/">Dashboard</a>
-            <a class="{{ _navlink }}" href="/web/batches/">Batches</a>
-            <a class="{{ _navlink }}" href="/web/qr/search">QR search</a>
-            <a class="{{ _navlink }}" href="/web/devices/search">Devices</a>
-            <a class="{{ _navlink }}" href="/web/audit/">Audit</a>
-            <a class="{{ _navlink }}" href="/web/sessions/">Sessions</a>
-            <a class="{{ _navlink }}" href="/web/users/">Users</a>
+{% set path = request.url.path if request else '' %}
+{% macro navlink(href, label, prefix) -%}
+    {% set active = (path == '/web/') if prefix == '/web/' else path.startswith(prefix) %}
+    <a class="px-3 py-1.5 rounded-md text-sm font-medium whitespace-nowrap transition-colors
+        {% if active %}bg-indigo-50 text-indigo-700{% else %}text-gray-500 hover:text-gray-900 hover:bg-gray-100{% endif %}"
+       href="{{ href }}"{% if active %} aria-current="page"{% endif %}>{{ label }}</a>
+{%- endmacro %}
+
+<header class="sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-gray-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center h-14 gap-6">
+        <a class="flex items-center gap-2 shrink-0" href="/web/">
+            <span class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-700 text-white text-[11px] font-bold tracking-tight shadow-sm">DC</span>
+            <span class="text-sm font-semibold text-gray-900 tracking-tight hidden sm:inline">Inventory</span>
+        </a>
+        <nav class="flex items-center gap-0.5 flex-1 overflow-x-auto">
+            {{ navlink('/web/', 'Dashboard', '/web/') }}
+            {{ navlink('/web/batches/', 'Batches', '/web/batches') }}
+            {{ navlink('/web/qr/search', 'QR search', '/web/qr') }}
+            {{ navlink('/web/devices/search', 'Devices', '/web/devices') }}
+            {{ navlink('/web/audit/', 'Audit', '/web/audit') }}
+            {{ navlink('/web/sessions/', 'Sessions', '/web/sessions') }}
+            {{ navlink('/web/users/', 'Users', '/web/users') }}
         </nav>
-        <div class="flex items-center gap-3 text-sm">
-            {% if user_email %}<span class="text-gray-500 hidden sm:inline">{{ user_email }}</span>{% endif %}
-            <a class="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-200 text-gray-700 hover:bg-gray-100" href="/web/logout">Log out</a>
+        <div class="flex items-center gap-3 text-sm shrink-0">
+            {% if user_email %}
+            <span class="text-gray-500 hidden md:inline-flex items-center gap-1.5">
+                <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-100 text-gray-600 text-[11px] font-semibold">{{ user_email[0]|upper }}</span>
+                <span class="hidden lg:inline">{{ user_email }}</span>
+            </span>
+            {% endif %}
+            <a class="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-200 text-gray-700 hover:bg-gray-100 transition-colors" href="/web/logout">Log out</a>
         </div>
     </div>
 </header>
@@ -54,9 +62,15 @@
 {% if flash %}
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
     {% if flash_kind == "error" %}
-    <div class="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ flash }}</div>
+    <div class="flex items-start gap-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-sm">
+        <svg class="w-5 h-5 shrink-0 mt-px text-rose-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+        <span>{{ flash }}</span>
+    </div>
     {% else %}
-    <div class="rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">{{ flash }}</div>
+    <div class="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 shadow-sm">
+        <svg class="w-5 h-5 shrink-0 mt-px text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m9 12 2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+        <span>{{ flash }}</span>
+    </div>
     {% endif %}
 </div>
 {% endif %}
@@ -65,10 +79,10 @@
     {% block content %}{% endblock %}
 </main>
 
-<footer class="border-t border-gray-200 py-6 text-center text-xs text-gray-500">
+<footer class="border-t border-gray-200 py-6 text-center text-xs text-gray-400">
     DC Inventory backend &middot;
-    <a class="hover:text-gray-700" href="/health">/health</a> &middot;
-    <a class="hover:text-gray-700" href="/docs">/docs</a>
+    <a class="hover:text-gray-600" href="/health">/health</a> &middot;
+    <a class="hover:text-gray-600" href="/docs">/docs</a>
 </footer>
 </body>
 </html>

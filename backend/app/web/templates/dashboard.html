@@ -12,40 +12,52 @@
 {%- endmacro %}
 
 {% block content %}
-<section class="bg-white rounded-lg shadow-sm ring-1 ring-gray-200 p-6">
-    <div class="flex items-baseline justify-between flex-wrap gap-2 mb-6">
-        <div>
-            <h1 class="text-2xl font-semibold text-gray-900">Dashboard</h1>
-            <p class="text-sm text-gray-500 mt-1">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
-        </div>
+<div class="flex items-end justify-between flex-wrap gap-3 mb-6">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-gray-900">Dashboard</h1>
+        <p class="text-sm text-gray-500 mt-1">As of {{ snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}.</p>
     </div>
-
-    <div class="flex flex-wrap gap-3 mb-8">
-        <a class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm" href="/web/batches/new">
-            <span class="mr-1">+</span> New QR batch
+    <div class="flex flex-wrap gap-2">
+        <a class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm" href="/web/batches/new">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14m-7-7h14"/></svg>
+            New QR batch
         </a>
-        <a class="inline-flex items-center px-4 py-2 rounded-md border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/devices/decommission">
+        <a class="inline-flex items-center px-4 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium" href="/web/devices/decommission">
             Decommission device
         </a>
     </div>
+</div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {% for label, value in [
-            ("Free QRs", snapshot.qr_free_count),
-            ("Bound QRs", snapshot.qr_bound_count),
-            ("Retired QRs", snapshot.qr_retired_count),
-            ("Batches (last 30 days)", snapshot.batches_last_30_days),
-            ("Active shifts", snapshot.active_shifts_count),
-            ("Audit rows (last 24h)", snapshot.audit_rows_last_24h),
-        ] %}
-        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+{# Counter cards — colour-accented icon chips, lift on hover. #}
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+    {% for label, value, accent, icon in [
+        ("Free QRs", snapshot.qr_free_count, "emerald",
+         "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"),
+        ("Bound QRs", snapshot.qr_bound_count, "indigo",
+         "M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5m6.328-1.328l1.5-1.5a4 4 0 015.656 5.656l-3 3"),
+        ("Retired QRs", snapshot.qr_retired_count, "gray",
+         "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6"),
+        ("Batches (30 days)", snapshot.batches_last_30_days, "sky",
+         "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"),
+        ("Active shifts", snapshot.active_shifts_count, "amber",
+         "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"),
+        ("Audit rows (24h)", snapshot.audit_rows_last_24h, "violet",
+         "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"),
+    ] %}
+    <div class="card-hover rounded-xl border border-gray-200 bg-white p-5 flex items-center gap-4 shadow-sm">
+        <span class="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-{{ accent }}-50 text-{{ accent }}-600 shrink-0">
+            <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="{{ icon }}"/></svg>
+        </span>
+        <div class="min-w-0">
             <div class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ label }}</div>
-            <div class="text-3xl font-semibold text-gray-900 mt-2">{{ value }}</div>
+            <div class="text-3xl font-semibold tracking-tight text-gray-900 mt-0.5 tabular-nums">{{ value }}</div>
         </div>
-        {% endfor %}
     </div>
+    {% endfor %}
+</div>
 
-    <div class="mt-8 flex items-baseline justify-between flex-wrap gap-2 mb-3">
+<section class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+    <div class="flex items-baseline justify-between flex-wrap gap-2 mb-3">
         <h2 class="text-lg font-semibold text-gray-900">Recent activity
             <span id="js-stream-status" class="ml-2 inline-flex items-center text-xs font-normal text-gray-400">
                 <span class="inline-block h-2 w-2 rounded-full bg-gray-300 mr-1.5"></span>connecting&hellip;

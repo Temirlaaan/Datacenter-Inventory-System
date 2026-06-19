@@ -1,6 +1,91 @@
 /* DC Inventory admin — supplemental CSS.
  *
- * Most of the UI is Tailwind utility classes (loaded via Play CDN in
- * _base.html). This file is intentionally near-empty: it exists as a
- * stable URL the base template links and as a place to drop rules
- * Tailwind can't easily express. Nothing here today — add sparingly. */
+ * Most of the UI is Tailwind utility classes (loaded via the Play CDN JS in
+ * _base.html). The Play CDN only generates utilities it finds in the DOM and
+ * does NOT process @apply in this file — so everything here is plain CSS:
+ * global polish Tailwind utilities can't easily express (page background,
+ * font smoothing, focus-visible rings, smooth card/button transitions,
+ * thin scrollbars). 2026-06-16 design pass. */
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Subtle cool-gray gradient instead of a flat fill — reads as "app", not "page". */
+  background: linear-gradient(180deg, #f8fafc 0%, #eef2f6 100%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: #c7d2fe;
+  color: #1e1b4b;
+}
+
+/* Accessible focus ring on every interactive element (keyboard users). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Smooth hover transitions for buttons + links. */
+a,
+button {
+  transition: background-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+/* Opt-in lift for clickable cards (add class="card-hover"). */
+.card-hover {
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+.card-hover:hover {
+  box-shadow: 0 12px 32px -14px rgba(15, 23, 42, 0.22);
+  transform: translateY(-2px);
+}
+
+/* Sticky table headers sit just below the 56px sticky page header. */
+thead th {
+  position: sticky;
+  top: 3.5rem;
+  background: inherit;
+}
+
+/* Thin, unobtrusive scrollbars (Firefox + WebKit). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+  background-clip: content-box;
+}
+
+/* Respect reduced-motion preferences. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  .card-hover {
+    transition: none !important;
+  }
+}
