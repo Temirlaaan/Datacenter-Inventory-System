@@ -54,6 +54,7 @@ from app.web.router import (
     web_devices_bulk_decommission,
     web_devices_decommission,
     web_devices_detail,
+    web_devices_replace_qr,
     web_devices_search,
     web_force_close_session,
     web_qr_rebind,
@@ -1691,11 +1692,13 @@ def _patch_lifecycle_service(
     retire_impl: Any = None,
     restore_impl: Any = None,
     rebind_impl: Any = None,
+    bind_impl: Any = None,
+    unbind_impl: Any = None,
 ) -> None:
     """Install a fake QRLifecycleService. ``retire`` / ``restore`` / ``rebind``
-    impls are optional — pass whichever the test under exercise hits. Wires up
-    the netbox_client + write_service deps as no-ops since the handler reaches
-    them via the import path on each call."""
+    / ``bind`` / ``unbind`` impls are optional — pass whichever the test under
+    exercise hits. Wires up the netbox_client + write_service deps as no-ops
+    since the handler reaches them via the import path on each call."""
 
     class _FakeRepo:
         def __init__(self, _session: object) -> None: ...
@@ -1717,6 +1720,14 @@ def _patch_lifecycle_service(
         async def rebind(self, **kwargs: object) -> Any:
             assert rebind_impl is not None, "rebind not stubbed in this test"
             return await rebind_impl(**kwargs)
+
+        async def bind(self, **kwargs: object) -> Any:
+            assert bind_impl is not None, "bind not stubbed in this test"
+            return await bind_impl(**kwargs)
+
+        async def unbind(self, **kwargs: object) -> Any:
+            assert unbind_impl is not None, "unbind not stubbed in this test"
+            return await unbind_impl(**kwargs)
 
     monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeRepo)
     monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeRepo)
@@ -4119,8 +4130,29 @@ async def test_web_devices_detail_renders_device_with_audit_history(
         async def query(self, **_kwargs: object) -> tuple[list[Any], bool]:
             return [audit_row], False
 
+    from app.domain.qr import QR, QRStatus
+
+    bound_qr = QR(
+        id="DCQR-BOUND1",
+        batch_id=UUID("22222222-2222-2222-2222-222222222222"),
+        status=QRStatus.BOUND,
+        bound_to_device_id=42,
+        bound_at=datetime(2026, 6, 16, tzinfo=UTC),
+        bound_by_email="b@x",
+        retired_at=None,
+        retired_reason=None,
+    )
+
+    class _FakeQRRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def find_by_bound_device_id(self, device_id: int) -> Any:
+            assert device_id == 42
+            return bound_qr
+
     monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
     monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRRepo)
     monkeypatch.setattr("app.web.router.get_netbox_client", lambda: object())
 
     scope = {
@@ -4145,6 +4177,9 @@ async def test_web_devices_detail_renders_device_with_audit_history(
     assert b"core-sw-01" in body
     assert b"device.update" in body
     assert b"Add a comment" in body
+    # QR-label card shows the bound label + reassign link.
+    assert b"DCQR-BOUND1" in body
+    assert b"/web/qr/DCQR-BOUND1/rebind" in body
 
 
 async def test_web_devices_detail_returns_404_for_unknown_device(
@@ -4270,6 +4305,318 @@ async def test_web_devices_add_comment_rejects_csrf_mismatch(
             user=_admin_user(),
             session=object(),  # type: ignore[arg-type]
             sessionmaker=cast(object, _fake_cm),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 403
+
+
+# --- web_devices_replace_qr (bind / replace a device's QR, 2026-06-19) ------
+
+
+def _bound_qr_on_device(qr_id: str = "DCQR-OLD0001", device_id: int = 42) -> Any:
+    from uuid import uuid4
+
+    from app.domain.qr import QR, QRStatus
+
+    return QR(
+        id=qr_id, batch_id=uuid4(), status=QRStatus.BOUND,
+        bound_to_device_id=device_id, bound_at=datetime(2026, 6, 18, tzinfo=UTC),
+        bound_by_email="b@x", retired_at=None, retired_reason=None,
+    )
+
+
+def _patch_replace_qr(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    current_qr: Any,
+    bind_impl: Any = None,
+    unbind_impl: Any = None,
+    get_device_impl: Any = None,
+    version: str = "2026-06-19T00:00:00Z",
+) -> None:
+    """Wire fakes for ``web_devices_replace_qr``: a session whose ``begin()`` is
+    a no-op async CM, a QRCodeRepository returning ``current_qr``, a
+    DeviceService.get_device, and lifecycle bind/unbind stubs."""
+    from app.services.device import (
+        DeviceData,
+        DeviceResponse,
+        ObjectRef,
+        StatusRef,
+    )
+
+    _patch_lifecycle_service(
+        monkeypatch, bind_impl=bind_impl, unbind_impl=unbind_impl
+    )
+
+    class _FakeQRRepo:
+        def __init__(self, _session: object) -> None: ...
+
+        async def find_by_bound_device_id(self, _device_id: int) -> Any:
+            return current_qr
+
+    async def _default_get_device(device_id: int) -> Any:
+        return DeviceResponse(
+            data=DeviceData(
+                id=device_id, name="dev",
+                status=StatusRef(value="active", label="Active"),
+                site=ObjectRef(id=1, name="DC-1"), rack=None,
+                position=None, serial="", asset_tag=None, comments="",
+                custom_fields={},
+            ),
+            version=version,
+        )
+
+    class _FakeDeviceService:
+        def __init__(self, _client: object) -> None: ...
+
+        async def get_device(self, device_id: int) -> Any:
+            impl = get_device_impl or _default_get_device
+            return await impl(device_id)
+
+    monkeypatch.setattr("app.web.router.QRCodeRepository", _FakeQRRepo)
+    monkeypatch.setattr("app.web.router.DeviceService", _FakeDeviceService)
+
+
+class _NoopTxSession:
+    """Session stub whose ``begin()`` yields a no-op transaction CM."""
+
+    def begin(self) -> Any:
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _cm() -> Any:
+            yield None
+
+        return _cm()
+
+
+async def test_web_devices_replace_qr_binds_when_no_current_qr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Device with no QR → bind only (no unbind), 303 info flash."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    calls: dict[str, Any] = {}
+
+    async def _bind(**kwargs: object) -> Any:
+        calls["bind"] = kwargs
+        return None
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise AssertionError("unbind must not run when device has no QR")
+
+    _patch_replace_qr(
+        monkeypatch, current_qr=None, bind_impl=_bind, unbind_impl=_unbind
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="  DCQR-NEW0001  ",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert loc.startswith("/web/devices/42?")
+    assert "flash_kind=info" in loc
+    assert "bound" in loc and "DCQR-NEW0001" in loc
+    # new_qr_id is stripped before reaching the service.
+    assert calls["bind"]["qr_id"] == "DCQR-NEW0001"
+
+
+async def test_web_devices_replace_qr_unbinds_then_binds_when_current_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Device already has QR X → unbind X then bind Y, 303 info 'replaced'."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    order: list[str] = []
+
+    async def _unbind(**kwargs: object) -> Any:
+        order.append("unbind")
+        assert kwargs["qr_id"] == "DCQR-OLD0001"
+        return None
+
+    async def _bind(**kwargs: object) -> Any:
+        order.append("bind")
+        assert kwargs["qr_id"] == "DCQR-NEW0001"
+        return None
+
+    _patch_replace_qr(
+        monkeypatch,
+        current_qr=_bound_qr_on_device(),
+        bind_impl=_bind,
+        unbind_impl=_unbind,
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="DCQR-NEW0001",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    assert order == ["unbind", "bind"]  # unbind must land first
+    loc = response.headers["location"]
+    assert "flash_kind=info" in loc
+    assert "replaced" in loc
+
+
+async def test_web_devices_replace_qr_noop_when_new_equals_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting the already-bound QR id → info flash, no service calls."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    async def _must_not_run(**_kwargs: object) -> Any:
+        raise AssertionError("no lifecycle call expected for a no-op replace")
+
+    _patch_replace_qr(
+        monkeypatch,
+        current_qr=_bound_qr_on_device(qr_id="DCQR-SAME001"),
+        bind_impl=_must_not_run,
+        unbind_impl=_must_not_run,
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="DCQR-SAME001",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=info" in loc
+    assert "already+bound" in loc
+
+
+async def test_web_devices_replace_qr_device_not_found_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_device raises NetBoxNotFound → 303 error flash, no binding."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.netbox.errors import NetBoxNotFound
+
+    async def _missing(_device_id: int) -> Any:
+        raise NetBoxNotFound("device 42")
+
+    async def _must_not_run(**_kwargs: object) -> Any:
+        raise AssertionError("no lifecycle call when device is missing")
+
+    _patch_replace_qr(
+        monkeypatch,
+        current_qr=None,
+        bind_impl=_must_not_run,
+        get_device_impl=_missing,
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="DCQR-NEW0001",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "not+found" in loc
+
+
+async def test_web_devices_replace_qr_new_qr_not_free_flashes_error_with_freed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When replacing, a non-FREE new label → error flash that says the old
+    label was freed (honest about the partial state)."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.domain.qr import QRStatus
+    from app.services.qr.lifecycle import QRStateConflictError
+
+    async def _unbind(**_kwargs: object) -> Any:
+        return None
+
+    async def _bind(**_kwargs: object) -> Any:
+        raise QRStateConflictError(current_status=QRStatus.BOUND)
+
+    _patch_replace_qr(
+        monkeypatch,
+        current_qr=_bound_qr_on_device(),
+        bind_impl=_bind,
+        unbind_impl=_unbind,
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="DCQR-NEW0001",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "freed" in loc
+    assert "bound" in loc  # "is bound — only a FREE label..."
+
+
+async def test_web_devices_replace_qr_unbind_conflict_flashes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent device change during the unbind → 303 error flash, bind
+    never attempted."""
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+    from app.services.netbox_write import WriteConflictError
+
+    async def _unbind(**_kwargs: object) -> Any:
+        raise WriteConflictError(current_object={}, current_version="v2")
+
+    async def _bind(**_kwargs: object) -> Any:
+        raise AssertionError("bind must not run after a failed unbind")
+
+    _patch_replace_qr(
+        monkeypatch,
+        current_qr=_bound_qr_on_device(),
+        bind_impl=_bind,
+        unbind_impl=_unbind,
+    )
+
+    response = await web_devices_replace_qr(
+        device_id=42,
+        new_qr_id="DCQR-NEW0001",
+        csrf="test-csrf-token",
+        user=_admin_user(),
+        session=_NoopTxSession(),  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    loc = response.headers["location"]
+    assert "flash_kind=error" in loc
+    assert "concurrently" in loc
+
+
+async def test_web_devices_replace_qr_rejects_csrf_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong csrf token → HTTPException(403) before any side effects."""
+    from fastapi import HTTPException
+
+    _set_env(monkeypatch)
+    _patch_admin_shift_lookup(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_devices_replace_qr(
+            device_id=42,
+            new_qr_id="DCQR-NEW0001",
+            csrf="WRONG-TOKEN",
+            user=_admin_user(),
+            session=_NoopTxSession(),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 403
 

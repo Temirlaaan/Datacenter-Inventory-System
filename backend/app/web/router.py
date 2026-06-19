@@ -68,6 +68,8 @@ from app.services.qr.generation import GenerateBatchRequest, QRGenerationService
 from app.services.qr.lifecycle import (
     DeviceAlreadyBoundError,
     MissingVersionError,
+    QRBindInconsistencyError,
+    QRBindRolledBackError,
     QRLifecycleService,
     QRNotFoundError,
     QRRebindInconsistencyError,
@@ -75,6 +77,8 @@ from app.services.qr.lifecycle import (
     QRRetireInconsistencyError,
     QRRetireRolledBackError,
     QRStateConflictError,
+    QRUnbindInconsistencyError,
+    QRUnbindRolledBackError,
     SameDeviceError,
 )
 from app.services.shift_session import SessionAlreadyActive, ShiftSessionService
@@ -1985,6 +1989,11 @@ async def web_devices_detail(
             {"user_email": user.email, "resource": f"device {device_id}"},
             status_code=status.HTTP_404_NOT_FOUND,
         )
+    # The QR currently bound to this device (if any) drives the "QR label"
+    # card — reassign / replace / bind controls. A read on the request
+    # session autobegins a tx, but this handler does no further session
+    # writes, so that's fine here.
+    bound_qr = await QRCodeRepository(session).find_by_bound_device_id(device_id)
     audit_rows, audit_has_more = await AuditLogRepository(session).query(
         filters=AuditLogQueryFilters(
             entity_type="device", entity_id=str(device_id)
@@ -1998,6 +2007,7 @@ async def web_devices_detail(
         {
             "user_email": user.email,
             "device": device,
+            "bound_qr": bound_qr,
             "audit_rows": audit_rows,
             "audit_has_more": audit_has_more,
             "csrf_token": user.csrf_token,
@@ -2057,6 +2067,173 @@ async def web_devices_add_comment(
             )
         )
     return RedirectResponse(url=flash_target, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _device_redirect(*, device_id: int, flash: str, flash_kind: str) -> RedirectResponse:
+    """303 back to the device detail page with a flash banner."""
+    qs = urlencode({"flash": flash, "flash_kind": flash_kind})
+    return RedirectResponse(
+        url=f"/web/devices/{device_id}?{qs}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+def _device_lifecycle(session: AsyncSession) -> QRLifecycleService:
+    """Build a QRLifecycleService bound to the request session (decision I)."""
+    netbox = get_netbox_client()
+    audit_repo = AuditLogRepository(session)
+    return QRLifecycleService(
+        netbox_client=netbox,
+        session=session,
+        qr_code_repo=QRCodeRepository(session),
+        audit_log_repo=audit_repo,
+        write_service=NetBoxWriteService(netbox, session, audit_repo),
+    )
+
+
+@router.post("/devices/{device_id}/replace-qr")
+async def web_devices_replace_qr(
+    device_id: int,
+    new_qr_id: str = Form(min_length=1, max_length=255),
+    csrf: str = Form(alias="_csrf"),
+    user: WebAdminUser = Depends(require_web_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Set the QR bound to ``device_id`` to ``new_qr_id`` (2026-06-19).
+
+    Two cases, one form:
+    - device has no QR → ``bind`` the new FREE label;
+    - device already has QR X → ``unbind`` X (X→FREE) then ``bind`` the new
+      label (Y→BOUND). The DB's ``qr_one_per_device`` partial unique index
+      forbids two BOUND labels on one device, so the unbind must land first.
+
+    Each step is its own three-record write; there is a brief window after a
+    successful unbind where the device has no QR. If the follow-up bind fails
+    the handler says so explicitly (old label freed, new not bound) rather
+    than pretending the device is unchanged.
+
+    OCC versions are fetched here (the admin never types one); the device's
+    ``last_updated`` changes after the unbind PATCH, so it is re-read before
+    the bind.
+    """
+    verify_csrf_token(csrf, user.csrf_token)
+    new_qr_id = new_qr_id.strip()
+    auth_user = await _build_auth_user_for_admin_action(user)
+    device_service = DeviceService(get_netbox_client())
+
+    # Current binding — read inside an explicit tx so the autobegun
+    # transaction is closed before the lifecycle service opens its own.
+    async with session.begin():
+        current_qr = await QRCodeRepository(session).find_by_bound_device_id(device_id)
+
+    if current_qr is not None and current_qr.id == new_qr_id:
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"QR {new_qr_id} is already bound to this device",
+            flash_kind="info",
+        )
+
+    try:
+        device = await device_service.get_device(device_id)
+    except NetBoxNotFound:
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"Device {device_id} not found in NetBox",
+            flash_kind="error",
+        )
+
+    lifecycle = _device_lifecycle(session)
+
+    # Step 1 — unbind the existing label, if any.
+    if current_qr is not None:
+        try:
+            await lifecycle.unbind(
+                qr_id=current_qr.id,
+                expected_version=device.version,
+                reason=f"replaced by {new_qr_id}",
+                user=auth_user,
+            )
+        except QRStateConflictError:
+            return _device_redirect(
+                device_id=device_id,
+                flash=(
+                    f"QR {current_qr.id} is no longer bound — reload and try again"
+                ),
+                flash_kind="error",
+            )
+        except WriteConflictError:
+            return _device_redirect(
+                device_id=device_id,
+                flash="Device was modified concurrently — reload and try again",
+                flash_kind="error",
+            )
+        except (QRUnbindRolledBackError, QRUnbindInconsistencyError):
+            return _device_redirect(
+                device_id=device_id,
+                flash=f"Could not unbind QR {current_qr.id} — see audit log",
+                flash_kind="error",
+            )
+        # The unbind PATCH changed the device's last_updated — re-read it.
+        try:
+            device = await device_service.get_device(device_id)
+        except NetBoxNotFound:
+            return _device_redirect(
+                device_id=device_id,
+                flash=(
+                    f"QR {current_qr.id} unbound, but device {device_id} then "
+                    "vanished from NetBox — no new QR bound"
+                ),
+                flash_kind="error",
+            )
+
+    # Step 2 — bind the new label.
+    freed = f"QR {current_qr.id} freed; " if current_qr is not None else ""
+    try:
+        await lifecycle.bind(
+            qr_id=new_qr_id,
+            device_id=device_id,
+            expected_version=device.version,
+            user=auth_user,
+        )
+    except QRNotFoundError:
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"{freed}QR {new_qr_id} is not registered — nothing bound",
+            flash_kind="error",
+        )
+    except QRStateConflictError as exc:
+        return _device_redirect(
+            device_id=device_id,
+            flash=(
+                f"{freed}QR {new_qr_id} is {exc.current_status.value} — "
+                "only a FREE label can be bound"
+            ),
+            flash_kind="error",
+        )
+    except DeviceAlreadyBoundError as exc:
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"{freed}Device already has QR {exc.existing_qr_id}",
+            flash_kind="error",
+        )
+    except WriteConflictError:
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"{freed}Device was modified concurrently — reload and try again",
+            flash_kind="error",
+        )
+    except (QRBindRolledBackError, QRBindInconsistencyError):
+        return _device_redirect(
+            device_id=device_id,
+            flash=f"{freed}Could not bind QR {new_qr_id} — see audit log",
+            flash_kind="error",
+        )
+
+    verb = "replaced with" if current_qr is not None else "bound"
+    return _device_redirect(
+        device_id=device_id,
+        flash=f"Device QR {verb} {new_qr_id}",
+        flash_kind="info",
+    )
 
 
 # ---------- /web/qr/search — QR lookup by id --------------------------------

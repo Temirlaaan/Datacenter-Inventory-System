@@ -35,6 +35,41 @@
         <div><dt class="text-xs font-medium uppercase tracking-wider text-gray-500">Version</dt><dd class="text-sm mt-1"><code class="font-mono text-gray-900">{{ device.version }}</code></dd></div>
     </dl>
 
+    {# QR label card — current binding + reassign / replace / bind controls. #}
+    <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mb-8">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+                <div class="text-xs font-medium uppercase tracking-wider text-gray-500">QR label</div>
+                {% if bound_qr %}
+                <div class="mt-1 flex items-center gap-2">
+                    <code class="font-mono text-base text-gray-900">{{ bound_qr.id }}</code>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">bound</span>
+                </div>
+                {% else %}
+                <div class="mt-1 text-sm text-gray-500 italic">No QR bound to this device.</div>
+                {% endif %}
+            </div>
+            {% if bound_qr %}
+            <a class="inline-flex items-center px-4 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium"
+               href="/web/qr/{{ bound_qr.id }}/rebind">Reassign to another device &rarr;</a>
+            {% endif %}
+        </div>
+
+        <form method="post" action="/web/devices/{{ device.data.id }}/replace-qr" class="mt-4 flex flex-wrap items-end gap-3">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <div class="flex-1 min-w-[16rem]">
+                <label for="new_qr_id" class="block text-sm font-medium text-gray-700 mb-1">{% if bound_qr %}Replace with QR{% else %}Bind a QR{% endif %}</label>
+                <input id="new_qr_id" name="new_qr_id" type="text" maxlength="255" required
+                       placeholder="FREE QR id, e.g. DCQR-7F3A2B"
+                       class="block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-indigo-500 focus:ring-indigo-500">
+                {% if bound_qr %}
+                <p class="mt-1 text-xs text-gray-500">Frees <code class="font-mono">{{ bound_qr.id }}</code> and binds the new label to this device.</p>
+                {% endif %}
+            </div>
+            <button type="submit" class="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-sm">{% if bound_qr %}Replace QR{% else %}Bind QR{% endif %}</button>
+        </form>
+    </div>
+
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Add a comment</h2>
     <form method="post" action="/web/devices/{{ device.data.id }}/comments" class="space-y-3 max-w-2xl mb-8">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
