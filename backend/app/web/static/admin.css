@@ -52,11 +52,21 @@ button {
   transform: translateY(-2px);
 }
 
-/* Sticky table headers sit just below the 56px sticky page header. */
+/* Sticky table headers sit just below the 56px sticky page header.
+ * The header needs an OPAQUE background and a z-index, or scrolled rows
+ * show through / paint over it:
+ *  - `background: inherit` resolved to the <tr>'s transparent background
+ *    (the `bg-gray-50` class is on <thead>, not the cell), so data rows
+ *    bled through the sticky header. Use the gray-50 value all admin
+ *    table headers share.
+ *  - without z-index a sticky <th> is painted in source order, so <tbody>
+ *    (later in source) painted on top of the stuck header. Keep it below
+ *    the z-20 page header but above the body rows. */
 thead th {
   position: sticky;
   top: 3.5rem;
-  background: inherit;
+  z-index: 10;
+  background: #f9fafb;
 }
 
 /* Thin, unobtrusive scrollbars (Firefox + WebKit). */
