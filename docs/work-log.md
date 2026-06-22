@@ -1397,3 +1397,57 @@ NO new `POST /api/v1/qr/bulk-retire` (decision I) — bulk only makes sense for 
 - **`/web/devices/{id}` write path** (edit fields, change status) — admin web stays read-only unless ToR feedback says otherwise.
 - **WAL archiving / point-in-time recovery** — daily backups + cleaner restore validation are enough for current RPO. WAL-G or pgbackrest if sub-second RPO becomes a requirement.
 - **Prometheus metric exporter** — `/health` sub-objects are scrape-able JSON; a proper exporter is Sprint 12+ work.
+
+## Post-Sprint-10 reconciliation (2026-06-22)
+
+This section back-fills the running log after a code review found the codebase had
+drifted ahead of CLAUDE.md / work-log. It records (a) feature work that shipped
+between the Sprint 10 close and 2026-06-22 without its own log entry, (b) a
+review-hardening pass done 2026-06-22, and (c) a `web/router.py` decomposition.
+Reconstructed from the code + recent git history (commits `6077bda`, `3022276`,
+`192d850`, `00593b7`), so it describes shipped behaviour rather than a planned task list.
+
+### Shipped after Sprint 10, previously unlogged
+
+**Domain — `QRLifecycleService` grew three transitions beyond bind/retire:**
+- `rebind` (BOUND→BOUND, move to another device) — set-new → clear-old → registry saga with conditional/idempotent compensation on both devices; writes a single `qr.rebind` audit row + two best-effort journals.
+- `unbind` (BOUND→FREE, return label to the pool) — structurally a one-device rebind; clear-device → registry, compensation restores `qr_id` on a post-PATCH DB failure.
+- `restore` (RETIRED→FREE) — pure app-DB transition for an accidentally-retired sticker; comes back FREE (historical binding NOT auto-restored).
+
+All three keep the three-record-write + three-branch (`rolled_back` / `inconsistency`) compensation discipline of the original bind/retire.
+
+**Web admin surface — new pages beyond Sprint 8b/9/10:**
+- `/web/users/` list + `/web/users/{id}` detail — read-only over the Keycloak admin REST API; degrades to a "not configured" notice when the admin client secret is unset.
+- QR lifecycle from the web: `POST /web/qr/{id}/{retire,unbind,restore,rebind}` + `GET /web/qr/{id}/rebind` form + `GET /web/qr/search`.
+- Device QR management: `POST /web/devices/{id}/replace-qr`.
+- Decommission from the web: `POST /web/devices/decommission` + `GET` form, and `POST /web/devices/bulk-decommission` (the web-side counterpart to bulk-retire that Sprint 10 had deferred — it landed).
+- Batch lifecycle: `GET /web/batches/new` + `POST /web/batches/` (create), `POST /web/batches/{id}/delete` (force-delete: unbind bound labels then hard-delete).
+
+All web POSTs keep the decision-I pattern (direct Python call into the service, not HTTP self-call) and the `verify_csrf_token` gate.
+
+**Dashboard activity feed went real-time via SSE — DIVERGES FROM A DOCUMENTED DECISION.**
+`GET /web/dashboard/stream` is a `text/event-stream` that polls `audit_log` every 5s and pushes new rows to the dashboard. Sprint 10 Task 1 explicitly chose "page-refresh model, no real-time/streaming" and the close-out deferred "Real-time SSE/WebSocket dashboard updates" to Sprint 12+. The SSE endpoint contradicts that. **Open retro decision: either ratify SSE as the dashboard model (and delete the deferral note above) or revert it to page-refresh.** Until decided, it is treated as shipped-but-provisional. Mechanism is poll-and-push (multi-replica safe, zero schema change); a LISTEN/NOTIFY swap is internal-only if true realtime is wanted.
+
+### Review-hardening pass (2026-06-22)
+
+A `/code-review` pass produced five low-risk fixes, each with unit tests (ruff + mypy clean):
+
+1. **Open redirect** in the OIDC login — `?next=` was used as a post-login redirect target unvalidated (`next=https://evil.com` / `//evil.com`). Added `_safe_next_path` (local-path-only) applied at both cookie-set and callback-read points.
+2. **`TTLCache` unbounded growth** — expired entries were never evicted; harmless for the 5 static-lookup keys but a slow leak for the device-search cache keyed on the free-form query string. Added an expired-entry sweep on the cold (miss) path.
+3. **OIDC callback 500→400** — a token without a valid UUID `sub` raised `UUID(None)` as an unhandled 500; now returns a 400 with `web_oidc_callback_missing_sub`.
+4. **Rate-limit bucket leak** — the fixed-window counter dict grew one entry per (sub, class) per minute forever (acknowledged Sprint 8a caveat); added a stale-window sweep on the first consume of each new window.
+5. **SSE connection cap** — each open stream is a long-lived DB-polling coroutine, so load is O(open connections) with no bound; added `_SSE_MAX_CONCURRENT_CONNECTIONS` (50) with a race-free reserve-before-return + release-in-`finally`, returning 503 + Retry-After over the cap. (Mitigation, not a resolution of the SSE retro question above.)
+
+### `web/router.py` decomposition (2026-06-22)
+
+`app/web/router.py` had grown to ~2657 lines (well over the 800-line guideline). Extracted the low-coupling slices into focused modules, leaving `router.py` as the aggregator (`include_router`) for the remaining page handlers:
+- `app/web/oidc.py` — the OIDC redirect flow (`login` / `oidc_callback` / `logout` + helpers).
+- `app/web/sse.py` — the dashboard SSE stream.
+- `app/web/users.py` — the `/web/users/` surface.
+- `app/web/templating.py` — the shared `Jinja2Templates` instance (foundation so page modules don't import `templates` from `router`).
+
+Result: `router.py` 2657 → 2184. Behaviour-preserving; routes verified mounted; 741 unit tests pass (unchanged), ruff + mypy clean. **Deferred:** the heavy surfaces (qr / devices / batches / audit / sessions) stay in `router.py` for now — they carry ~100 `monkeypatch.setattr("app.web.router.<X>")` test sites bound to module globals, so a clean extraction needs the tests moved to DI-boundary patching first. That test-style refactor is the prerequisite for any further split.
+
+### Known pre-existing issue (not introduced here)
+
+`tests/unit/auth/test_jwks.py::test_get_key_drops_keys_without_kid_and_logs_warning` fails on a clean tree: the `jwks_keys_missing_kid` warning IS emitted (visible on stdout) but `caplog` doesn't capture structlog's stdout routing. Test-harness fragility, not a code defect — flagged for a future `caplog`/structlog fixture fix.
