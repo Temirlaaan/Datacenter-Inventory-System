@@ -22,18 +22,23 @@ from uuid import UUID
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from jose import jwt
 
+import app.web.sse as sse_mod
 from app.web.auth import (
     SESSION_COOKIE_NAME,
     WebAdminUser,
     reset_web_auth_cache,
 )
-from app.web.router import (
+from app.web.oidc import (
     _OIDC_NONCE_COOKIE,
     _OIDC_STATE_COOKIE,
+    _safe_next_path,
+    oidc_callback,
+)
+from app.web.router import (
     _parse_optional_form_int,
     _redirect_to_login,
     _sessions_filter_query_string,
@@ -44,7 +49,6 @@ from app.web.router import (
     batches_new_form,
     dashboard,
     devices_decommission_form,
-    oidc_callback,
     sessions_list,
     web_admin_shift_start,
     web_audit_csv,
@@ -63,9 +67,8 @@ from app.web.router import (
     web_qr_retire,
     web_qr_search,
     web_qr_unbind,
-    web_users_detail,
-    web_users_list,
 )
+from app.web.users import web_users_detail, web_users_list
 
 _USER_SUB = UUID("11111111-1111-1111-1111-111111111111")
 _FERNET_KEY = "VAMsIWGaHXesGIhCmHI6GQsRNdLwMuZA3Aw95EO1JBo="
@@ -130,6 +133,23 @@ def test_redirect_to_login_preserves_query_string_in_next_param() -> None:
     assert response.status_code == 302
     # URL-encoded; the path + query were folded into a single ?next=... value.
     assert "next=%2Fweb%2Faudit%2F%3Fentity_type%3Dqr%26page%3D2" in response.headers["location"]
+
+
+# ---------- _safe_next_path: open-redirect guard ----------------------------
+
+
+def test_safe_next_path_allows_local_path() -> None:
+    assert _safe_next_path("/web/audit/?page=2") == "/web/audit/?page=2"
+
+
+def test_safe_next_path_rejects_absolute_url() -> None:
+    # ``next=https://evil.com`` after a successful login is an open redirect.
+    assert _safe_next_path("https://evil.com") == "/web/"
+
+
+def test_safe_next_path_rejects_protocol_relative_url() -> None:
+    # ``//evil.com`` is browser-interpreted as a protocol-relative absolute URL.
+    assert _safe_next_path("//evil.com/phish") == "/web/"
 
 
 # ---------- oidc_callback failure branches ----------------------------------
@@ -242,6 +262,41 @@ async def test_oidc_callback_returns_400_when_id_token_parse_fails(
     assert isinstance(response, HTMLResponse)
     assert response.status_code == 400
     assert b"id_token parse failed" in response.body
+
+
+async def test_oidc_callback_returns_400_when_id_token_has_no_sub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parseable id_token with the right nonce but no ``sub`` claim is a
+    misconfigured IdP — reject as 400 instead of letting ``UUID(None)`` 500."""
+    _set_env(monkeypatch)
+
+    # Valid JWT (parsed unverified), correct nonce, but NO sub claim.
+    id_token = jwt.encode(
+        {"nonce": "n", "email": "a@b.c", "realm_access": {"roles": ["dcinv-admin"]}},
+        "irrelevant-secret",
+        algorithm="HS256",
+    )
+
+    class _NoSubClient:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        async def __aenter__(self) -> _NoSubClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *args: object, **kwargs: object) -> httpx.Response:
+            return httpx.Response(status_code=200, json={"id_token": id_token})
+
+    with patch.object(httpx, "AsyncClient", _NoSubClient):
+        request = _build_callback_request(state="s", nonce="n")
+        response = await oidc_callback(request, code="x", state="s")
+
+    assert isinstance(response, HTMLResponse)
+    assert response.status_code == 400
+    assert b"no valid subject" in response.body
 
 
 # ---------- dashboard handler: direct-await return --------------------------
@@ -430,7 +485,7 @@ async def test_dashboard_stream_generator_emits_new_rows_oldest_first(
     import json
 
     from app.domain.audit import AuditLogEntry, AuditResult
-    from app.web.router import _dashboard_stream_generator
+    from app.web.sse import _dashboard_stream_generator
 
     rows = [
         AuditLogEntry(
@@ -472,9 +527,9 @@ async def test_dashboard_stream_generator_emits_new_rows_oldest_first(
     def _fake_sessionmaker() -> _FakeSessionCtx:  # async_sessionmaker call shape
         return _FakeSessionCtx()
 
-    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.sse.AuditLogRepository", _FakeAuditRepo)
     # Skip the 5s sleep between ticks; we'll stop after consuming N events.
-    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.web.sse.asyncio.sleep", _noop_sleep)
 
     gen = _dashboard_stream_generator(
         sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
@@ -505,7 +560,7 @@ async def test_dashboard_stream_generator_skips_rows_at_or_below_watermark(
     import json
 
     from app.domain.audit import AuditLogEntry, AuditResult
-    from app.web.router import _dashboard_stream_generator
+    from app.web.sse import _dashboard_stream_generator
 
     rows = [
         AuditLogEntry(
@@ -540,8 +595,8 @@ async def test_dashboard_stream_generator_skips_rows_at_or_below_watermark(
     def _fake_sessionmaker() -> _FakeSessionCtx:
         return _FakeSessionCtx()
 
-    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
-    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.web.sse.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.sse.asyncio.sleep", _noop_sleep)
 
     gen = _dashboard_stream_generator(
         sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
@@ -562,16 +617,56 @@ async def test_dashboard_stream_endpoint_returns_event_stream_response(
     """Endpoint glue: returns ``StreamingResponse`` with ``text/event-stream``
     media type + the no-buffering headers nginx + browsers need."""
     _set_env(monkeypatch)
-    from app.web.router import dashboard_stream
+    sse_mod.reset_sse_connection_count()
 
     # Patch sessionmaker so we don't open a real DB connection if the
     # underlying generator is exercised by the caller.
-    monkeypatch.setattr("app.web.router.get_sessionmaker", lambda: object())
+    monkeypatch.setattr("app.web.sse.get_sessionmaker", lambda: object())
 
-    response = await dashboard_stream(last_event_id=0, user=_admin_user())
+    response = await sse_mod.dashboard_stream(last_event_id=0, user=_admin_user())
     assert response.media_type == "text/event-stream"
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
+    # The endpoint reserves a connection slot before returning.
+    assert sse_mod._sse_active_connections == 1
+    sse_mod.reset_sse_connection_count()
+
+
+async def test_dashboard_stream_rejects_with_503_when_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over the concurrent-connection cap, the endpoint returns 503 +
+    Retry-After instead of opening yet another DB-polling coroutine."""
+    _set_env(monkeypatch)
+    monkeypatch.setattr("app.web.sse.get_sessionmaker", lambda: object())
+    sse_mod._sse_active_connections = sse_mod._SSE_MAX_CONCURRENT_CONNECTIONS
+
+    with pytest.raises(HTTPException) as exc_info:
+        await sse_mod.dashboard_stream(last_event_id=0, user=_admin_user())
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.headers is not None
+    assert "Retry-After" in exc_info.value.headers
+    # A rejected request must NOT reserve a slot.
+    assert sse_mod._sse_active_connections == sse_mod._SSE_MAX_CONCURRENT_CONNECTIONS
+    sse_mod.reset_sse_connection_count()
+
+
+async def test_counted_stream_releases_slot_when_generator_exhausts() -> None:
+    """``_counted_stream`` decrements the active-connection counter in its
+    ``finally`` so a closed connection frees its slot exactly once."""
+    sse_mod.reset_sse_connection_count()
+    sse_mod._sse_active_connections = 1  # simulate the endpoint's reservation
+
+    async def _inner() -> AsyncIterator[bytes]:
+        yield b"a"
+        yield b"b"
+
+    chunks = [chunk async for chunk in sse_mod._counted_stream(_inner())]
+
+    assert chunks == [b"a", b"b"]
+    assert sse_mod._sse_active_connections == 0
+    sse_mod.reset_sse_connection_count()
 
 
 async def test_dashboard_stream_generator_paginates_through_burst_above_page_size(
@@ -583,7 +678,7 @@ async def test_dashboard_stream_generator_paginates_through_burst_above_page_siz
     import json
 
     from app.domain.audit import AuditLogEntry, AuditResult
-    from app.web.router import _dashboard_stream_generator
+    from app.web.sse import _dashboard_stream_generator
 
     # 25 new rows newest-first, ids 600..576. Watermark 575 → all new.
     page1 = [
@@ -632,8 +727,8 @@ async def test_dashboard_stream_generator_paginates_through_burst_above_page_siz
     def _fake_sessionmaker() -> _FakeSessionCtx:
         return _FakeSessionCtx()
 
-    monkeypatch.setattr("app.web.router.AuditLogRepository", _FakeAuditRepo)
-    monkeypatch.setattr("app.web.router.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.web.sse.AuditLogRepository", _FakeAuditRepo)
+    monkeypatch.setattr("app.web.sse.asyncio.sleep", _noop_sleep)
 
     gen = _dashboard_stream_generator(
         sessionmaker=_fake_sessionmaker,  # type: ignore[arg-type]
@@ -660,7 +755,7 @@ async def test_dashboard_stream_generator_logs_and_backs_off_on_tick_error(
     _set_env(monkeypatch)
     import asyncio as _asyncio
 
-    from app.web.router import _dashboard_stream_generator
+    from app.web.sse import _dashboard_stream_generator
 
     # Capture the REAL sleep before monkey-patching so the recorder can yield
     # control back to the event loop. Without that yield the generator's
@@ -677,8 +772,8 @@ async def test_dashboard_stream_generator_logs_and_backs_off_on_tick_error(
     ) -> list[Any]:
         raise RuntimeError("connection lost")
 
-    monkeypatch.setattr("app.web.router._collect_new_audit_rows", _failing_collector)
-    monkeypatch.setattr("app.web.router.asyncio.sleep", _record_sleep)
+    monkeypatch.setattr("app.web.sse._collect_new_audit_rows", _failing_collector)
+    monkeypatch.setattr("app.web.sse.asyncio.sleep", _record_sleep)
 
     gen = _dashboard_stream_generator(
         sessionmaker=object(),  # type: ignore[arg-type]
@@ -3347,7 +3442,7 @@ def _patch_keycloak_admin_client(
             return await get_impl(user_id)
 
     monkeypatch.setattr(
-        "app.web.router.get_keycloak_admin_client", lambda: _FakeAdminClient()
+        "app.web.users.get_keycloak_admin_client", lambda: _FakeAdminClient()
     )
 
 

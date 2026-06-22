@@ -48,5 +48,21 @@ class TTLCache:
         if entry is not None and now - entry.stored_at < self._ttl:
             return cast(_T, entry.value)
         value = await fetch()
+        # Sweep expired entries before inserting. For static-lookup caches (a
+        # handful of fixed keys) this is a no-op; for caches keyed on free-form
+        # input (e.g. device search keyed on the query string) it bounds the
+        # dict to entries still inside their TTL instead of growing forever.
+        # The sweep rides the cold path (we only reach here on a miss, right
+        # after an ``await fetch()`` round-trip), so its O(n) cost is
+        # negligible relative to the upstream call it follows.
+        self._evict_expired(now)
         self._entries[key] = _Entry(value=value, stored_at=now)
         return value
+
+    def _evict_expired(self, now: float) -> None:
+        """Drop every entry whose TTL has elapsed as of ``now``."""
+        expired = [
+            k for k, e in self._entries.items() if now - e.stored_at >= self._ttl
+        ]
+        for k in expired:
+            del self._entries[k]

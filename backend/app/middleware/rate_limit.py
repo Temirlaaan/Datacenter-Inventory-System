@@ -129,6 +129,18 @@ def _seconds_until_next_window(now: datetime) -> int:
     return _WINDOW_SECONDS - seconds_into_window
 
 
+def _evict_stale_windows(current_window: int) -> None:
+    """Drop bucket entries from windows older than the current one.
+
+    A fixed-window counter only ever reads the current window, so every key
+    whose ``window_index < current_window`` is dead weight. Without this sweep
+    the dict grows by one entry per (sub, class) per minute forever (acknowledged
+    Sprint 8a caveat); the sweep bounds it to ~one window of active users."""
+    stale = [key for key in _buckets if key[2] < current_window]
+    for key in stale:
+        del _buckets[key]
+
+
 def _consume(
     *,
     sub: str,
@@ -145,6 +157,9 @@ def _consume(
     window = _current_window_index(now)
     key = (sub, cls, window)
     current = _buckets.get(key, 0)
+    # First consume in a new window → sweep the previous windows' dead entries.
+    if key not in _buckets:
+        _evict_stale_windows(window)
     if current >= limit:
         return False, _seconds_until_next_window(now)
     _buckets[key] = current + 1

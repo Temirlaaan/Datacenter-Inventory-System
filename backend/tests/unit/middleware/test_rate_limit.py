@@ -14,6 +14,7 @@ from jose import jwt
 
 from app.middleware.rate_limit import (
     RateLimitClass,
+    _buckets,
     _classify_request,
     _consume,
     _current_window_index,
@@ -177,6 +178,22 @@ def test_consume_window_rollover_resets_count() -> None:
     next_minute = _NOW + timedelta(seconds=60)
     allowed, _ = _consume(sub="alice", cls=RateLimitClass.READ, limit=3, now=next_minute)
     assert allowed is True
+
+
+def test_consume_evicts_stale_window_entries_on_new_window() -> None:
+    """A consume in a new window sweeps the previous windows' dead buckets so
+    the dict doesn't grow by one entry per (sub, class) per minute forever."""
+    reset_rate_limit_buckets()
+    _consume(sub="alice", cls=RateLimitClass.READ, limit=3, now=_NOW)
+    _consume(sub="bob", cls=RateLimitClass.READ, limit=3, now=_NOW)
+    assert len(_buckets) == 2
+
+    # First consume in a later window evicts both stale entries.
+    next_minute = _NOW + timedelta(seconds=60)
+    _consume(sub="alice", cls=RateLimitClass.READ, limit=3, now=next_minute)
+    assert len(_buckets) == 1
+    only_key = next(iter(_buckets))
+    assert only_key[2] == _current_window_index(next_minute)
 
 
 def test_consume_rejected_request_does_not_increment_count() -> None:
