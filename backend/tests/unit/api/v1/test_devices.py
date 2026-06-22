@@ -313,6 +313,27 @@ async def test_update_device_handler_returns_updated_device() -> None:
     assert body["data"]["name"] == "sw-01-new"
 
 
+async def test_update_device_handler_returns_400_on_empty_update_without_calling_netbox() -> None:
+    class _ExplodingWriteService:
+        async def patch_with_attribution(self, **_kw: object) -> dict[str, object]:
+            raise AssertionError("NetBox must not be called for an empty update")
+
+    result = await update_device(
+        device_id=5,
+        request=DeviceUpdateRequest(),  # no editable fields set
+        if_unmodified_since=_VERSION,
+        user=_user("dcinv-mobile-user"),
+        write_service=cast(NetBoxWriteService, _ExplodingWriteService()),
+        sessionmaker=cast(object, _noop_sessionmaker),  # type: ignore[arg-type]
+        idempotency_key=None,
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 400
+    body = json.loads(bytes(result.body))
+    assert body["error"]["code"] == "NO_FIELDS"
+
+
 async def test_update_device_handler_returns_409_on_write_conflict() -> None:
     current = _device_dict(_NEW_VERSION)
     stub = _StubWriteService(

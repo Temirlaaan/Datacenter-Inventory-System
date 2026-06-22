@@ -149,6 +149,11 @@ def to_device_data(
         u_height = device.get("u_height")
         if u_height is None and device_type_raw:
             u_height = device_type_raw.get("u_height")
+    # Floor a resolved height at 1U, matching ``_u_height_by_device_type``'s
+    # ``max(1, ...)`` so the inline fallback can't surface a 0/negative height
+    # from bad NetBox data. ``None`` (unknown) stays ``None``.
+    if u_height is not None:
+        u_height = max(1, u_height)
 
     primary_ip4_raw = device.get("primary_ip4")
     primary_ip4 = primary_ip4_raw["address"] if primary_ip4_raw else None

@@ -494,6 +494,16 @@ async def update_device(
 
     async def _do_work() -> tuple[int, dict[str, object]]:
         changes = to_netbox_changes(request)
+        if not changes:
+            # Nothing to change — short-circuit instead of PATCHing NetBox with
+            # an empty body (a wasted round-trip that still bumps last_updated
+            # and writes a no-op audit row). Treat as a client error.
+            return status.HTTP_400_BAD_REQUEST, {
+                "error": {
+                    "code": "NO_FIELDS",
+                    "message": "No editable fields supplied; nothing to update.",
+                }
+            }
         try:
             updated = await write_service.patch_with_attribution(
                 netbox_path=f"/api/dcim/devices/{device_id}/",

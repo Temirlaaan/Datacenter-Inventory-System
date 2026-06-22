@@ -168,14 +168,19 @@ async def test_get_key_drops_keys_without_kid_and_logs_warning(
     clean_env: None,
     auth_env: None,
     test_key: RSAKeyPair,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A JWKS payload with malformed entries (no `kid`) must be filtered AND logged.
 
     Silent drop would let signature verification fail mysteriously for tokens that
     happen to reference one of the dropped keys.
+
+    Uses ``structlog.testing.capture_logs`` rather than pytest's ``caplog``:
+    the app bridges structlog to stdlib logging via ``configure_logging``, but
+    that isn't called in unit tests, so structlog falls back to its default
+    ``PrintLogger`` (stdout) which ``caplog`` cannot see. ``capture_logs``
+    captures the event dicts directly, independent of structlog config.
     """
-    import logging
+    from structlog.testing import capture_logs
 
     from app.auth.jwks import JWKSCache
 
@@ -183,8 +188,8 @@ async def test_get_key_drops_keys_without_kid_and_logs_warning(
     payload = {"keys": [test_key.public_jwk, {"kty": "RSA", "n": "x", "e": "y"}]}
     with respx.mock(assert_all_called=True) as router:
         router.get(JWKS_URL).respond(json=payload)
-        with caplog.at_level(logging.WARNING):
+        with capture_logs() as logs:
             jwk = await cache.get_key(test_key.kid)
 
     assert jwk is not None
-    assert any("jwks_keys_missing_kid" in rec.message for rec in caplog.records)
+    assert any(entry.get("event") == "jwks_keys_missing_kid" for entry in logs)

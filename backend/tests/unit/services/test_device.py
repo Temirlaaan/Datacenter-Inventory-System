@@ -354,6 +354,13 @@ def test_to_device_data_returns_none_for_missing_device_type() -> None:
     assert data.u_height is None
 
 
+def test_to_device_data_floors_inline_u_height_at_one() -> None:
+    """A 0/negative height from bad NetBox data is floored to 1U, matching
+    ``_u_height_by_device_type``'s ``max(1, ...)`` (consistency fix)."""
+    assert to_device_data(_device(u_height=0)).u_height == 1
+    assert to_device_data(_device(u_height=4)).u_height == 4
+
+
 def test_to_device_data_returns_none_for_missing_role() -> None:
     data = to_device_data(_device())
     assert data.device_role is None
