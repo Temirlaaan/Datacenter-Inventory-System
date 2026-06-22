@@ -112,3 +112,33 @@ async def test_get_or_fetch_does_not_cache_a_failed_fetch() -> None:
     result = await cache.get_or_fetch("sites", fetcher)
     assert result == ["a"]
     assert fetcher.calls == 2
+
+
+async def test_get_or_fetch_evicts_expired_entries_on_miss() -> None:
+    # A cache keyed on free-form input (e.g. device search) must not grow
+    # without bound: expired keys are swept when a later miss inserts.
+    clock = _Clock()
+    cache: TTLCache = TTLCache(ttl_seconds=300, clock=clock)
+
+    await cache.get_or_fetch("query=a", _Fetcher(["a"]))
+    await cache.get_or_fetch("query=b", _Fetcher(["b"]))
+    assert len(cache._entries) == 2
+
+    clock.now += 301  # both existing entries are now expired
+    await cache.get_or_fetch("query=c", _Fetcher(["c"]))
+
+    # The two stale keys were evicted; only the fresh one remains.
+    assert set(cache._entries) == {"query=c"}
+
+
+async def test_get_or_fetch_keeps_unexpired_entries_when_sweeping() -> None:
+    clock = _Clock()
+    cache: TTLCache = TTLCache(ttl_seconds=300, clock=clock)
+
+    await cache.get_or_fetch("query=a", _Fetcher(["a"]))
+    clock.now += 301  # "query=a" now expired
+    await cache.get_or_fetch("query=b", _Fetcher(["b"]))  # sweeps "query=a"
+    clock.now += 10  # "query=b" still fresh
+    await cache.get_or_fetch("query=c", _Fetcher(["c"]))
+
+    assert set(cache._entries) == {"query=b", "query=c"}

@@ -16,33 +16,20 @@ Three OIDC flow endpoints + the dashboard placeholder.
 from __future__ import annotations
 
 import asyncio
-import secrets
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
 
-import httpx
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from fastapi.templating import Jinja2Templates
-from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.admin.audit import query_audit_log_csv
 from app.api.v1.admin.sessions import ForceCloseRequest, force_close_session
 from app.api.v1.devices import AddCommentRequest, add_comment, get_comment_service
 from app.auth.dependencies import AuthUser
-from app.auth.keycloak_admin import (
-    KeycloakAdminError,
-    KeycloakAdminNotConfigured,
-    KeycloakUser,
-    get_keycloak_admin_client,
-)
-from app.config import get_settings
 from app.db.repositories.audit_log import AuditLogQueryFilters, AuditLogRepository
 from app.db.repositories.dashboard import DashboardRepository
 from app.db.repositories.qr_batch import QRBatchRepository
@@ -83,219 +70,27 @@ from app.services.qr.lifecycle import (
 )
 from app.services.shift_session import SessionAlreadyActive, ShiftSessionService
 from app.web.auth import (
-    SESSION_COOKIE_MAX_AGE_SECONDS,
     SESSION_COOKIE_NAME,
     WebAdminUser,
-    build_session_cookie_payload,
     decode_session_cookie,
-    encode_session_cookie,
     require_web_admin,
     verify_csrf_token,
 )
+from app.web.oidc import router as oidc_router
+from app.web.sse import router as sse_router
+from app.web.templating import templates
+from app.web.users import router as users_router
 
 logger = structlog.get_logger()
 
 router = APIRouter()
 
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
-templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-
-# Short-lived cookies set on /web/login and consumed by /web/oidc/callback for
-# OIDC state + nonce verification. Max-Age = 5 minutes (the user shouldn't take
-# longer than that to authenticate at Keycloak).
-_OIDC_STATE_COOKIE = "__dcinv_oidc_state"
-_OIDC_NONCE_COOKIE = "__dcinv_oidc_nonce"
-_OIDC_NEXT_COOKIE = "__dcinv_oidc_next"
-_OIDC_FLOW_COOKIE_MAX_AGE_SECONDS = 5 * 60
-
-
-def _keycloak_redirect_uri(request: Request) -> str:
-    """The redirect URI configured for the confidential client in Keycloak.
-
-    Built from the inbound request's scheme + netloc so it works in both
-    dev (http://localhost:8000) and prod (https://...) without a separate
-    Settings field.
-    """
-    return f"{request.url.scheme}://{request.url.netloc}/web/oidc/callback"
-
-
-@router.get("/login")
-async def login(request: Request, next: str = "/web/") -> RedirectResponse:
-    """Initiate the OIDC authorization-code flow.
-
-    Generates random ``state`` + ``nonce`` tokens, stores them as short-lived
-    cookies that the callback handler verifies, and 302s to Keycloak's auth
-    endpoint with ``response_type=code``.
-    """
-    settings = get_settings()
-    state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
-    params = {
-        "client_id": settings.keycloak_web_client_id,
-        "response_type": "code",
-        "scope": "openid profile email",
-        "redirect_uri": _keycloak_redirect_uri(request),
-        "state": state,
-        "nonce": nonce,
-    }
-    keycloak_auth_url = (
-        f"{settings.keycloak_issuer}/protocol/openid-connect/auth?{urlencode(params)}"
-    )
-    response = RedirectResponse(url=keycloak_auth_url, status_code=status.HTTP_302_FOUND)
-    # ``secure=settings.cookie_secure`` is True in production (set
-    # COOKIE_SECURE=true behind TLS); False in dev so localhost http://
-    # actually receives the cookie. The browser drops Secure-flagged cookies
-    # over plain HTTP, so flipping the flag wrong in dev would silently
-    # break the OIDC flow.
-    for cookie_name, cookie_value in (
-        (_OIDC_STATE_COOKIE, state),
-        (_OIDC_NONCE_COOKIE, nonce),
-        (_OIDC_NEXT_COOKIE, next),
-    ):
-        response.set_cookie(
-            cookie_name,
-            cookie_value,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            max_age=_OIDC_FLOW_COOKIE_MAX_AGE_SECONDS,
-        )
-    return response
-
-
-@router.get("/oidc/callback", response_model=None)
-async def oidc_callback(
-    request: Request, code: str = "", state: str = ""
-) -> RedirectResponse | HTMLResponse:
-    """Receive the OIDC authorization code, exchange for tokens, set the
-    encrypted session cookie, redirect to the next page.
-
-    Failure modes (all → 400 HTML page so the operator sees the problem):
-    - missing ``code`` / ``state`` query params
-    - ``state`` cookie missing or mismatched (CSRF guard)
-    - Keycloak token endpoint returns non-200
-    - id_token decode fails or ``nonce`` claim doesn't match the cookie
-    """
-    expected_state = request.cookies.get(_OIDC_STATE_COOKIE)
-    expected_nonce = request.cookies.get(_OIDC_NONCE_COOKIE)
-    next_path = request.cookies.get(_OIDC_NEXT_COOKIE, "/web/")
-    if not code or not state or expected_state is None or state != expected_state:
-        # Diagnostic fields split out so production logs distinguish:
-        #  - has_state_query=False → Keycloak didn't echo state back (rare)
-        #  - has_state_cookie=False → /web/login Set-Cookie never reached the
-        #    browser OR browser dropped it OR it wasn't sent on the callback
-        #    (Secure flag w/ http upstream, Path mismatch, expired flow, etc.)
-        #  - state_match=False with both present → cross-tab race or stale
-        #    callback URL.
-        # ``is_https`` confirms uvicorn's --proxy-headers picked up
-        # X-Forwarded-Proto from the reverse proxy (drives both _keycloak_redirect_uri
-        # AND the Secure-cookie flow). ``cookie_names_present`` shows whether ANY
-        # cookies survived the round-trip — empty list = full cookie drop.
-        logger.warning(
-            "web_oidc_callback_state_mismatch",
-            has_code=bool(code),
-            has_state_query=bool(state),
-            has_state_cookie=expected_state is not None,
-            state_match=(expected_state is not None and state == expected_state),
-            is_https=request.url.scheme == "https",
-            cookie_names_present=sorted(request.cookies.keys()),
-        )
-        return HTMLResponse(
-            "OIDC callback rejected: state mismatch (likely CSRF or expired login).",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    settings = get_settings()
-    token_url = f"{settings.keycloak_issuer}/protocol/openid-connect/token"
-    payload = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": _keycloak_redirect_uri(request),
-        "client_id": settings.keycloak_web_client_id,
-        "client_secret": settings.keycloak_web_client_secret.get_secret_value(),
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(token_url, data=payload)
-    except httpx.HTTPError as exc:
-        logger.error("web_oidc_token_exchange_failed", error=repr(exc))
-        return HTMLResponse(
-            "OIDC callback rejected: token exchange failed.",
-            status_code=status.HTTP_502_BAD_GATEWAY,
-        )
-    if resp.status_code != 200:
-        logger.warning(
-            "web_oidc_token_exchange_non_200",
-            status=resp.status_code,
-            body=resp.text[:200],
-        )
-        return HTMLResponse(
-            "OIDC callback rejected: Keycloak rejected the code.",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    tokens = resp.json()
-    id_token = tokens.get("id_token")
-    if not id_token:
-        return HTMLResponse(
-            "OIDC callback rejected: no id_token in Keycloak response.",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-    # Skip signature verification here — Keycloak just signed it 100ms ago
-    # and the upstream TLS transport already authenticated the token endpoint.
-    # The JWT bearer path (app/auth/) does full JWKS verification for inbound
-    # API calls; this callback path trusts its own freshly-completed handshake.
-    try:
-        claims = jwt.get_unverified_claims(id_token)
-    except Exception:
-        return HTMLResponse(
-            "OIDC callback rejected: id_token parse failed.",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-    if claims.get("nonce") != expected_nonce:
-        logger.warning("web_oidc_callback_nonce_mismatch")
-        return HTMLResponse(
-            "OIDC callback rejected: nonce mismatch (replay guard).",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    sub_raw = claims.get("sub")
-    email = claims.get("email", "")
-    realm_access = claims.get("realm_access") or {}
-    roles = tuple(realm_access.get("roles", []))
-    from uuid import UUID
-
-    user = build_session_cookie_payload(sub=UUID(sub_raw), email=email, roles=roles)
-    cookie_value = encode_session_cookie(user)
-
-    response = RedirectResponse(url=next_path, status_code=status.HTTP_302_FOUND)
-    response.set_cookie(
-        SESSION_COOKIE_NAME,
-        cookie_value,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
-    )
-    # Clean up the short-lived OIDC-flow cookies; the browser doesn't need
-    # them past this exchange.
-    for cookie in (_OIDC_STATE_COOKIE, _OIDC_NONCE_COOKIE, _OIDC_NEXT_COOKIE):
-        response.delete_cookie(cookie)
-    return response
-
-
-@router.get("/logout")
-async def logout(request: Request) -> RedirectResponse:
-    """Clear the session cookie + 302 to Keycloak's end-session so the
-    browser also drops its upstream SSO cookie."""
-    settings = get_settings()
-    end_session = f"{settings.keycloak_issuer}/protocol/openid-connect/logout"
-    # post_logout_redirect_uri lands the user back on /web/login afterwards.
-    post_logout = f"{request.url.scheme}://{request.url.netloc}/web/login"
-    end_session_url = f"{end_session}?{urlencode({'post_logout_redirect_uri': post_logout, 'client_id': settings.keycloak_web_client_id})}"
-    response = RedirectResponse(url=end_session_url, status_code=status.HTTP_302_FOUND)
-    response.delete_cookie(SESSION_COOKIE_NAME)
-    return response
+# OIDC redirect flow, dashboard SSE stream, and the users surface live in
+# dedicated modules to keep this aggregator focused on the remaining page
+# handlers; mount their routers here.
+router.include_router(oidc_router)
+router.include_router(sse_router)
+router.include_router(users_router)
 
 
 # ---------- Auth-failure → redirect/intermediate-page handlers ----------------
@@ -365,168 +160,6 @@ async def dashboard(
                 max((r.id for r in activity_rows if r.id is not None), default=0)
             ),
         },
-    )
-
-
-# ---------- GET /web/dashboard/stream — SSE activity feed (2026-06-10) ------
-#
-# Push new audit_log rows to the dashboard so the operator doesn't have to F5.
-# Mechanism: poll-and-push at 5s cadence; each tick queries the last 20 rows,
-# emits those with id > last_sent_id. PG LISTEN/NOTIFY would be tighter but
-# needs a DB trigger + long-lived asyncpg connection per client; polling is
-# multi-replica safe with zero schema change. Swap is internal-only if/when
-# we want true realtime.
-#
-# The endpoint is cookie-auth (require_web_admin) and /web/* is already in
-# the rate-limit UNLIMITED prefix list, so long-lived connections don't
-# burn a per-minute budget.
-
-_SSE_TICK_INTERVAL_SECONDS = 5.0
-_SSE_HEARTBEAT_EVERY_TICKS = 3  # 15s — beats nginx's default 60s idle timeout
-_SSE_PAGE_SIZE = 20
-# Cap pages walked per tick so a runaway burst (or an attacker mass-
-# triggering audit rows) can't make one tick allocate unbounded memory.
-# 10 pages * 20 = 200 rows per tick is way above any realistic admin-action burst.
-_SSE_MAX_PAGES_PER_TICK = 10
-# On a tick that raised, back off proportionally so a sustained DB outage
-# doesn't spam logs at 5s cadence.
-_SSE_ERROR_BACKOFF_SECONDS = 30.0
-
-
-def _format_sse_event(*, event: str, data: str) -> bytes:
-    """Serialise one SSE message.
-
-    SSE spec: each newline in the payload must start a fresh ``data:``
-    line, and a single blank line terminates the event. Single-line JSON
-    means we don't normally hit this, but defensive split-and-rejoin so a
-    future field with an embedded ``\\n`` doesn't corrupt the frame.
-    """
-    data_lines = "\n".join(f"data: {part}" for part in data.split("\n"))
-    return f"event: {event}\n{data_lines}\n\n".encode()
-
-
-def _activity_row_to_json(row: AuditLogEntry) -> dict[str, object]:
-    """Serialise one audit row for the SSE payload — same shape the dashboard
-    template renders, minus the JSONB diffs (kept compact for the stream)."""
-    return {
-        "id": row.id,
-        "timestamp": row.timestamp.isoformat(),
-        "user_email": row.user_email,
-        "operation": row.operation,
-        "entity_type": row.entity_type,
-        "entity_id": row.entity_id,
-        "result": row.result.value,
-    }
-
-
-async def _dashboard_stream_generator(
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    last_seen_id: int,
-) -> AsyncIterator[bytes]:
-    """Yield SSE bytes: ``audit`` events for new rows, ``ping`` heartbeats
-    every ``_SSE_HEARTBEAT_EVERY_TICKS`` ticks.
-
-    Each tick paginates from page 1 until a page contains a row at-or-below
-    ``watermark`` or the page cap is hit (``_SSE_MAX_PAGES_PER_TICK``).
-    This catches bursts larger than a single ``_SSE_PAGE_SIZE`` page (e.g.
-    bulk-decommissioning 50 devices generates ~50 audit rows inside one
-    5s tick window) without unbounded memory.
-
-    DB / network errors are caught per-tick: the generator logs and backs
-    off ``_SSE_ERROR_BACKOFF_SECONDS`` rather than unwinding and forcing
-    EventSource to reconnect (which produces 5xx noise on sustained
-    outages).
-    """
-    import json
-
-    tick = 0
-    watermark = last_seen_id
-    while True:
-        try:
-            new_rows = await _collect_new_audit_rows(sessionmaker, watermark)
-        except Exception as exc:
-            logger.warning(
-                "dashboard_stream_tick_failed",
-                error=type(exc).__name__,
-                watermark=watermark,
-            )
-            await asyncio.sleep(_SSE_ERROR_BACKOFF_SECONDS)
-            continue
-
-        # Emit oldest-first so the client can prepend in order — pages
-        # returned newest-first, so reverse the accumulated list.
-        for row in reversed(new_rows):
-            yield _format_sse_event(
-                event="audit", data=json.dumps(_activity_row_to_json(row))
-            )
-            assert row.id is not None  # narrowed by the collector; quiets mypy
-            watermark = row.id
-
-        tick += 1
-        if tick % _SSE_HEARTBEAT_EVERY_TICKS == 0:
-            yield _format_sse_event(event="ping", data="")
-
-        await asyncio.sleep(_SSE_TICK_INTERVAL_SECONDS)
-
-
-async def _collect_new_audit_rows(
-    sessionmaker: async_sessionmaker[AsyncSession], watermark: int
-) -> list[AuditLogEntry]:
-    """Page through ``audit_log`` newest-first, collecting rows with
-    ``id > watermark``. Stops at the first page containing a row at-or-below
-    the watermark (we've covered every new row) or at the page cap."""
-    async with sessionmaker() as db:
-        repo = AuditLogRepository(db)
-        accumulated: list[AuditLogEntry] = []
-        for page in range(1, _SSE_MAX_PAGES_PER_TICK + 1):
-            rows, has_more = await repo.query(
-                filters=AuditLogQueryFilters(),
-                page=page,
-                page_size=_SSE_PAGE_SIZE,
-            )
-            if not rows:
-                break
-            new_on_page = [
-                r for r in rows if r.id is not None and r.id > watermark
-            ]
-            accumulated.extend(new_on_page)
-            # Page held some row at-or-below watermark → we've seen everything new.
-            if len(new_on_page) < len(rows):
-                break
-            if not has_more:
-                break
-        return accumulated
-
-
-@router.get("/dashboard/stream")
-async def dashboard_stream(
-    last_event_id: int = Query(default=0, ge=0, alias="last_id"),
-    user: WebAdminUser = Depends(require_web_admin),
-) -> StreamingResponse:
-    """``text/event-stream`` of new audit_log rows for the dashboard feed.
-
-    ``last_id`` query param (set by the template from the highest id of the
-    server-rendered feed) prevents re-delivering rows the user already sees.
-    The browser's native ``Last-Event-ID`` reconnect header is not honoured
-    here — too easy to confuse with the dashboard's server-side watermark;
-    use the explicit query param.
-    """
-    _ = user  # role-gating side-effect only
-    headers = {
-        # Disable buffering everywhere — nginx default buffers SSE into 4k
-        # chunks which destroys the realtime UX.
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",
-        "Content-Type": "text/event-stream",
-    }
-    return StreamingResponse(
-        _dashboard_stream_generator(
-            sessionmaker=get_sessionmaker(),
-            last_seen_id=last_event_id,
-        ),
-        media_type="text/event-stream",
-        headers=headers,
     )
 
 
@@ -2549,97 +2182,3 @@ async def web_qr_search(
         },
     )
 
-
-# ---------- /web/users/ — list + detail (read-only over Keycloak admin) ------
-
-
-_WEB_USERS_PAGE_SIZE = 20
-
-
-@router.get("/users/", response_class=HTMLResponse)
-async def web_users_list(
-    request: Request,
-    page: int = Query(default=1, ge=1),
-    search: str | None = Query(default=None, max_length=255),
-    user: WebAdminUser = Depends(require_web_admin),
-) -> HTMLResponse:
-    """Paginated user list via Keycloak admin REST API. Renders a
-    "not configured" notice when ``KEYCLOAK_ADMIN_CLIENT_SECRET`` is
-    unset, so the page degrades gracefully on hosts that haven't yet
-    set up the admin client.
-    """
-    client = get_keycloak_admin_client()
-    users: list[KeycloakUser] = []
-    has_more = False
-    error: str | None = None
-    not_configured = False
-    try:
-        users, has_more = await client.list_users(
-            page=page, page_size=_WEB_USERS_PAGE_SIZE, search=search or None
-        )
-    except KeycloakAdminNotConfigured:
-        not_configured = True
-    except KeycloakAdminError as exc:
-        error = f"Keycloak admin API error: {exc}"
-    return templates.TemplateResponse(
-        request,
-        "users/list.html",
-        {
-            "user_email": user.email,
-            "users": users,
-            "page": page,
-            "has_more": has_more,
-            "has_prev": page > 1,
-            "search": search or "",
-            "not_configured": not_configured,
-            "error": error,
-        },
-    )
-
-
-@router.get("/users/{user_id}", response_class=HTMLResponse)
-async def web_users_detail(
-    request: Request,
-    user_id: str,
-    user: WebAdminUser = Depends(require_web_admin),
-) -> HTMLResponse:
-    """Single-user detail page: identity, enable state, realm roles,
-    created-at timestamp. Read-only; write operations are out of scope
-    for this slice (would need their own audit-row + CSRF flow)."""
-    client = get_keycloak_admin_client()
-    try:
-        target = await client.get_user(user_id)
-    except KeycloakAdminNotConfigured:
-        return templates.TemplateResponse(
-            request,
-            "users/list.html",
-            {
-                "user_email": user.email,
-                "users": [],
-                "page": 1,
-                "has_more": False,
-                "has_prev": False,
-                "search": "",
-                "not_configured": True,
-                "error": None,
-            },
-        )
-    except KeycloakAdminError as exc:
-        return templates.TemplateResponse(
-            request,
-            "_not_found.html",
-            {"user_email": user.email, "resource": f"user {user_id} ({exc})"},
-            status_code=status.HTTP_502_BAD_GATEWAY,
-        )
-    if target is None:
-        return templates.TemplateResponse(
-            request,
-            "_not_found.html",
-            {"user_email": user.email, "resource": f"user {user_id}"},
-            status_code=status.HTTP_404_NOT_FOUND,
-        )
-    return templates.TemplateResponse(
-        request,
-        "users/detail.html",
-        {"user_email": user.email, "target": target},
-    )
