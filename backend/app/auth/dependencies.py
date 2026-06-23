@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,19 +96,40 @@ def _build_auth_user(claims: dict[str, object]) -> AuthUser:
     )
 
 
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
 async def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> AuthUser:
-    """Extract Bearer token, verify against Keycloak JWKS, return AuthUser.
+    """Resolve the caller from a Keycloak bearer token OR the web session cookie.
 
-    Cache + settings are pulled from their lru_cache singletons rather than via
-    Depends() so the function is callable directly in unit tests. Same pattern as
-    `app.db.session.get_session`. Tests override by clearing those caches and
-    re-binding env vars (see `clean_env`) or by monkeypatching `get_jwks_cache`.
+    Two auth paths converge on one ``AuthUser`` so every ``/api/v1`` endpoint
+    (and its ``require_role`` gates) serves both clients without per-endpoint
+    changes:
+
+    - **Bearer** (native mobile app) — verify the access token against Keycloak
+      JWKS. Takes precedence when an ``Authorization`` header is present.
+    - **Cookie** (browser SPA / web) — the Fernet-encrypted ``dcinv_admin_session``
+      cookie issued by the OIDC web flow. Identity only; no Keycloak access token
+      is needed because the service calls NetBox with its own token and uses the
+      user identity solely for role-gating + attribution. CSRF is enforced on
+      cookie-authenticated unsafe methods (bearer auth is CSRF-immune).
+
+    Cache + settings come from their lru_cache singletons so the bearer path
+    stays directly callable in unit tests.
     """
-    if creds is None:
-        raise _unauthorized("missing bearer token")
-    token = creds.credentials
+    if creds is not None:
+        return await _user_from_bearer(creds.credentials)
+    cookie_user = _user_from_cookie(request)
+    if cookie_user is not None:
+        return cookie_user
+    raise _unauthorized("missing bearer token or session cookie")
+
+
+async def _user_from_bearer(token: str) -> AuthUser:
+    """Verify a Keycloak access token against cached JWKS → ``AuthUser``."""
     cache = get_jwks_cache()
     jwk = await _resolve_jwk(token, cache)
     try:
@@ -123,6 +144,36 @@ async def get_current_user(
     except JWTError as e:
         raise _unauthorized("invalid token") from e
     return _build_auth_user(claims)
+
+
+def _user_from_cookie(request: Request) -> AuthUser | None:
+    """Resolve identity from the encrypted web session cookie, or ``None``.
+
+    Returns ``None`` when no (valid) cookie is present so the caller can fall
+    through to a 401. Enforces CSRF (``X-CSRF-Token`` vs the cookie's token) on
+    state-changing methods — cookie auth is ambient, unlike a bearer header.
+    Local import keeps the ``app.auth -> app.web`` edge lazy (no import cycle).
+    """
+    from app.web.auth import (
+        SESSION_COOKIE_NAME,
+        decode_session_cookie,
+        verify_csrf_token,
+    )
+
+    raw = request.cookies.get(SESSION_COOKIE_NAME)
+    if raw is None:
+        return None
+    web_user = decode_session_cookie(raw)
+    if web_user is None:
+        return None
+    if request.method not in _SAFE_METHODS:
+        verify_csrf_token(request.headers.get("X-CSRF-Token"), web_user.csrf_token)
+    return AuthUser(
+        sub=str(web_user.sub),
+        email=web_user.email,
+        roles=web_user.roles,
+        session_id=None,
+    )
 
 
 def require_role(role: str) -> Callable[[AuthUser], Awaitable[AuthUser]]:
